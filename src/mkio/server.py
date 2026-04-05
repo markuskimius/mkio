@@ -125,6 +125,9 @@ async def _on_startup(app: web.Application) -> None:
     # Monitors: service_name -> set of WebSocketResponse
     app.setdefault("monitors", defaultdict(set))
 
+    # Track all active WebSocket connections for clean shutdown
+    app.setdefault("websockets", set())
+
     # Database
     db = Database(
         path=cfg.get("db_path", "mkio.db"),
@@ -174,6 +177,10 @@ async def _on_startup(app: web.Application) -> None:
 
 
 async def _on_shutdown(app: web.Application) -> None:
+    # 0. Close all WebSocket connections so handlers can exit
+    for ws in set(app.get("websockets", set())):
+        await ws.close()
+
     # 1. Stop services
     for svc in app.get("services", {}).values():
         await svc.stop()
@@ -215,6 +222,7 @@ async def _notify_monitors(
 async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse()
     await ws.prepare(request)
+    request.app["websockets"].add(ws)
 
     services: dict[str, Service] = request.app["services"]
     monitors: dict[str, set[web.WebSocketResponse]] = request.app["monitors"]
@@ -294,5 +302,6 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
         # Remove from monitor sets
         for svc_name in monitoring:
             monitors[svc_name].discard(ws)
+        request.app["websockets"].discard(ws)
 
     return ws

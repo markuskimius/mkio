@@ -59,7 +59,7 @@ class WriteBatcher:
         if self._task:
             if drain:
                 try:
-                    await asyncio.wait_for(self._task, timeout=2.0)
+                    await asyncio.wait_for(self._task, timeout=0.5)
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     self._task.cancel()
                     try:
