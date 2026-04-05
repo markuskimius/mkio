@@ -14,7 +14,7 @@ columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", event = "TEXT", order_id =
 append_only = true
 
 # --- Transaction service (all order operations at one endpoint) ---
-# Client sends "op" field to select which operation: "place", "cancel", "update_qty"
+# Client sends "op" field to select which operation: "place" or "update_status"
 
 [services.orders]
 type = "transaction"
@@ -24,11 +24,9 @@ place = [
     { table = "orders", op_type = "insert", fields = ["side", "symbol", "qty", "price"] },
     { table = "audit_log", op_type = "insert", fields = ["event"] },
 ]
-cancel = [
-    { table = "orders", op_type = "delete", key = ["id"] },
-]
-update_qty = [
-    { table = "orders", op_type = "update", key = ["id"], fields = ["qty"] },
+update_status = [
+    { table = "orders", op_type = "update", key = ["id"], fields = ["status"] },
+    { table = "audit_log", op_type = "insert", fields = ["event"] },
 ]
 
 # --- Live data services ---

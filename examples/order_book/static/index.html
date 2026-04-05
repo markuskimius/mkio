@@ -6,7 +6,7 @@
   <title>mkio Order Book</title>
   <script src="/mkio.js"></script>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; background: #0f172a; color: #e2e8f0; }
+    body { font-family: system-ui, sans-serif; max-width: 1000px; margin: 2rem auto; padding: 0 1rem; background: #0f172a; color: #e2e8f0; }
     h1, h2 { color: #f1f5f9; }
     table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
     th, td { border: 1px solid #334155; padding: 8px; text-align: left; }
@@ -15,13 +15,29 @@
     form { display: flex; gap: 0.5rem; margin: 1rem 0; flex-wrap: wrap; }
     input, select { padding: 6px 10px; border: 1px solid #475569; border-radius: 4px; background: #1e293b; color: #e2e8f0; font-size: inherit; }
     input::placeholder { color: #64748b; }
-    button { padding: 6px 14px; background: #2563eb; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 500; }
+    button { padding: 6px 14px; background: #2563eb; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 500; font-size: 0.8rem; }
     button:hover { background: #3b82f6; }
     #status { padding: 4px 8px; border-radius: 4px; font-size: 0.875rem; }
     .connected { background: #064e3b; color: #6ee7b7; }
     .disconnected { background: #450a0a; color: #fca5a5; }
     .side-buy { color: #60a5fa; font-weight: 600; }
     .side-sell { color: #f87171; font-weight: 600; }
+    .status-pending { color: #fbbf24; }
+    .status-accepted { color: #34d399; }
+    .status-filled { color: #60a5fa; }
+    .status-rejected { color: #f87171; }
+    .status-cancelled { color: #94a3b8; }
+    .actions { white-space: nowrap; }
+    .actions button { padding: 3px 8px; margin: 0 2px; font-size: 0.75rem; }
+    .btn-accept { background: #059669; }
+    .btn-accept:hover { background: #10b981; }
+    .btn-fill { background: #2563eb; }
+    .btn-fill:hover { background: #3b82f6; }
+    .btn-reject { background: #dc2626; }
+    .btn-reject:hover { background: #ef4444; }
+    .btn-cancel { background: #6b7280; }
+    .btn-cancel:hover { background: #9ca3af; }
+    .btn-place { font-size: inherit; }
   </style>
 </head>
 <body>
@@ -38,13 +54,13 @@
     <input name="symbol" placeholder="Symbol" required autocomplete="off">
     <input name="qty" type="number" placeholder="Qty" required autocomplete="off">
     <input name="price" type="number" step="0.01" placeholder="Price" required autocomplete="off">
-    <button type="submit">Place Order</button>
+    <button class="btn-place" type="submit">Place Order</button>
   </form>
 
   <h2>Live Orders</h2>
   <table>
     <thead>
-      <tr><th>ID</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Status</th></tr>
+      <tr><th>ID</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Status</th><th>Actions</th></tr>
     </thead>
     <tbody id="orders-body"></tbody>
   </table>
@@ -64,14 +80,37 @@
     const ordersMap = new Map();
     const tbody = document.getElementById('orders-body');
 
+    // Which actions are available for each status
+    const STATUS_ACTIONS = {
+      pending:   ['accept', 'reject', 'cancel'],
+      accepted:  ['fill', 'cancel'],
+      filled:    [],
+      rejected:  [],
+      cancelled: [],
+    };
+
     function renderOrders() {
       tbody.innerHTML = '';
       for (const row of ordersMap.values()) {
         const tr = document.createElement('tr');
         const sideClass = row.side === 'Buy' ? 'side-buy' : 'side-sell';
-        tr.innerHTML = `<td>${row.id}</td><td class="${sideClass}">${row.side}</td><td>${row.symbol}</td><td>${row.qty}</td><td>${row.price}</td><td>${row.status}</td>`;
+        const statusClass = 'status-' + (row.status || '').toLowerCase();
+        const actions = STATUS_ACTIONS[row.status] || [];
+        const actionButtons = actions.map(a =>
+          `<button class="btn-${a}" onclick="updateStatus(${row.id}, '${a}')">${a[0].toUpperCase() + a.slice(1)}</button>`
+        ).join('');
+        tr.innerHTML = `<td>${row.id}</td><td class="${sideClass}">${row.side}</td><td>${row.symbol}</td><td>${row.qty}</td><td>${row.price}</td><td class="${statusClass}">${row.status}</td><td class="actions">${actionButtons}</td>`;
         tbody.appendChild(tr);
       }
+    }
+
+    async function updateStatus(id, action) {
+      const statusMap = { accept: 'accepted', reject: 'rejected', fill: 'filled', cancel: 'cancelled' };
+      await client.send('orders', {
+        id: id,
+        status: statusMap[action],
+        event: 'order_' + action + 'ed',
+      }, { op: 'update_status' });
     }
 
     client.connect().then(() => {
