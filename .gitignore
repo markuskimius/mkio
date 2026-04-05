@@ -9,3 +9,6 @@ build/
 *~
 .pytest_cache/
 .eggs/
+*.db
+*.db-wal
+*.db-shm

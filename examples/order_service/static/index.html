@@ -25,7 +25,11 @@
 
   <h2>Place Order</h2>
   <form id="order-form">
-    <input name="id" placeholder="Order ID" required>
+    <select name="side" required>
+      <option value="">Side</option>
+      <option value="Buy">Buy</option>
+      <option value="Sell">Sell</option>
+    </select>
     <input name="symbol" placeholder="Symbol" required>
     <input name="qty" type="number" placeholder="Qty" required>
     <input name="price" type="number" step="0.01" placeholder="Price" required>
@@ -35,7 +39,7 @@
   <h2>Live Orders</h2>
   <table>
     <thead>
-      <tr><th>ID</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Status</th></tr>
+      <tr><th>ID</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Status</th></tr>
     </thead>
     <tbody id="orders-body"></tbody>
   </table>
@@ -59,7 +63,7 @@
       tbody.innerHTML = '';
       for (const row of ordersMap.values()) {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${row.id}</td><td>${row.symbol}</td><td>${row.qty}</td><td>${row.price}</td><td>${row.status}</td>`;
+        tr.innerHTML = `<td>${row.id}</td><td>${row.side}</td><td>${row.symbol}</td><td>${row.qty}</td><td>${row.price}</td><td>${row.status}</td>`;
         tbody.appendChild(tr);
       }
     }
@@ -90,12 +94,11 @@
       e.preventDefault();
       const form = e.target;
       const data = {
-        id: form.id.value,
+        side: form.side.value,
         symbol: form.symbol.value,
         qty: parseInt(form.qty.value),
         price: parseFloat(form.price.value),
         event: 'order_placed',
-        order_id: form.id.value,
       };
       await client.send('orders', data, { op: 'place' });
       form.reset();

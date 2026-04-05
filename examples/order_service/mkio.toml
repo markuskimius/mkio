@@ -7,7 +7,7 @@ batch_max_wait_ms = 2.0
 # --- Database schema ---
 
 [tables.orders]
-columns = { id = "TEXT PRIMARY KEY", side = "TEXT", symbol = "TEXT NOT NULL", qty = "INTEGER", price = "REAL DEFAULT 0", status = "TEXT DEFAULT 'pending'" }
+columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", side = "TEXT NOT NULL", symbol = "TEXT NOT NULL", qty = "INTEGER", price = "REAL DEFAULT 0", status = "TEXT DEFAULT 'pending'" }
 
 [tables.audit_log]
 columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", event = "TEXT", order_id = "TEXT" }
@@ -21,8 +21,8 @@ type = "transaction"
 
 [services.orders.ops]
 place = [
-    { table = "orders", op_type = "insert", fields = ["id", "side", "symbol", "qty", "price"] },
-    { table = "audit_log", op_type = "insert", fields = ["event", "order_id"] },
+    { table = "orders", op_type = "insert", fields = ["side", "symbol", "qty", "price"] },
+    { table = "audit_log", op_type = "insert", fields = ["event"] },
 ]
 cancel = [
     { table = "orders", op_type = "delete", key = ["id"] },
@@ -37,7 +37,7 @@ update_qty = [
 type = "subpub"
 primary_table = "orders"
 key = "id"
-filterable = ["status", "symbol", "side"]
+filterable = ["status", "symbol"]
 change_log_size = 10000
 
 [services.audit_feed]
@@ -48,7 +48,7 @@ buffer_size = 10000
 [services.all_orders]
 type = "query"
 primary_table = "orders"
-filterable = ["status", "symbol", "side"]
+filterable = ["status", "symbol"]
 change_log_size = 10000
 
 # --- Static file serving ---
