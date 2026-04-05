@@ -169,6 +169,7 @@ class WriteBatcher:
                         cursor = await conn.execute(op.sql, params)
                         if op.op_type != "delete":
                             row = await cursor.fetchone()
+                            await cursor.close()
                             returned_rows.append((op, dict(row) if row else req.data))
                         else:
                             returned_rows.append((op, req.data))
