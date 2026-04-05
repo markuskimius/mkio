@@ -233,6 +233,74 @@ async def test_reject_after_stop(db, bus):
         )
 
 
+async def test_cross_op_bind(writer, db):
+    """Bound params should be resolved from a prior op's returned row."""
+    # orders uses TEXT PK, audit_log has AUTOINCREMENT id
+    # Insert order, then insert audit with order_id bound to orders.id
+    INSERT_ORDER_AUTO = CompiledOp(
+        table="orders",
+        op_type="insert",
+        sql="INSERT INTO orders (id, symbol, qty) VALUES (?, ?, ?) RETURNING *",
+        param_names=("id", "symbol", "qty"),
+    )
+    INSERT_AUDIT_BOUND = CompiledOp(
+        table="audit_log",
+        op_type="insert",
+        sql="INSERT INTO audit_log (event, order_id) VALUES (?, ?) RETURNING *",
+        param_names=("event", "order_id"),
+        bind={"order_id": (0, "id")},  # order_id comes from op 0's "id" field
+    )
+
+    result = await writer.submit(
+        ops=(INSERT_ORDER_AUTO, INSERT_AUDIT_BOUND),
+        params_list=(
+            ("ORD1", "AAPL", 100),
+            ("order_placed", None),  # order_id is None placeholder, resolved by bind
+        ),
+        data={"id": "ORD1", "symbol": "AAPL", "qty": 100, "event": "order_placed"},
+    )
+    assert result["ok"] is True
+
+    audits = await db.read("SELECT * FROM audit_log")
+    assert len(audits) == 1
+    assert audits[0]["order_id"] == "ORD1"
+    assert audits[0]["event"] == "order_placed"
+
+
+async def test_cross_op_bind_autoincrement(writer, db):
+    """Bound params should capture autoincrement IDs from prior ops."""
+    # Use a table with autoincrement to verify the generated ID flows through
+    INSERT_AUDIT_FIRST = CompiledOp(
+        table="audit_log",
+        op_type="insert",
+        sql="INSERT INTO audit_log (event) VALUES (?) RETURNING *",
+        param_names=("event",),
+    )
+    INSERT_AUDIT_REF = CompiledOp(
+        table="audit_log",
+        op_type="insert",
+        sql="INSERT INTO audit_log (event, order_id) VALUES (?, ?) RETURNING *",
+        param_names=("event", "order_id"),
+        bind={"order_id": (0, "id")},  # bind to autoincrement id of first insert
+    )
+
+    result = await writer.submit(
+        ops=(INSERT_AUDIT_FIRST, INSERT_AUDIT_REF),
+        params_list=(
+            ("first_event",),
+            ("second_event", None),
+        ),
+        data={"event": "first_event"},
+    )
+    assert result["ok"] is True
+
+    audits = await db.read("SELECT * FROM audit_log ORDER BY id")
+    assert len(audits) == 2
+    # Second audit's order_id should be the first audit's autoincrement id
+    # order_id is TEXT column so SQLite stores it as string
+    assert str(audits[1]["order_id"]) == str(audits[0]["id"])
+
+
 async def test_change_event_includes_db_defaults(writer, bus):
     """ChangeEvent row should include DB-generated defaults and autoincrement IDs."""
     q = bus.subscribe(["audit_log"])

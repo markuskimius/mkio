@@ -10,7 +10,7 @@ batch_max_wait_ms = 2.0
 columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", side = "TEXT NOT NULL", symbol = "TEXT NOT NULL", qty = "INTEGER", price = "REAL DEFAULT 0", status = "TEXT DEFAULT 'pending'" }
 
 [tables.audit_log]
-columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", event = "TEXT", order_id = "TEXT" }
+columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", ts = "TIMESTAMP DEFAULT CURRENT_TIMESTAMP", event = "TEXT", order_id = "INTEGER", status = "TEXT" }
 append_only = true
 
 # --- Transaction service (all order operations at one endpoint) ---
@@ -22,11 +22,11 @@ type = "transaction"
 [services.orders.ops]
 place = [
     { table = "orders", op_type = "insert", fields = ["side", "symbol", "qty", "price"] },
-    { table = "audit_log", op_type = "insert", fields = ["event"] },
+    { table = "audit_log", op_type = "insert", fields = ["event"], bind = { order_id = "$0.id", status = "$0.status" } },
 ]
 update_status = [
     { table = "orders", op_type = "update", key = ["id"], fields = ["status"] },
-    { table = "audit_log", op_type = "insert", fields = ["event"] },
+    { table = "audit_log", op_type = "insert", fields = ["event"], bind = { order_id = "$0.id", status = "$0.status" } },
 ]
 
 # --- Live data services ---

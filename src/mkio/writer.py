@@ -18,6 +18,8 @@ class CompiledOp:
     op_type: str  # "insert" | "update" | "delete" | "upsert"
     sql: str
     param_names: tuple[str, ...]
+    bind: dict[str, tuple[int, str]] = field(default_factory=dict)
+    # bind: param_name -> (op_index, field_name) for cross-op references
 
 
 @dataclass(slots=True)
@@ -156,7 +158,14 @@ class WriteBatcher:
                 try:
                     await conn.execute(f"SAVEPOINT {savepoint}")
                     returned_rows: list[tuple[CompiledOp, dict[str, Any]]] = []
-                    for op, params in zip(req.ops, req.params_list):
+                    for op_idx, (op, params) in enumerate(zip(req.ops, req.params_list)):
+                        # Resolve cross-op bindings from previous ops' results
+                        if op.bind:
+                            resolved = list(params)
+                            for param_name, (src_idx, src_field) in op.bind.items():
+                                param_pos = op.param_names.index(param_name)
+                                resolved[param_pos] = returned_rows[src_idx][1][src_field]
+                            params = tuple(resolved)
                         cursor = await conn.execute(op.sql, params)
                         if op.op_type != "delete":
                             row = await cursor.fetchone()

@@ -83,6 +83,16 @@ def _get_pk_columns(parsed_cols: dict[str, dict]) -> list[str]:
     return [name for name, info in parsed_cols.items() if info["pk"]]
 
 
+_NON_CONSTANT_DEFAULTS = {"CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"}
+
+
+def _is_non_constant_default(dflt_value: str | None) -> bool:
+    """Check if a default value is non-constant (can't be used with ALTER TABLE ADD COLUMN)."""
+    if dflt_value is None:
+        return False
+    return dflt_value.upper().strip("'\"") in _NON_CONSTANT_DEFAULTS
+
+
 def diff_schema(
     existing: dict[str, dict], config_tables: dict[str, dict]
 ) -> list[SchemaChange]:
@@ -121,6 +131,16 @@ def diff_schema(
                         description=f'Add NOT NULL column "{col_name}" without default',
                         level="potentially_destructive",
                         data_impact=f"Existing rows cannot satisfy NOT NULL constraint — requires table recreate",
+                    ))
+                elif _is_non_constant_default(col_info["dflt_value"]):
+                    # SQLite ALTER TABLE ADD COLUMN doesn't support non-constant defaults
+                    # (e.g. CURRENT_TIMESTAMP) — must use table recreation
+                    changes.append(SchemaChange(
+                        table=table_name,
+                        description=f'Add column "{col_name}" (non-constant default)',
+                        level="safe",
+                        sql_steps=[],  # filled by _build_recreate_steps
+                        data_impact=f"None — existing rows get default/NULL",
                     ))
                 else:
                     col_def = table_config["columns"][col_name]

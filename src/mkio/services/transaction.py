@@ -105,45 +105,71 @@ class TransactionService(Service):
 
 
 def _compile_op(spec: dict[str, Any]) -> CompiledOp:
-    """Compile a single operation spec into a CompiledOp with parameterized SQL."""
+    """Compile a single operation spec into a CompiledOp with parameterized SQL.
+
+    The optional ``bind`` dict maps column names to ``"$N.field"`` references,
+    where N is the zero-based index of a prior op in the same transaction whose
+    RETURNING row supplies the value.  Bound columns are included in the SQL
+    but their parameter values are resolved at execution time by the writer.
+    """
     op_type = spec["op_type"]
     table = spec["table"]
-    fields = spec.get("fields", [])
+    fields = list(spec.get("fields", []))
     key = spec.get("key", [])
+    raw_bind = spec.get("bind", {})
+
+    # Parse bind references: {"order_id": "$0.id"} -> {"order_id": (0, "id")}
+    bind: dict[str, tuple[int, str]] = {}
+    for col, ref in raw_bind.items():
+        if not isinstance(ref, str) or not ref.startswith("$"):
+            raise ValueError(f"Invalid bind reference: {ref!r} (must be '$N.field')")
+        idx_str, _, field_name = ref[1:].partition(".")
+        if not field_name:
+            raise ValueError(f"Invalid bind reference: {ref!r} (must be '$N.field')")
+        bind[col] = (int(idx_str), field_name)
+
+    # Merge bound column names into the field list for SQL generation
+    bound_cols = list(raw_bind.keys())
+    all_fields = fields + [c for c in bound_cols if c not in fields]
 
     if op_type == "insert":
-        col_list = ", ".join(fields)
-        placeholders = ", ".join("?" for _ in fields)
+        col_list = ", ".join(all_fields)
+        placeholders = ", ".join("?" for _ in all_fields)
         sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) RETURNING *"
-        return CompiledOp(table, op_type, sql, tuple(fields))
+        return CompiledOp(table, op_type, sql, tuple(all_fields), bind)
 
     elif op_type == "update":
-        set_clause = ", ".join(f"{f} = ?" for f in fields)
+        set_fields = fields + [c for c in bound_cols if c not in fields]
+        set_clause = ", ".join(f"{f} = ?" for f in set_fields)
         where_clause = " AND ".join(f"{k} = ?" for k in key)
         sql = f"UPDATE {table} SET {set_clause} WHERE {where_clause} RETURNING *"
-        return CompiledOp(table, op_type, sql, tuple(fields) + tuple(key))
+        return CompiledOp(table, op_type, sql, tuple(set_fields) + tuple(key), bind)
 
     elif op_type == "delete":
         where_clause = " AND ".join(f"{k} = ?" for k in key)
         sql = f"DELETE FROM {table} WHERE {where_clause}"
-        return CompiledOp(table, op_type, sql, tuple(key))
+        return CompiledOp(table, op_type, sql, tuple(key), bind)
 
     elif op_type == "upsert":
-        all_fields = list(key) + list(fields)
-        col_list = ", ".join(all_fields)
-        placeholders = ", ".join("?" for _ in all_fields)
-        update_clause = ", ".join(f"{f} = excluded.{f}" for f in fields)
+        all_upsert = list(key) + [f for f in all_fields if f not in key]
+        col_list = ", ".join(all_upsert)
+        placeholders = ", ".join("?" for _ in all_upsert)
+        non_key = [f for f in all_upsert if f not in key]
+        update_clause = ", ".join(f"{f} = excluded.{f}" for f in non_key)
         key_list = ", ".join(key)
         sql = (
             f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) "
             f"ON CONFLICT({key_list}) DO UPDATE SET {update_clause} RETURNING *"
         )
-        return CompiledOp(table, op_type, sql, tuple(all_fields))
+        return CompiledOp(table, op_type, sql, tuple(all_upsert), bind)
 
     else:
         raise ValueError(f"Unknown operation type: {op_type}")
 
 
 def _extract_params(op: CompiledOp, data: dict[str, Any]) -> tuple[Any, ...]:
-    """Extract parameters from message data in the order the SQL expects."""
-    return tuple(data[p] for p in op.param_names)
+    """Extract parameters from message data in the order the SQL expects.
+
+    Bound params get None placeholders — resolved by the writer at execution time.
+    """
+    return tuple(None if p in op.bind else data[p] for p in op.param_names)
