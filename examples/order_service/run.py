@@ -6,4 +6,4 @@ from mkio import serve, register_function
 register_function("DOUBLE", lambda x: x * 2)
 register_function("STATUS_EMOJI", lambda s: {"pending": "⏳", "filled": "✅", "cancelled": "❌"}.get(s, "❓"))
 
-serve("config.toml")
+serve("mkio.toml")

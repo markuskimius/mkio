@@ -10,7 +10,7 @@ A single TCP port serves HTTP and WebSocket, backed by an embedded SQLite databa
 pip install mkio
 ```
 
-Create `config.toml`:
+Create `mkio.toml`:
 
 ```toml
 port = 8080
@@ -37,14 +37,14 @@ filterable = ["status", "symbol"]
 Run:
 
 ```bash
-mkio serve config.toml
+mkio serve
 ```
 
 Or programmatically:
 
 ```python
 from mkio import serve
-serve("config.toml")
+serve("mkio.toml")
 serve({...})  # or pass a dict
 ```
 

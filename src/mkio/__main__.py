@@ -28,18 +28,20 @@ def main() -> None:
 
 def _usage() -> None:
     print("Usage:")
-    print("  mkio serve <config.toml>         Start a server")
+    print("  mkio serve [mkio.toml]           Start a server (default: mkio.toml)")
     print("  mkio services <url>              List available services")
     print("  mkio monitor <url> <service>     Monitor a service's messages")
     sys.exit(1)
 
 
 def _cmd_serve() -> None:
-    if len(sys.argv) < 3:
-        print("Usage: mkio serve <config.toml>")
+    config_path = sys.argv[2] if len(sys.argv) >= 3 else "mkio.toml"
+    from pathlib import Path
+    if not Path(config_path).exists():
+        print(f"Config file not found: {config_path}")
         sys.exit(1)
     from mkio.server import serve
-    serve(sys.argv[2])
+    serve(config_path)
 
 
 def _cmd_services() -> None:
