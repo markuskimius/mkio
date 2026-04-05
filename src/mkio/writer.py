@@ -157,16 +157,22 @@ class WriteBatcher:
                 savepoint = f"req_{i}"
                 try:
                     await conn.execute(f"SAVEPOINT {savepoint}")
+                    returned_rows: list[tuple[CompiledOp, dict[str, Any]]] = []
                     for op, params in zip(req.ops, req.params_list):
-                        await conn.execute(op.sql, params)
+                        cursor = await conn.execute(op.sql, params)
+                        if op.op_type != "delete":
+                            row = await cursor.fetchone()
+                            returned_rows.append((op, dict(row) if row else req.data))
+                        else:
+                            returned_rows.append((op, req.data))
                     await conn.execute(f"RELEASE {savepoint}")
 
                     version = next_version()
                     successful.append((req, version))
 
-                    for op in req.ops:
+                    for op, row_data in returned_rows:
                         events.append(
-                            ChangeBus.make_event(op.table, op.op_type, req.data, version)
+                            ChangeBus.make_event(op.table, op.op_type, row_data, version)
                         )
                 except Exception as exc:
                     try:

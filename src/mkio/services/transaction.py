@@ -80,13 +80,13 @@ def _compile_op(spec: dict[str, Any]) -> CompiledOp:
     if op_type == "insert":
         col_list = ", ".join(fields)
         placeholders = ", ".join("?" for _ in fields)
-        sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
+        sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) RETURNING *"
         return CompiledOp(table, op_type, sql, tuple(fields))
 
     elif op_type == "update":
         set_clause = ", ".join(f"{f} = ?" for f in fields)
         where_clause = " AND ".join(f"{k} = ?" for k in key)
-        sql = f"UPDATE {table} SET {set_clause} WHERE {where_clause}"
+        sql = f"UPDATE {table} SET {set_clause} WHERE {where_clause} RETURNING *"
         return CompiledOp(table, op_type, sql, tuple(fields) + tuple(key))
 
     elif op_type == "delete":
@@ -102,7 +102,7 @@ def _compile_op(spec: dict[str, Any]) -> CompiledOp:
         key_list = ", ".join(key)
         sql = (
             f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) "
-            f"ON CONFLICT({key_list}) DO UPDATE SET {update_clause}"
+            f"ON CONFLICT({key_list}) DO UPDATE SET {update_clause} RETURNING *"
         )
         return CompiledOp(table, op_type, sql, tuple(all_fields))
 

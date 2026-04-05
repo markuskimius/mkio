@@ -32,14 +32,14 @@ TEST_TABLES = {
 INSERT_ORDER = CompiledOp(
     table="orders",
     op_type="insert",
-    sql="INSERT INTO orders (id, symbol, qty) VALUES (?, ?, ?)",
+    sql="INSERT INTO orders (id, symbol, qty) VALUES (?, ?, ?) RETURNING *",
     param_names=("id", "symbol", "qty"),
 )
 
 INSERT_AUDIT = CompiledOp(
     table="audit_log",
     op_type="insert",
-    sql="INSERT INTO audit_log (event, order_id) VALUES (?, ?)",
+    sql="INSERT INTO audit_log (event, order_id) VALUES (?, ?) RETURNING *",
     param_names=("event", "order_id"),
 )
 
@@ -231,3 +231,22 @@ async def test_reject_after_stop(db, bus):
             params_list=(("1", "AAPL", 100),),
             data={"id": "1"},
         )
+
+
+async def test_change_event_includes_db_defaults(writer, bus):
+    """ChangeEvent row should include DB-generated defaults and autoincrement IDs."""
+    q = bus.subscribe(["audit_log"])
+
+    await writer.submit(
+        ops=(INSERT_AUDIT,),
+        params_list=(("test_event", "order_1"),),
+        data={"event": "test_event", "order_id": "order_1"},
+    )
+
+    event = await asyncio.wait_for(q.get(), timeout=1.0)
+    assert event.row["event"] == "test_event"
+    assert event.row["order_id"] == "order_1"
+    # Autoincrement ID should be present from RETURNING *
+    assert "id" in event.row
+    assert isinstance(event.row["id"], int)
+    assert event.row["id"] > 0
