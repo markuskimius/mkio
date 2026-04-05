@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, Awaitable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from aiohttp.web import WebSocketResponse
     from mkio.change_bus import ChangeBus
     from mkio.database import Database
     from mkio.writer import WriteBatcher
+
+# Type for the monitor notification callback
+MonitorNotifier = Callable[[str, str, dict[str, Any] | bytes], Awaitable[None]]
 
 
 class Service:
@@ -30,6 +33,12 @@ class Service:
         self.db = db
         self.bus = change_bus
         self.writer = writer
+        self._monitor_notifier: MonitorNotifier | None = None
+
+    async def notify_monitors(self, direction: str, data: dict[str, Any] | bytes) -> None:
+        """Notify any active monitors about a message. Called by subclasses."""
+        if self._monitor_notifier:
+            await self._monitor_notifier(self.name, direction, data)
 
     async def start(self) -> None:
         """Called once at server startup. Override to init caches, subscribe to bus."""

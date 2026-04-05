@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 from aiohttp import web
 
+from mkio._json import dumps, loads
 from mkio.change_bus import ChangeBus
 from mkio.config import load_config
 from mkio.database import Database
@@ -49,6 +51,9 @@ def serve(config: str | Path | dict[str, Any]) -> None:
     app.on_startup.append(_on_startup)
     app.on_shutdown.append(_on_shutdown)
 
+    # API routes
+    app.router.add_get("/api/services", _api_services)
+
     # WebSocket routes
     app.router.add_get("/ws", _ws_handler)
     app.router.add_get("/ws/{service_name}", _ws_handler)
@@ -80,8 +85,31 @@ def _make_index_handler(static_path: Path):
     return handler
 
 
+async def _api_services(request: web.Request) -> web.Response:
+    """Return JSON list of available services."""
+    services: dict[str, Service] = request.app.get("services", {})
+    result = []
+    for name, svc in services.items():
+        info: dict[str, Any] = {
+            "name": name,
+            "type": svc.config.get("type", "unknown"),
+        }
+        # Include useful metadata per service type
+        if "primary_table" in svc.config:
+            info["primary_table"] = svc.config["primary_table"]
+        if "watch_tables" in svc.config:
+            info["watch_tables"] = svc.config["watch_tables"]
+        if "ops" in svc.config:
+            info["tables"] = list({op["table"] for op in svc.config["ops"]})
+        result.append(info)
+    return web.json_response(result)
+
+
 async def _on_startup(app: web.Application) -> None:
     cfg = app["config"]
+
+    # Monitors: service_name -> set of WebSocketResponse
+    app.setdefault("monitors", defaultdict(set))
 
     # Database
     db = Database(
@@ -124,6 +152,7 @@ async def _on_startup(app: web.Application) -> None:
 
         svc = cls(config=svc_config, db=db, change_bus=bus, writer=writer)
         svc.name = svc_name
+        svc._monitor_notifier = lambda sn, d, data, _app=app: _notify_monitors(_app, sn, d, data)
         await svc.start()
         services[svc_name] = svc
 
@@ -146,17 +175,42 @@ async def _on_shutdown(app: web.Application) -> None:
         await db.stop()
 
 
+async def _notify_monitors(
+    app: web.Application,
+    service_name: str,
+    direction: str,
+    data: dict[str, Any] | bytes,
+) -> None:
+    """Send a monitor envelope to all monitors watching a service."""
+    monitors: set[web.WebSocketResponse] = app["monitors"].get(service_name, set())
+    if not monitors:
+        return
+    # Build the monitor envelope
+    payload = data if isinstance(data, dict) else loads(data)
+    envelope = dumps({"direction": direction, "service": service_name, "message": payload})
+    dead = []
+    for mon_ws in monitors:
+        try:
+            await mon_ws.send_bytes(envelope)
+        except (ConnectionError, RuntimeError):
+            dead.append(mon_ws)
+    for d in dead:
+        monitors.discard(d)
+
+
 async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse()
     await ws.prepare(request)
 
     services: dict[str, Service] = request.app["services"]
+    monitors: dict[str, set[web.WebSocketResponse]] = request.app["monitors"]
 
     # Per-service endpoint pre-fills the service name
     url_service_name = request.match_info.get("service_name")
 
-    # Track active subscriptions for cleanup on disconnect
+    # Track active subscriptions and monitor registrations for cleanup
     subscribed: dict[str, Service] = {}
+    monitoring: set[str] = set()
 
     try:
         async for ws_msg in ws:
@@ -173,6 +227,24 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             service_name = url_service_name or msg.get("service")
             ref = msg.get("ref")
+            msg_type = msg.get("type", "")
+
+            # Handle monitor requests — no service required for "list"
+            if msg_type == "monitor":
+                target = service_name
+                if not target:
+                    await ws.send_bytes(make_error(ref, "Missing 'service' field"))
+                    continue
+                if target not in services:
+                    await ws.send_bytes(make_error(ref, f"Unknown service: {target}"))
+                    continue
+                monitors[target].add(ws)
+                monitoring.add(target)
+                ack = {"type": "monitor_ack", "service": target}
+                if ref:
+                    ack["ref"] = ref
+                await ws.send_bytes(dumps(ack))
+                continue
 
             if not service_name:
                 await ws.send_bytes(make_error(ref, "Missing 'service' field"))
@@ -183,7 +255,8 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                 await ws.send_bytes(make_error(ref, f"Unknown service: {service_name}"))
                 continue
 
-            msg_type = msg.get("type", "")
+            # Notify monitors of inbound message
+            await _notify_monitors(request.app, service_name, "in", msg)
 
             if msg_type == "subscribe":
                 await svc.on_subscribe(ws, msg)
@@ -204,5 +277,8 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                 await svc.on_unsubscribe(ws, {"type": "unsubscribe", "service": svc_name})
             except Exception:
                 pass
+        # Remove from monitor sets
+        for svc_name in monitoring:
+            monitors[svc_name].discard(ws)
 
     return ws

@@ -89,7 +89,9 @@ class QueryService(Service):
                             continue
                         changes.append({"op": op, "row": out_row, "version": ver})
                 latest_ver = self._change_log[-1][0] if self._change_log else client_version
-                await ws.send_bytes(make_delta(ref, self.name, latest_ver, changes))
+                resp = make_delta(ref, self.name, latest_ver, changes)
+                await ws.send_bytes(resp)
+                await self.notify_monitors("out", resp)
                 self._subscribers.append(sub)
                 return
 
@@ -103,7 +105,9 @@ class QueryService(Service):
             out_rows.append(out_row)
 
         latest_ver = self._change_log[-1][0] if self._change_log else ""
-        await ws.send_bytes(make_snapshot(ref, self.name, latest_ver, out_rows))
+        resp = make_snapshot(ref, self.name, latest_ver, out_rows)
+        await ws.send_bytes(resp)
+        await self.notify_monitors("out", resp)
         self._subscribers.append(sub)
 
     async def on_unsubscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
@@ -127,6 +131,7 @@ class QueryService(Service):
 
             # Fan out
             dead: list[QuerySubscriber] = []
+            notified_monitor = False
             for sub in self._subscribers:
                 out_row = sub.formatter(row) if sub.formatter else row
                 if sub.filter_fn and not sub.filter_fn(out_row):
@@ -134,6 +139,9 @@ class QueryService(Service):
                 try:
                     msg_bytes = make_update(self.name, event.version, event.op, out_row)
                     await sub.ws.send_bytes(msg_bytes)
+                    if not notified_monitor:
+                        await self.notify_monitors("out", msg_bytes)
+                        notified_monitor = True
                 except (ConnectionError, RuntimeError):
                     dead.append(sub)
             for sub in dead:

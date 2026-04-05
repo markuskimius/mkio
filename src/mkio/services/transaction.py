@@ -43,9 +43,11 @@ class TransactionService(Service):
             version = msg.get("version", "")
             cached = self._result_cache.get(version)
             if cached is not None:
-                await ws.send_bytes(make_result(ref, self.name, version, cached))
+                resp = make_result(ref, self.name, version, cached)
             else:
-                await ws.send_bytes(make_result(ref, self.name, "", {"status": "unknown"}))
+                resp = make_result(ref, self.name, "", {"status": "unknown"})
+            await ws.send_bytes(resp)
+            await self.notify_monitors("out", resp)
             return
 
         # Execute transaction
@@ -58,11 +60,17 @@ class TransactionService(Service):
             version = result.get("version", "")
             # Cache result for recovery
             self._cache_result(version, result)
-            await ws.send_bytes(make_result(ref, self.name, version, result))
+            resp = make_result(ref, self.name, version, result)
+            await ws.send_bytes(resp)
+            await self.notify_monitors("out", resp)
         except KeyError as e:
-            await ws.send_bytes(make_error(ref, f"Missing field: {e}"))
+            resp = make_error(ref, f"Missing field: {e}")
+            await ws.send_bytes(resp)
+            await self.notify_monitors("out", resp)
         except Exception as e:
-            await ws.send_bytes(make_error(ref, str(e)))
+            resp = make_error(ref, str(e))
+            await ws.send_bytes(resp)
+            await self.notify_monitors("out", resp)
 
     def _cache_result(self, version: str, result: dict[str, Any]) -> None:
         self._result_cache[version] = result

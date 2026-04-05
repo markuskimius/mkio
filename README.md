@@ -62,6 +62,8 @@ serve({...})  # or pass a dict
 - **Reconnection recovery** — version-based delta sync across all service types
 - **Client libraries** — Python and JavaScript clients with auto-reconnect and version tracking
 - **Graceful shutdown** — drains pending writes, checkpoints WAL, clean close
+- **Service monitoring** — tap into any service's inbound/outbound message flow via CLI or WebSocket
+- **Service discovery** — `GET /api/services` endpoint and `mkio services` CLI command
 
 ## Service Types
 
@@ -190,6 +192,38 @@ register_function("MASK_PAN", lambda s: "****" + s[-4:])
 - **WAL mode** — dual connections (write + read) for concurrent reads during writes
 - **Zero-copy fan-out** — change events serialized once, same bytes sent to all subscribers
 - **Optional acceleration** — `pip install mkio[fast]` for orjson (5-10x JSON) and uvloop (2-4x I/O)
+
+## CLI Tools
+
+### List services
+
+```bash
+mkio services http://localhost:8080
+```
+
+```
+SERVICE      TYPE         DETAILS
+add_order    transaction  tables=orders
+live_orders  subpub       table=orders, watch=orders
+```
+
+### Monitor a service
+
+Tap into a service's inbound and outbound message flow in real time:
+
+```bash
+mkio monitor ws://localhost:8080 live_orders
+```
+
+```
+[15:30:45.123] >> IN  subscribe
+{ "type": "subscribe", "service": "live_orders" }
+
+[15:30:45.125] << OUT snapshot
+{ "type": "snapshot", "rows": [...] }
+```
+
+The monitor protocol is a native framework feature — any mkio application supports it.
 
 ## Schema Migration
 
