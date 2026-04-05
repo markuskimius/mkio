@@ -1,0 +1,198 @@
+"""Write batcher: collects writes, executes in single SQLite transaction."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+from mkio._version import next_version
+from mkio.change_bus import ChangeBus, ChangeEvent
+from mkio.database import Database
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledOp:
+    table: str
+    op_type: str  # "insert" | "update" | "delete" | "upsert"
+    sql: str
+    param_names: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class WriteRequest:
+    ops: tuple[CompiledOp, ...]
+    params_list: tuple[tuple[Any, ...], ...]
+    data: dict[str, Any]
+    future: asyncio.Future[dict[str, Any]]
+
+
+class WriteBatcher:
+    def __init__(
+        self,
+        db: Database,
+        change_bus: ChangeBus,
+        batch_max_size: int = 500,
+        batch_max_wait_ms: float = 2.0,
+    ) -> None:
+        self._db = db
+        self._bus = change_bus
+        self._batch_max_size = batch_max_size
+        self._batch_max_wait_ms = batch_max_wait_ms
+        self._queue: asyncio.Queue[WriteRequest] = asyncio.Queue()
+        self._task: asyncio.Task[None] | None = None
+        self._stopping = False
+
+    async def start(self) -> None:
+        self._task = asyncio.create_task(self._run())
+
+    async def stop(self, drain: bool = True) -> None:
+        """Stop the writer. If drain=True, commit all queued writes first."""
+        self._stopping = True
+        if drain and not self._queue.empty():
+            # Wake the run loop by putting a sentinel and let it drain
+            sentinel = WriteRequest(
+                ops=(), params_list=(), data={},
+                future=asyncio.get_running_loop().create_future(),
+            )
+            self._queue.put_nowait(sentinel)
+        if self._task:
+            if drain:
+                # Give the loop time to drain
+                try:
+                    await asyncio.wait_for(self._task, timeout=5.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    self._task.cancel()
+                    try:
+                        await self._task
+                    except asyncio.CancelledError:
+                        pass
+            else:
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
+
+    async def submit(
+        self,
+        ops: tuple[CompiledOp, ...],
+        params_list: tuple[tuple[Any, ...], ...],
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Submit a write request. Returns when the write commits."""
+        if self._stopping:
+            raise RuntimeError("Writer is stopping, no new submissions accepted")
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        req = WriteRequest(ops=ops, params_list=params_list, data=data, future=future)
+        self._queue.put_nowait(req)
+        return await future
+
+    async def _run(self) -> None:
+        """Main loop: collect batch, execute, commit, publish, resolve."""
+        while True:
+            batch = await self._collect_batch()
+            if not batch:
+                if self._stopping:
+                    return
+                continue
+            await self._execute_batch(batch)
+            if self._stopping and self._queue.empty():
+                return
+
+    async def _collect_batch(self) -> list[WriteRequest]:
+        """Collect writes until batch is full or timeout expires."""
+        try:
+            if self._stopping and self._queue.empty():
+                return []
+            first = await asyncio.wait_for(
+                self._queue.get(), timeout=0.1 if self._stopping else None
+            )
+        except asyncio.TimeoutError:
+            return []
+
+        # Skip sentinels
+        if not first.ops and not first.data:
+            if not first.future.done():
+                first.future.set_result({"ok": True})
+            if self._stopping and self._queue.empty():
+                return []
+            # Try to get real items
+            try:
+                first = await asyncio.wait_for(self._queue.get(), timeout=0.01)
+            except asyncio.TimeoutError:
+                return []
+
+        batch = [first]
+        deadline = time.monotonic() + (self._batch_max_wait_ms / 1000.0)
+
+        while len(batch) < self._batch_max_size:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                req = await asyncio.wait_for(self._queue.get(), timeout=remaining)
+                # Skip sentinels
+                if not req.ops and not req.data:
+                    if not req.future.done():
+                        req.future.set_result({"ok": True})
+                    continue
+                batch.append(req)
+            except asyncio.TimeoutError:
+                break
+
+        return batch
+
+    async def _execute_batch(self, batch: list[WriteRequest]) -> None:
+        """Execute all writes in a single SQLite transaction with SAVEPOINTs."""
+        conn = self._db.write_conn
+        events: list[ChangeEvent] = []
+        successful: list[tuple[WriteRequest, str]] = []  # (req, version)
+        failed: list[tuple[WriteRequest, Exception]] = []
+
+        try:
+            for i, req in enumerate(batch):
+                savepoint = f"req_{i}"
+                try:
+                    await conn.execute(f"SAVEPOINT {savepoint}")
+                    for op, params in zip(req.ops, req.params_list):
+                        await conn.execute(op.sql, params)
+                    await conn.execute(f"RELEASE {savepoint}")
+
+                    version = next_version()
+                    successful.append((req, version))
+
+                    for op in req.ops:
+                        events.append(
+                            ChangeBus.make_event(op.table, op.op_type, req.data, version)
+                        )
+                except Exception as exc:
+                    try:
+                        await conn.execute(f"ROLLBACK TO {savepoint}")
+                        await conn.execute(f"RELEASE {savepoint}")
+                    except Exception:
+                        pass
+                    failed.append((req, exc))
+
+            await conn.commit()
+        except Exception as exc:
+            # Entire commit failed
+            for req in batch:
+                if not req.future.done():
+                    req.future.set_exception(exc)
+            return
+
+        # Publish changes after successful commit
+        if events:
+            self._bus.publish(events)
+
+        # Resolve futures
+        for req, version in successful:
+            if not req.future.done():
+                req.future.set_result({"ok": True, "version": version})
+
+        for req, exc in failed:
+            if not req.future.done():
+                req.future.set_exception(exc)

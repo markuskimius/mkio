@@ -1,0 +1,61 @@
+port = 8080
+host = "0.0.0.0"
+db_path = "orders.db"
+batch_max_size = 500
+batch_max_wait_ms = 2.0
+
+# --- Database schema ---
+
+[tables.orders]
+columns = { id = "TEXT PRIMARY KEY", symbol = "TEXT NOT NULL", qty = "INTEGER", price = "REAL DEFAULT 0", status = "TEXT DEFAULT 'pending'" }
+
+[tables.audit_log]
+columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", event = "TEXT", order_id = "TEXT" }
+append_only = true
+
+# --- Transaction services ---
+
+[services.place_order]
+type = "transaction"
+ops = [
+    { table = "orders", op_type = "insert", fields = ["id", "symbol", "qty", "price"] },
+    { table = "audit_log", op_type = "insert", fields = ["event", "order_id"] },
+]
+
+[services.cancel_order]
+type = "transaction"
+table = "orders"
+op_type = "delete"
+key = ["id"]
+
+[services.update_qty]
+type = "transaction"
+table = "orders"
+op_type = "update"
+key = ["id"]
+fields = ["qty"]
+
+# --- Live data services ---
+
+[services.live_orders]
+type = "subpub"
+primary_table = "orders"
+key = "id"
+filterable = ["status", "symbol"]
+change_log_size = 10000
+
+[services.audit_feed]
+type = "stream"
+primary_table = "audit_log"
+buffer_size = 10000
+
+[services.all_orders]
+type = "query"
+primary_table = "orders"
+filterable = ["status", "symbol"]
+change_log_size = 10000
+
+# --- Static file serving ---
+
+[static]
+"/" = "./static"
