@@ -13,7 +13,7 @@
     th { background: #1e293b; color: #94a3b8; font-weight: 600; }
     tr:hover { background: #1e293b; }
     form { display: flex; gap: 0.5rem; margin: 1rem 0; flex-wrap: wrap; }
-    input, select { padding: 6px 10px; border: 1px solid #475569; border-radius: 4px; background: #1e293b; color: #e2e8f0; }
+    input, select { padding: 6px 10px; border: 1px solid #475569; border-radius: 4px; background: #1e293b; color: #e2e8f0; font-size: inherit; }
     input::placeholder { color: #64748b; }
     button { padding: 6px 14px; background: #2563eb; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 500; }
     button:hover { background: #3b82f6; }
@@ -35,9 +35,9 @@
       <option value="Buy">Buy</option>
       <option value="Sell">Sell</option>
     </select>
-    <input name="symbol" placeholder="Symbol" required>
-    <input name="qty" type="number" placeholder="Qty" required>
-    <input name="price" type="number" step="0.01" placeholder="Price" required>
+    <input name="symbol" placeholder="Symbol" required autocomplete="off">
+    <input name="qty" type="number" placeholder="Qty" required autocomplete="off">
+    <input name="price" type="number" step="0.01" placeholder="Price" required autocomplete="off">
     <button type="submit">Place Order</button>
   </form>
 
