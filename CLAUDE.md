@@ -7,7 +7,7 @@ Config-driven Python microservice framework. Single TCP port serves HTTP + WebSo
 ```bash
 pip install -e ".[dev]"        # Install with dev dependencies
 pip install -e ".[fast,dev]"   # With orjson + uvloop acceleration
-pytest tests/                  # Run all tests (132 tests)
+pytest tests/                  # Run all tests (155 tests)
 pytest tests/ -x -v            # Stop on first failure, verbose
 ```
 
@@ -29,7 +29,7 @@ src/mkio/
 │   ├── base.py       # Service base class with monitor notification
 │   ├── transaction.py # Config-driven SQL ops + result cache
 │   ├── subpub.py     # In-memory cache + live push + delta reconnect
-│   ├── stream.py     # Ring buffer + version-based cursor
+│   ├── stream.py     # Ring buffer + ref-based cursor
 │   └── query.py      # SQLite snapshot + change feed
 └── client/
     ├── __init__.py   # Python client with auto-reconnect
@@ -50,5 +50,7 @@ src/mkio/
 - All async tests use `pytest-asyncio` with `asyncio_mode = "auto"`
 - `from mkio._json import dumps, loads` everywhere (never raw json/orjson)
 - Services communicate changes via `ChangeBus` (never direct DB polling)
-- **Monitor protocol**: WS clients send `{"type": "monitor", "service": "..."}` to tap into a service's inbound/outbound message flow. `GET /api/services` lists available services.
-- **CLI tools**: `mkio services <url>` lists services, `mkio monitor <url> <service>` streams live traffic
+- **Subscribe protocol** uses `ref` as the recovery cursor (not `version`). Clients send `"ref": "<last ref>"` to resume from that point. Transaction protocol uses `ref` for correlation and `version` for the committed transaction ID — these are separate concepts.
+- **Monitor protocol**: WS clients send `{"type": "monitor", "service": "..."}` to tap into a service's inbound/outbound message flow.
+- **Service discovery**: `GET /api/services` lists services, `GET /api/services/<name>` returns detailed usage info (fields, types, examples).
+- **CLI tools**: `mkio services <url> [service]` lists/inspects services, `mkio send` sends transactions, `mkio subscribe` streams live data, `mkio monitor` taps traffic

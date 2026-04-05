@@ -59,26 +59,35 @@ serve({...})  # or pass a dict
 - **Expression language** — safe, extensible filter and formatter expressions (`qty > 100 AND status == 'pending'`)
 - **Schema migration** — automatic detection of safe/destructive changes with interactive confirmation
 - **Write batching** — hundreds of writes committed in a single SQLite transaction for high throughput
-- **Reconnection recovery** — version-based delta sync across all service types
-- **Client libraries** — Python and JavaScript clients with auto-reconnect and version tracking
+- **Reconnection recovery** — ref-based delta sync across all service types
+- **Client libraries** — Python and JavaScript clients with auto-reconnect and ref tracking
 - **Graceful shutdown** — drains pending writes, checkpoints WAL, clean close
 - **Service monitoring** — tap into any service's inbound/outbound message flow via CLI or WebSocket
-- **Service discovery** — `GET /api/services` endpoint and `mkio services` CLI command
+- **Service discovery** — `GET /api/services` list and `GET /api/services/<name>` detail endpoints, `mkio services` CLI
+- **CLI tools** — send transactions, subscribe to live data, monitor traffic, inspect services
 
 ## Service Types
 
 ### Transaction
 
-Execute INSERT, UPDATE, DELETE, or UPSERT operations. Supports multi-table atomic transactions.
+Execute INSERT, UPDATE, DELETE, or UPSERT operations. Supports multi-table atomic transactions with named ops and cross-op bind references.
 
 ```toml
-[services.place_order]
+[services.orders]
 type = "transaction"
-ops = [
-    { table = "orders", op_type = "insert", fields = ["id", "symbol", "qty"] },
-    { table = "audit_log", op_type = "insert", fields = ["event", "order_id"] },
+
+[services.orders.ops]
+place = [
+    { table = "orders", op_type = "insert", fields = ["side", "symbol", "qty", "price"] },
+    { table = "audit_log", op_type = "insert", fields = ["event"], bind = { order_id = "$0.id", status = "$0.status" } },
+]
+update_status = [
+    { table = "orders", op_type = "update", key = ["id"], fields = ["status"] },
+    { table = "audit_log", op_type = "insert", fields = ["event"], bind = { order_id = "$0.id", status = "$0.status" } },
 ]
 ```
+
+Bind references (`$0.id`) pull values from a prior op's RETURNING row, so audit entries automatically capture the new order's ID and status.
 
 ### SubPub
 
@@ -98,7 +107,7 @@ total = "qty * price"
 
 ### Stream
 
-Append-only data with ring buffer and version-based cursor reconnection.
+Append-only data with ring buffer and ref-based cursor reconnection.
 
 ```toml
 [services.audit_feed]
@@ -126,11 +135,14 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 // Transaction
 {"service": "add_order", "ref": "...", "data": {"id": "1", "symbol": "AAPL", "qty": 100}}
 
+// Named op transaction
+{"service": "orders", "ref": "...", "op": "place", "data": {"side": "Buy", "symbol": "AAPL", "qty": 100, "price": 150}}
+
 // Subscribe
 {"service": "live_orders", "type": "subscribe", "filter": "status == 'pending'"}
 
-// Reconnect with version (gets delta instead of full snapshot)
-{"service": "live_orders", "type": "subscribe", "version": "20260404 15:30:45.123456000000"}
+// Reconnect with ref (gets delta instead of full snapshot)
+{"service": "live_orders", "type": "subscribe", "ref": "20260404 15:30:45.123456000000"}
 ```
 
 ## Client Libraries
@@ -145,6 +157,7 @@ async with MkioClient("ws://localhost:8080/ws") as client:
 
     async for msg in client.subscribe("live_orders", filter="status == 'pending'"):
         print(msg)
+        # msg["ref"] tracks position for recovery on reconnect
 ```
 
 ### JavaScript
@@ -195,16 +208,30 @@ register_function("MASK_PAN", lambda s: "****" + s[-4:])
 
 ## CLI Tools
 
-### List services
+### List and inspect services
 
 ```bash
-mkio services http://localhost:8080
+mkio services http://localhost:8080                # List all services
+mkio services http://localhost:8080 orders         # Show detail for one service
 ```
 
+Detail view shows fields, types, required/optional, auto-generated columns, and example commands.
+
+### Send transactions
+
+```bash
+mkio send http://localhost:8080 orders --op place '{"side":"Buy","symbol":"AAPL","qty":100,"price":150}'
+mkio send http://localhost:8080 orders --op place orders.json    # From JSON file
+mkio send http://localhost:8080 orders --op place orders.csv     # From CSV file
+mkio send http://localhost:8080 orders mixed.csv                 # CSV with per-row op column
 ```
-SERVICE      TYPE         DETAILS
-add_order    transaction  tables=orders
-live_orders  subpub       table=orders, watch=orders
+
+### Subscribe to live data
+
+```bash
+mkio subscribe http://localhost:8080 live_orders
+mkio subscribe http://localhost:8080 live_orders --filter "status == 'pending'"
+mkio subscribe http://localhost:8080 live_orders --ref "20260404 15:30:45.123456000000"  # Recovery mode
 ```
 
 ### Monitor a service
@@ -212,7 +239,7 @@ live_orders  subpub       table=orders, watch=orders
 Tap into a service's inbound and outbound message flow in real time:
 
 ```bash
-mkio monitor ws://localhost:8080 live_orders
+mkio monitor http://localhost:8080 live_orders
 ```
 
 ```
