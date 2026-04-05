@@ -38,9 +38,14 @@
     .btn-cancel { background: #6b7280; }
     .btn-cancel:hover { background: #9ca3af; }
     .btn-place { font-size: inherit; }
+    #errors { position: fixed; top: 1rem; right: 1rem; z-index: 100; max-width: 400px; }
+    .error-toast { background: #7f1d1d; color: #fca5a5; border: 1px solid #dc2626; border-radius: 6px; padding: 10px 14px; margin-bottom: 8px; font-size: 0.875rem; animation: fadeIn 0.2s; cursor: pointer; }
+    .error-toast:hover { background: #991b1b; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
   </style>
 </head>
 <body>
+  <div id="errors"></div>
   <h1>Order Book</h1>
   <p>Status: <span id="status" class="disconnected">Disconnected</span></p>
 
@@ -66,6 +71,16 @@
   </table>
 
   <script>
+    const errorsEl = document.getElementById('errors');
+    function showError(msg) {
+      const el = document.createElement('div');
+      el.className = 'error-toast';
+      el.textContent = msg;
+      el.onclick = () => el.remove();
+      errorsEl.appendChild(el);
+      setTimeout(() => el.remove(), 8000);
+    }
+
     const statusEl = document.getElementById('status');
     const client = new MkioClient(`ws://${location.host}/ws`, {
       onConnect() {
@@ -106,11 +121,16 @@
 
     async function updateStatus(id, action) {
       const statusMap = { accept: 'accepted', reject: 'rejected', fill: 'filled', cancel: 'cancelled' };
-      await client.send('orders', {
-        id: id,
-        status: statusMap[action],
-        event: 'order_' + action + 'ed',
-      }, { op: 'update_status' });
+      try {
+        const result = await client.send('orders', {
+          id: id,
+          status: statusMap[action],
+          event: 'order_' + action + 'ed',
+        }, { op: 'update_status' });
+        if (result.type === 'error') showError(result.message || 'Update failed');
+      } catch (e) {
+        showError(e.message || 'Update failed');
+      }
     }
 
     client.connect().then(() => {
@@ -145,9 +165,17 @@
         price: parseFloat(form.price.value),
         event: 'order_placed',
       };
-      await client.send('orders', data, { op: 'place' });
-      form.reset();
-      form.side.className = '';
+      try {
+        const result = await client.send('orders', data, { op: 'place' });
+        if (result.type === 'error') {
+          showError(result.message || 'Order failed');
+          return;
+        }
+        form.reset();
+        form.side.className = '';
+      } catch (e) {
+        showError(e.message || 'Order failed');
+      }
     });
   </script>
 </body>

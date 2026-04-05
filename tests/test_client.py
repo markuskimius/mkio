@@ -59,11 +59,9 @@ class FakeServer:
                     resp = {
                         "type": "snapshot",
                         "service": service,
-                        "version": "20260404 00:00:01.000000000000",
+                        "ref": "20260404 00:00:01.000000000000",
                         "rows": [{"id": "1", "name": "test"}],
                     }
-                    if ref:
-                        resp["ref"] = ref
                     await ws.send_bytes(dumps(resp))
                 elif msg_type == "check":
                     version = data.get("version", "")
@@ -145,15 +143,15 @@ async def test_client_check(fake_server):
         assert result["type"] == "result"
 
 
-async def test_client_subscribe_tracks_version(fake_server):
-    """Client should store latest version from received messages."""
+async def test_client_subscribe_tracks_ref(fake_server):
+    """Client should store latest ref from received messages."""
     server, _ = fake_server
     url = f"ws://localhost:{server.port}/ws"
 
     async with MkioClient(url, reconnect=False) as client:
         async for msg in client.subscribe("test_service"):
             break
-        # Version should be tracked
+        # Ref should be tracked
         sub = client._subscriptions.get("test_service")
         assert sub is not None
-        assert sub.version == "20260404 00:00:01.000000000000"
+        assert sub.ref == "20260404 00:00:01.000000000000"

@@ -38,49 +38,41 @@ def make_error(ref: str | None, message: str) -> bytes:
 
 
 def make_snapshot(
-    ref: str | None,
+    ref: str,
     service: str,
-    version: str,
     rows: list[dict[str, Any]],
 ) -> bytes:
-    envelope: dict[str, Any] = {
+    return dumps({
         "type": "snapshot",
         "service": service,
-        "version": version,
+        "ref": ref,
         "rows": rows,
-    }
-    if ref is not None:
-        envelope["ref"] = ref
-    return dumps(envelope)
+    })
 
 
 def make_delta(
-    ref: str | None,
+    ref: str,
     service: str,
-    version: str,
     changes: list[dict[str, Any]],
 ) -> bytes:
-    envelope: dict[str, Any] = {
+    return dumps({
         "type": "delta",
         "service": service,
-        "version": version,
+        "ref": ref,
         "changes": changes,
-    }
-    if ref is not None:
-        envelope["ref"] = ref
-    return dumps(envelope)
+    })
 
 
 def make_update(
     service: str,
-    version: str,
+    ref: str,
     op: str,
     row: dict[str, Any],
 ) -> bytes:
     return dumps({
         "type": "update",
         "service": service,
-        "version": version,
+        "ref": ref,
         "op": op,
         "row": row,
     })

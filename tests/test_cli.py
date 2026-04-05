@@ -121,7 +121,7 @@ async def test_send_inline_json(client):
 
     # Verify the order was created
     ws = await client.ws_connect("/ws")
-    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe", "ref": "q1"}))
+    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe"}))
     resp = await ws.receive()
     data = loads(resp.data)
     assert data["type"] == "snapshot"
@@ -146,7 +146,7 @@ async def test_send_with_named_op(client):
 
     # Verify updated
     ws = await client.ws_connect("/ws")
-    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe", "ref": "q1"}))
+    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe"}))
     resp = await ws.receive()
     data = loads(resp.data)
     assert data["rows"][0]["status"] == "accepted"
@@ -172,7 +172,7 @@ async def test_send_json_file(client, tmp_path):
 
     # Verify all 3 orders created
     ws = await client.ws_connect("/ws")
-    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe", "ref": "q1"}))
+    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe"}))
     resp = await ws.receive()
     data = loads(resp.data)
     assert len(data["rows"]) == 3
@@ -198,7 +198,7 @@ async def test_send_csv_file(client, tmp_path):
 
     # Verify
     ws = await client.ws_connect("/ws")
-    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe", "ref": "q1"}))
+    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe"}))
     resp = await ws.receive()
     data = loads(resp.data)
     assert len(data["rows"]) == 2
@@ -245,7 +245,7 @@ async def test_send_csv_structured(client, tmp_path):
 
     # Verify status updated
     ws = await client.ws_connect("/ws")
-    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe", "ref": "q1"}))
+    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe"}))
     resp = await ws.receive()
     data = loads(resp.data)
     assert data["rows"][0]["status"] == "accepted"
@@ -278,7 +278,7 @@ async def test_send_csv_per_row_op(client, tmp_path, capsys):
 
     # Verify both orders created
     ws = await client.ws_connect("/ws")
-    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe", "ref": "q1"}))
+    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe"}))
     resp = await ws.receive()
     data = loads(resp.data)
     assert len(data["rows"]) == 2

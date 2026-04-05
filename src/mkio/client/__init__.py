@@ -120,23 +120,25 @@ class MkioClient:
         self,
         service: str,
         filter: str | None = None,
-        version: str | None = None,
+        ref: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Subscribe to a service. Yields messages (snapshot, delta, update)."""
-        ref = make_ref()
+        """Subscribe to a service. Yields messages (snapshot, delta, update).
+
+        Pass ``ref`` from a previous message to resume from that point.
+        """
         sub = _Subscription(
             service=service,
             filter=filter,
-            version=version,
+            ref=ref,
             queue=asyncio.Queue(),
         )
         self._subscriptions[service] = sub
 
-        msg: dict[str, Any] = {"service": service, "type": "subscribe", "ref": ref}
+        msg: dict[str, Any] = {"service": service, "type": "subscribe"}
         if filter:
             msg["filter"] = filter
-        if version or sub.version:
-            msg["version"] = version or sub.version
+        if ref or sub.ref:
+            msg["ref"] = ref or sub.ref
 
         assert self._ws is not None
         await self._ws.send_bytes(dumps(msg))
@@ -197,10 +199,9 @@ class MkioClient:
         # Route to subscription queue
         if service and service in self._subscriptions:
             sub = self._subscriptions[service]
-            # Track version
-            version = data.get("version")
-            if version:
-                sub.version = version
+            # Track ref for recovery on reconnect
+            if ref:
+                sub.ref = ref
             try:
                 sub.queue.put_nowait(data)
             except asyncio.QueueFull:
@@ -220,17 +221,16 @@ class MkioClient:
                 self._session = aiohttp.ClientSession()
                 self._ws = await self._session.ws_connect(self.url)
 
-                # Re-subscribe with stored versions
+                # Re-subscribe with stored refs for recovery
                 for service, sub in self._subscriptions.items():
                     msg: dict[str, Any] = {
                         "service": service,
                         "type": "subscribe",
-                        "ref": make_ref(),
                     }
                     if sub.filter:
                         msg["filter"] = sub.filter
-                    if sub.version:
-                        msg["version"] = sub.version
+                    if sub.ref:
+                        msg["ref"] = sub.ref
                     await self._ws.send_bytes(dumps(msg))
 
                 # Restart receive loop
@@ -246,10 +246,10 @@ class _Subscription:
         self,
         service: str,
         filter: str | None,
-        version: str | None,
+        ref: str | None,
         queue: asyncio.Queue[dict[str, Any]],
     ) -> None:
         self.service = service
         self.filter = filter
-        self.version = version
+        self.ref = ref
         self.queue = queue

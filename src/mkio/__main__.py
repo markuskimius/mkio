@@ -35,11 +35,11 @@ def main() -> None:
 def _usage() -> None:
     print("Usage:")
     print("  mkio serve [mkio.toml]           Start a server (default: mkio.toml)")
-    print("  mkio services <url>              List available services")
+    print("  mkio services <url> [service]    List services, or show detail for one")
     print("  mkio monitor <url> <service>     Monitor a service's messages")
     print("  mkio send <url> <service> [--op <name>] <data>")
     print("                                   Send transaction(s) from JSON/CSV/inline")
-    print("  mkio subscribe <url> <service> [--filter <expr>]")
+    print("  mkio subscribe <url> <service> [--filter <expr>] [--ref <ver>]")
     print("                                   Subscribe and stream live messages")
     sys.exit(1)
 
@@ -56,11 +56,16 @@ def _cmd_serve() -> None:
 
 def _cmd_services() -> None:
     if len(sys.argv) < 3:
-        print("Usage: mkio services <url>")
+        print("Usage: mkio services <url> [service]")
         print("  e.g. mkio services http://localhost:8080")
+        print("  e.g. mkio services http://localhost:8080 orders")
         sys.exit(1)
     url = sys.argv[2].rstrip("/")
-    asyncio.run(_fetch_services(url))
+    service_name = sys.argv[3] if len(sys.argv) >= 4 else None
+    if service_name:
+        asyncio.run(_fetch_service_detail(url, service_name))
+    else:
+        asyncio.run(_fetch_services(url))
 
 
 async def _fetch_services(url: str) -> None:
@@ -100,11 +105,187 @@ async def _fetch_services(url: str) -> None:
         print(f"{svc['name']:<{name_w}}  {svc['type']:<{type_w}}  {', '.join(details)}")
 
 
+async def _fetch_service_detail(url: str, service_name: str) -> None:
+    import aiohttp
+    api_url = f"{url}/api/services/{service_name}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url) as resp:
+                if resp.status == 404:
+                    print(f"Unknown service: {service_name}")
+                    sys.exit(1)
+                if resp.status != 200:
+                    print(f"Error: HTTP {resp.status}")
+                    sys.exit(1)
+                detail = await resp.json()
+    except aiohttp.ClientError as e:
+        print(f"Error connecting to {api_url}: {e}")
+        sys.exit(1)
+
+    _print_service_detail(detail)
+
+
+def _print_service_detail(detail: dict[str, Any]) -> None:
+    """Pretty-print service detail."""
+    name = detail["name"]
+    svc_type = detail["type"]
+    desc = detail.get("description", "")
+
+    print(f"Service: {name} ({svc_type})")
+    if desc:
+        print(f"  {desc}")
+    print()
+
+    if svc_type == "transaction":
+        _print_transaction_detail(detail)
+    else:
+        _print_listener_detail(detail)
+
+
+def _print_transaction_detail(detail: dict[str, Any]) -> None:
+    ops = detail.get("ops", {})
+    for op_name, op_info in ops.items():
+        op_desc = op_info.get("description", "")
+        label = f"  Op: {op_name}"
+        if op_desc:
+            label += f" — {op_desc}"
+        print(label)
+
+        for i, step in enumerate(op_info.get("steps", [])):
+            if len(op_info.get("steps", [])) > 1:
+                table_label = f"    [{step['table']}] {step['op_type']}"
+            else:
+                table_label = None
+
+            fields = step.get("fields", {})
+            auto = step.get("auto", {})
+            bind = step.get("bind", {})
+
+            # Only show the first (primary) step's fields in detail
+            # For secondary steps (audit, etc.), show a summary
+            if i > 0 and bind:
+                bound_cols = ", ".join(f"{k} from {v}" for k, v in bind.items())
+                user_fields = [f for f in fields if f not in bind]
+                parts = []
+                if user_fields:
+                    parts.append(", ".join(user_fields))
+                parts.append(bound_cols)
+                print(f"    Also writes to: {step['table']} ({'; '.join(parts)})")
+                continue
+
+            if table_label:
+                print(table_label)
+
+            if fields:
+                # Separate key fields, required fields, optional fields
+                key_fields = {f: info for f, info in fields.items() if info.get("key")}
+                req_fields = {f: info for f, info in fields.items()
+                              if info.get("required") and not info.get("key")}
+                opt_fields = {f: info for f, info in fields.items()
+                              if not info.get("required") and not info.get("key")}
+
+                if key_fields or req_fields or opt_fields:
+                    print("    Fields (you provide):")
+                    col_w = max(len(f) for f in fields)
+                    for f, info in fields.items():
+                        typ = info.get("type", "")
+                        notes = []
+                        if info.get("key"):
+                            notes.append("required, key")
+                        elif info.get("required"):
+                            notes.append("required")
+                        if info.get("default"):
+                            notes.append(f"default: {info['default']}")
+                        note_str = f"  ({', '.join(notes)})" if notes else ""
+                        print(f"      {f:<{col_w}}  {typ:<10}{note_str}")
+
+            if auto:
+                print("    Auto-generated:")
+                col_w = max(len(f) for f in auto)
+                for f, info in auto.items():
+                    typ = info.get("type", "")
+                    source = info.get("source", "")
+                    dflt = info.get("default", "")
+                    if source == "default" and dflt:
+                        note = f"default: {dflt}"
+                    else:
+                        note = source
+                    print(f"      {f:<{col_w}}  {typ:<10}  {note}")
+
+        # Example
+        example = op_info.get("example")
+        if example:
+            print(f"    Example:")
+            print(f"      {example}")
+        print()
+
+    # Recovery info
+    recovery = detail.get("recovery")
+    if recovery:
+        print("  Recovery:")
+        print(f"    {recovery['description']}")
+        check = recovery.get("check_message", {})
+        if check:
+            print(f"    Check message: {json.dumps(check)}")
+        print()
+
+
+def _print_listener_detail(detail: dict[str, Any]) -> None:
+    primary = detail.get("primary_table")
+    if primary:
+        print(f"  Table: {primary}")
+
+    key = detail.get("key")
+    if key:
+        print(f"  Key: {key}")
+
+    filterable = detail.get("filterable", [])
+    if filterable:
+        print(f"  Filter by: {', '.join(filterable)}")
+
+    schema = detail.get("schema", {})
+    if schema:
+        print()
+        print("  Schema:")
+        col_w = max(len(f) for f in schema)
+        for f, info in schema.items():
+            typ = info.get("type", "")
+            note = "  (primary key)" if info.get("pk") else ""
+            print(f"    {f:<{col_w}}  {typ}{note}")
+
+    # Subscribe protocol / recovery
+    subscribe = detail.get("subscribe", {})
+    if subscribe:
+        print()
+        print("  Subscribe protocol:")
+        msg = subscribe.get("message", {})
+        print(f"    Message: {json.dumps(msg)}")
+        response_types = subscribe.get("response_types", [])
+        if response_types:
+            print(f"    Response types: {', '.join(response_types)}")
+        recovery = subscribe.get("recovery")
+        if recovery:
+            print(f"    Recovery: {recovery}")
+        log_size = subscribe.get("change_log_size") or subscribe.get("buffer_size")
+        if log_size:
+            label = "buffer_size" if "buffer_size" in subscribe else "change_log_size"
+            print(f"    {label}: {log_size:,}")
+
+    example = detail.get("example", {})
+    if example:
+        print()
+        print("  Example:")
+        for cmd in example.values():
+            print(f"    {cmd}")
+    print()
+
+
 def _cmd_monitor() -> None:
     if len(sys.argv) < 4:
         print("Usage: mkio monitor <url> <service>")
         print("  e.g. mkio monitor ws://localhost:8080 live_orders")
         sys.exit(1)
+    _check_unknown_flags(sys.argv[2:], set(), "mkio monitor <url> <service>")
     url = sys.argv[2].rstrip("/")
     service = sys.argv[3]
     ws_url = _normalize_ws_url(url)
@@ -193,6 +374,8 @@ def _cmd_send() -> None:
     url = args[0].rstrip("/")
     service = args[1]
     rest = args[2:]
+
+    _check_unknown_flags(rest, {"--op"}, "mkio send <url> <service> [--op <name>] <data>")
 
     op_name = None
     if "--op" in rest:
@@ -342,12 +525,14 @@ async def _send_messages(
 def _cmd_subscribe() -> None:
     args = sys.argv[2:]
     if len(args) < 2:
-        print("Usage: mkio subscribe <url> <service> [--filter <expr>]")
+        print("Usage: mkio subscribe <url> <service> [--filter <expr>] [--ref <ver>]")
         sys.exit(1)
 
     url = args[0].rstrip("/")
     service = args[1]
     rest = args[2:]
+
+    _check_unknown_flags(rest, {"--filter", "--ref"}, "mkio subscribe <url> <service> [--filter <expr>] [--ref <ver>]")
 
     filter_expr = None
     if "--filter" in rest:
@@ -356,11 +541,20 @@ def _cmd_subscribe() -> None:
             print("Error: --filter requires a value")
             sys.exit(1)
         filter_expr = rest[idx + 1]
+        rest = rest[:idx] + rest[idx + 2:]
+
+    ref = None
+    if "--ref" in rest:
+        idx = rest.index("--ref")
+        if idx + 1 >= len(rest):
+            print("Error: --ref requires a value")
+            sys.exit(1)
+        ref = rest[idx + 1]
 
     ws_url = _normalize_ws_url(url)
 
     try:
-        asyncio.run(_subscribe_service(ws_url, service, filter_expr))
+        asyncio.run(_subscribe_service(ws_url, service, filter_expr, ref))
     except KeyboardInterrupt:
         print("\nSubscription stopped.")
 
@@ -369,35 +563,38 @@ async def _subscribe_service(
     ws_url: str,
     service: str,
     filter_expr: str | None,
+    ref: str | None = None,
 ) -> None:
     from mkio.client import MkioClient
 
     async with MkioClient(ws_url, reconnect=True) as client:
-        async for msg in client.subscribe(service, filter=filter_expr):
+        async for msg in client.subscribe(service, filter=filter_expr, ref=ref):
             _print_subscribe_message(msg)
 
 
 def _print_subscribe_message(data: dict[str, Any]) -> None:
     """Pretty-print a subscription message."""
     msg_type = data.get("type", "")
+    version = data.get("version", "")
     now = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
 
     is_tty = sys.stdout.isatty()
+    ver_suffix = f" ref={version}" if version else ""
 
     if msg_type == "snapshot":
         rows = data.get("rows", [])
         if is_tty:
-            print(f"\033[32m[{now}] SNAPSHOT ({len(rows)} rows)\033[0m")
+            print(f"\033[32m[{now}] SNAPSHOT ({len(rows)} rows){ver_suffix}\033[0m")
         else:
-            print(f"[{now}] SNAPSHOT ({len(rows)} rows)")
+            print(f"[{now}] SNAPSHOT ({len(rows)} rows){ver_suffix}")
         for row in rows:
             print(f"  {json.dumps(row, default=str)}")
     elif msg_type == "delta":
         changes = data.get("changes", [])
         if is_tty:
-            print(f"\033[35m[{now}] DELTA ({len(changes)} changes)\033[0m")
+            print(f"\033[35m[{now}] DELTA ({len(changes)} changes){ver_suffix}\033[0m")
         else:
-            print(f"[{now}] DELTA ({len(changes)} changes)")
+            print(f"[{now}] DELTA ({len(changes)} changes){ver_suffix}")
         for c in changes:
             op = c.get("op", "?")
             row = c.get("row", {})
@@ -407,12 +604,21 @@ def _print_subscribe_message(data: dict[str, Any]) -> None:
         row = data.get("row", {})
         if is_tty:
             color = "\033[36m" if op == "insert" else "\033[33m" if op == "update" else "\033[31m"
-            print(f"{color}[{now}] UPDATE {op}\033[0m")
+            print(f"{color}[{now}] UPDATE {op}{ver_suffix}\033[0m")
         else:
-            print(f"[{now}] UPDATE {op}")
+            print(f"[{now}] UPDATE {op}{ver_suffix}")
         print(f"  {json.dumps(row, default=str)}")
     else:
         print(f"[{now}] {msg_type}: {json.dumps(data, default=str)}")
+
+
+def _check_unknown_flags(args: list[str], known: set[str], usage: str) -> None:
+    """Error and exit if args contain any unrecognised --flags."""
+    for arg in args:
+        if arg.startswith("--") and arg not in known:
+            print(f"Unknown option: {arg}")
+            print(f"Usage: {usage}")
+            sys.exit(1)
 
 
 # ---- helpers ----------------------------------------------------------------

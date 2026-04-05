@@ -187,7 +187,7 @@ async def subpub_svc(db, bus, writer):
 
 async def test_subpub_fresh_snapshot(subpub_svc):
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {"ref": "ref1", "type": "subscribe"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
     msgs = ws.get_messages()
     assert len(msgs) == 1
     assert msgs[0]["type"] == "snapshot"
@@ -209,7 +209,7 @@ async def test_subpub_with_filter(subpub_svc):
 
 async def test_subpub_live_update(subpub_svc, bus):
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {"ref": "ref1", "type": "subscribe"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
     ws.clear()
 
     # Simulate a change event
@@ -229,10 +229,10 @@ async def test_subpub_live_update(subpub_svc, bus):
 
 
 async def test_subpub_delta_reconnect(subpub_svc, bus):
-    """Subscribe, get snapshot, push changes, then reconnect with version — should get delta."""
+    """Subscribe, get snapshot, push changes, then reconnect with ref — should get delta."""
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {"ref": "ref1", "type": "subscribe"})
-    snapshot_version = ws.get_messages()[0]["version"]
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
+    snapshot_ref = ws.get_messages()[0]["ref"]
 
     # Push a change
     event = ChangeBus.make_event(
@@ -241,22 +241,21 @@ async def test_subpub_delta_reconnect(subpub_svc, bus):
     bus.publish([event])
     await asyncio.sleep(0.1)
 
-    # Reconnect with version
+    # Reconnect with ref
     ws2 = MockWebSocket()
     await subpub_svc.on_subscribe(ws2, {
-        "ref": "ref2",
         "type": "subscribe",
-        "version": snapshot_version,
+        "ref": snapshot_ref,
     })
     msgs = ws2.get_messages()
-    # Should get delta since we have changes after snapshot_version
-    # (version might be "" if no changes were in log before, so this could be snapshot)
+    # Should get delta since we have changes after snapshot ref
+    # (ref might be "" if no changes were in log before, so this could be snapshot)
     assert msgs[0]["type"] in ("delta", "snapshot")
 
 
 async def test_subpub_unsubscribe(subpub_svc):
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {"ref": "ref1", "type": "subscribe"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
     assert len(subpub_svc._subscribers) == 1
     await subpub_svc.on_unsubscribe(ws, {"type": "unsubscribe"})
     assert len(subpub_svc._subscribers) == 0
@@ -289,7 +288,7 @@ async def stream_svc(db, bus, writer):
 
 async def test_stream_fresh_subscribe(stream_svc):
     ws = MockWebSocket()
-    await stream_svc.on_subscribe(ws, {"ref": "ref1", "type": "subscribe"})
+    await stream_svc.on_subscribe(ws, {"type": "subscribe"})
     msgs = ws.get_messages()
     assert len(msgs) == 1
     assert msgs[0]["type"] == "snapshot"
@@ -298,7 +297,7 @@ async def test_stream_fresh_subscribe(stream_svc):
 
 async def test_stream_live_push(stream_svc, bus):
     ws = MockWebSocket()
-    await stream_svc.on_subscribe(ws, {"ref": "ref1", "type": "subscribe"})
+    await stream_svc.on_subscribe(ws, {"type": "subscribe"})
     ws.clear()
 
     # Simulate insert event
@@ -316,15 +315,15 @@ async def test_stream_live_push(stream_svc, bus):
     assert msgs[0]["row"]["event"] == "new_event"
 
 
-async def test_stream_reconnect_with_version(stream_svc, bus):
-    """Subscribe, get snapshot, push new events, reconnect with version — should resume."""
+async def test_stream_reconnect_with_ref(stream_svc, bus):
+    """Subscribe, get snapshot, push new events, reconnect with ref — should resume."""
     ws = MockWebSocket()
-    await stream_svc.on_subscribe(ws, {"ref": "ref1", "type": "subscribe"})
+    await stream_svc.on_subscribe(ws, {"type": "subscribe"})
     snapshot_msg = ws.get_messages()[0]
-    snapshot_version = snapshot_msg["version"]
+    snapshot_ref = snapshot_msg["ref"]
     initial_count = len(snapshot_msg["rows"])
 
-    # Push new events — use a version far in the future so it's after buffer versions
+    # Push new events
     from mkio._version import next_version
     for i in range(3):
         ver = next_version()
@@ -336,12 +335,11 @@ async def test_stream_reconnect_with_version(stream_svc, bus):
         bus.publish([event])
     await asyncio.sleep(0.2)
 
-    # Reconnect with the snapshot version — should get the 3 new events
+    # Reconnect with the snapshot ref — should get the 3 new events
     ws2 = MockWebSocket()
     await stream_svc.on_subscribe(ws2, {
-        "ref": "ref2",
         "type": "subscribe",
-        "version": snapshot_version,
+        "ref": snapshot_ref,
     })
     msgs = ws2.get_messages()
     assert msgs[0]["type"] == "snapshot"
@@ -351,7 +349,7 @@ async def test_stream_reconnect_with_version(stream_svc, bus):
 async def test_stream_ignores_non_insert(stream_svc, bus):
     """Stream only processes insert events (append-only)."""
     ws = MockWebSocket()
-    await stream_svc.on_subscribe(ws, {"ref": "ref1", "type": "subscribe"})
+    await stream_svc.on_subscribe(ws, {"type": "subscribe"})
     ws.clear()
 
     # Send an update event — should be ignored
@@ -394,7 +392,7 @@ async def query_svc(db, bus, writer):
 
 async def test_query_fresh_snapshot(query_svc):
     ws = MockWebSocket()
-    await query_svc.on_subscribe(ws, {"ref": "ref1", "type": "subscribe"})
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
     msgs = ws.get_messages()
     assert len(msgs) == 1
     assert msgs[0]["type"] == "snapshot"
@@ -404,7 +402,7 @@ async def test_query_fresh_snapshot(query_svc):
 
 async def test_query_live_update(query_svc, bus):
     ws = MockWebSocket()
-    await query_svc.on_subscribe(ws, {"ref": "ref1", "type": "subscribe"})
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
     ws.clear()
 
     event = ChangeBus.make_event(
@@ -423,8 +421,8 @@ async def test_query_live_update(query_svc, bus):
 
 async def test_query_delta_reconnect(query_svc, bus):
     ws = MockWebSocket()
-    await query_svc.on_subscribe(ws, {"ref": "ref1", "type": "subscribe"})
-    snapshot_version = ws.get_messages()[0]["version"]
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
+    snapshot_ref = ws.get_messages()[0]["ref"]
 
     # Push changes
     event = ChangeBus.make_event(
@@ -435,12 +433,11 @@ async def test_query_delta_reconnect(query_svc, bus):
     bus.publish([event])
     await asyncio.sleep(0.1)
 
-    # Reconnect with version
+    # Reconnect with ref
     ws2 = MockWebSocket()
     await query_svc.on_subscribe(ws2, {
-        "ref": "ref2",
         "type": "subscribe",
-        "version": "20260404 00:00:04.000000000000",  # Before the new event
+        "ref": "20260404 00:00:04.000000000000",  # Before the new event
     })
     msgs = ws2.get_messages()
     assert msgs[0]["type"] in ("delta", "snapshot")
@@ -458,7 +455,6 @@ async def test_query_with_filter(query_svc, bus):
 
     ws = MockWebSocket()
     await query_svc.on_subscribe(ws, {
-        "ref": "ref1",
         "type": "subscribe",
         "filter": "status == 'pending'",
     })
@@ -471,7 +467,7 @@ async def test_query_with_filter(query_svc, bus):
 
 async def test_query_unsubscribe(query_svc):
     ws = MockWebSocket()
-    await query_svc.on_subscribe(ws, {"ref": "ref1", "type": "subscribe"})
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
     assert len(query_svc._subscribers) == 1
     await query_svc.on_unsubscribe(ws, {"type": "unsubscribe"})
     assert len(query_svc._subscribers) == 0
@@ -482,7 +478,7 @@ async def test_query_unsubscribe(query_svc):
 async def test_dead_subscriber_removed(subpub_svc, bus):
     """A closed websocket should be removed from subscribers list."""
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {"ref": "ref1", "type": "subscribe"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
     assert len(subpub_svc._subscribers) == 1
 
     ws.closed = True  # Simulate disconnect

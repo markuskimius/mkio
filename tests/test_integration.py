@@ -374,7 +374,6 @@ async def test_unsubscribe_stops_updates(client):
     await ws.send_bytes(dumps({
         "service": "live_orders",
         "type": "subscribe",
-        "ref": "s1",
     }))
     await ws.receive()  # Snapshot
 

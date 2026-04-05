@@ -20,6 +20,7 @@ from mkio.services.stream import StreamService
 from mkio.services.subpub import SubPubService
 from mkio.services.transaction import TransactionService
 from mkio.writer import WriteBatcher
+from mkio.migration import _parse_config_columns
 from mkio.ws_protocol import make_error, parse_message
 
 SERVICE_TYPES: dict[str, type[Service]] = {
@@ -53,6 +54,7 @@ def serve(config: str | Path | dict[str, Any]) -> None:
 
     # API routes
     app.router.add_get("/api/services", _api_services)
+    app.router.add_get("/api/services/{service_name}", _api_service_detail)
 
     # WebSocket routes
     app.router.add_get("/ws", _ws_handler)
@@ -117,6 +119,262 @@ async def _api_services(request: web.Request) -> web.Response:
                 info["tables"] = list({op["table"] for op in ops})
         result.append(info)
     return web.json_response(result)
+
+
+async def _api_service_detail(request: web.Request) -> web.Response:
+    """Return detailed usage info for a single service."""
+    service_name = request.match_info["service_name"]
+    services: dict[str, Service] = request.app.get("services", {})
+    svc = services.get(service_name)
+    if svc is None:
+        return web.json_response(
+            {"error": f"Unknown service: {service_name}"}, status=404
+        )
+
+    tables = request.app["config"].get("tables", {})
+    return web.json_response(
+        _build_service_detail(service_name, svc.config, tables)
+    )
+
+
+def _build_service_detail(
+    name: str, config: dict[str, Any], tables: dict[str, dict]
+) -> dict[str, Any]:
+    """Build detailed service info from config and table schemas."""
+    svc_type = config.get("type", "unknown")
+    detail: dict[str, Any] = {"name": name, "type": svc_type}
+
+    desc = config.get("description")
+    if desc:
+        detail["description"] = desc
+
+    if svc_type == "transaction":
+        detail["ops"] = _build_transaction_ops(name, config, tables)
+        detail["recovery"] = {
+            "description": (
+                "Each result includes a version string. To check if a transaction "
+                "committed after a disconnect, send a check message with that version."
+            ),
+            "check_message": {"service": name, "type": "check", "version": "<version>"},
+        }
+    else:
+        detail.update(_build_listener_detail(name, config, tables))
+
+    return detail
+
+
+def _build_transaction_ops(
+    name: str, config: dict[str, Any], tables: dict[str, dict]
+) -> dict[str, Any]:
+    """Build op detail for transaction services."""
+    raw_ops = config.get("ops", [])
+    descriptions = config.get("descriptions", {})
+    result: dict[str, Any] = {}
+
+    if isinstance(raw_ops, dict):
+        op_sets = raw_ops
+    else:
+        op_sets = {"default": raw_ops}
+
+    for op_name, op_list in op_sets.items():
+        op_info: dict[str, Any] = {}
+        op_desc = descriptions.get(op_name)
+        if op_desc:
+            op_info["description"] = op_desc
+
+        steps = []
+        for step_idx, spec in enumerate(op_list):
+            step = _build_op_step(spec, tables)
+            steps.append(step)
+        op_info["steps"] = steps
+
+        # Build example from the first step's required + optional fields
+        example = _build_send_example(name, op_name, op_list, tables)
+        if example:
+            op_info["example"] = example
+
+        result[op_name] = op_info
+
+    return result
+
+
+def _build_op_step(spec: dict[str, Any], tables: dict[str, dict]) -> dict[str, Any]:
+    """Build detail for a single op step (insert/update/delete/upsert)."""
+    table_name = spec["table"]
+    op_type = spec["op_type"]
+    fields = spec.get("fields", [])
+    key = spec.get("key", [])
+    raw_bind = spec.get("bind", {})
+
+    step: dict[str, Any] = {"table": table_name, "op_type": op_type}
+
+    # Parse table schema
+    table_config = tables.get(table_name, {})
+    col_defs = table_config.get("columns", {})
+    parsed_cols = _parse_config_columns(col_defs) if col_defs else {}
+
+    # Client-provided fields
+    client_fields = list(fields) + [k for k in key if k not in fields]
+    fields_info: dict[str, Any] = {}
+    for f in client_fields:
+        col = parsed_cols.get(f, {})
+        info: dict[str, Any] = {"type": col.get("type", "TEXT")}
+        if f in key:
+            info["key"] = True
+            info["required"] = True
+        elif col.get("notnull") and col.get("dflt_value") is None and not col.get("pk"):
+            info["required"] = True
+        else:
+            info["required"] = False
+            if col.get("dflt_value") is not None:
+                info["default"] = col["dflt_value"]
+        fields_info[f] = info
+    if fields_info:
+        step["fields"] = fields_info
+
+    # Auto-generated columns (not in fields, key, or bind)
+    all_client = set(fields) | set(key) | set(raw_bind.keys())
+    auto_info: dict[str, Any] = {}
+    for col_name, col in parsed_cols.items():
+        if col_name not in all_client:
+            info = {"type": col.get("type", "TEXT")}
+            if col.get("pk"):
+                if "AUTOINCREMENT" in col_defs.get(col_name, "").upper():
+                    info["source"] = "autoincrement"
+                else:
+                    info["source"] = "primary_key"
+            elif col.get("dflt_value") is not None:
+                info["source"] = "default"
+                info["default"] = col["dflt_value"]
+            auto_info[col_name] = info
+    if auto_info:
+        step["auto"] = auto_info
+
+    # Bind references
+    if raw_bind:
+        step["bind"] = dict(raw_bind)
+
+    return step
+
+
+def _build_listener_detail(
+    name: str, config: dict[str, Any], tables: dict[str, dict]
+) -> dict[str, Any]:
+    """Build detail for listener services (subpub/query/stream)."""
+    detail: dict[str, Any] = {}
+
+    primary_table = config.get("primary_table")
+    if primary_table:
+        detail["primary_table"] = primary_table
+
+    key = config.get("key")
+    if key:
+        detail["key"] = key
+
+    filterable = config.get("filterable", [])
+    if filterable:
+        detail["filterable"] = filterable
+
+    # Table schema
+    if primary_table and primary_table in tables:
+        col_defs = tables[primary_table].get("columns", {})
+        parsed = _parse_config_columns(col_defs)
+        schema: dict[str, Any] = {}
+        for col_name, col in parsed.items():
+            info: dict[str, Any] = {"type": col.get("type", "TEXT")}
+            if col.get("pk"):
+                info["pk"] = True
+            schema[col_name] = info
+        detail["schema"] = schema
+
+    # Subscribe protocol info
+    svc_type = config.get("type")
+    subscribe: dict[str, Any] = {
+        "message": {
+            "service": name,
+            "type": "subscribe",
+        },
+    }
+    if svc_type == "subpub":
+        subscribe["recovery"] = (
+            "Send ref from last received message to get a delta of missed changes. "
+            "If ref is too old (beyond change log), a full snapshot is sent instead."
+        )
+        subscribe["response_types"] = ["snapshot", "delta", "update"]
+        log_size = config.get("change_log_size", 10000)
+        subscribe["change_log_size"] = log_size
+    elif svc_type == "stream":
+        subscribe["recovery"] = (
+            "Send ref from last received message to resume from that point in the buffer. "
+            "If ref is too old (beyond buffer), the full buffer is sent as a snapshot."
+        )
+        subscribe["response_types"] = ["snapshot", "update"]
+        subscribe["buffer_size"] = config.get("buffer_size", 10000)
+    elif svc_type == "query":
+        subscribe["recovery"] = (
+            "Send ref from last received message to get a delta of missed changes. "
+            "If ref is too old (beyond change log), a full snapshot from the database is sent."
+        )
+        subscribe["response_types"] = ["snapshot", "delta", "update"]
+        log_size = config.get("change_log_size", 10000)
+        subscribe["change_log_size"] = log_size
+
+    if filterable:
+        subscribe["message"]["filter"] = "<expr>"
+        subscribe["filter_fields"] = filterable
+
+    detail["subscribe"] = subscribe
+
+    # Examples
+    example: dict[str, str] = {}
+    example["subscribe"] = f"mkio subscribe <url> {name}"
+    if filterable:
+        f = filterable[0]
+        example["subscribe_filter"] = (
+            f"mkio subscribe <url> {name} --filter \"{f} == '...'\""
+        )
+    example["subscribe_recover"] = (
+        f"mkio subscribe <url> {name} --ref \"<ref from last message>\""
+    )
+    detail["example"] = example
+
+    return detail
+
+
+def _build_send_example(
+    svc_name: str, op_name: str, op_list: list[dict], tables: dict[str, dict]
+) -> str | None:
+    """Build an example mkio send command from the first step's fields."""
+    if not op_list:
+        return None
+
+    spec = op_list[0]
+    fields = spec.get("fields", [])
+    key = spec.get("key", [])
+    table_name = spec["table"]
+    col_defs = tables.get(table_name, {}).get("columns", {})
+    parsed = _parse_config_columns(col_defs) if col_defs else {}
+
+    example_data: dict[str, Any] = {}
+    for f in key:
+        example_data[f] = "..."
+    for f in fields:
+        col = parsed.get(f, {})
+        col_type = col.get("type", "TEXT")
+        if col_type in ("INTEGER", "INT"):
+            example_data[f] = 0
+        elif col_type == "REAL":
+            example_data[f] = 0.0
+        else:
+            example_data[f] = "..."
+
+    if not example_data:
+        return None
+
+    import json
+    data_str = json.dumps(example_data)
+    op_flag = f" --op {op_name}" if op_name != "default" else ""
+    return f"mkio send <url> {svc_name}{op_flag} '{data_str}'"
 
 
 async def _on_startup(app: web.Application) -> None:

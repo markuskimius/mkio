@@ -39,10 +39,10 @@ def test_js_client_has_reconnect():
     assert "_resubscribe" in src
 
 
-def test_js_client_tracks_version():
-    """Verify version tracking in the JS client."""
+def test_js_client_tracks_ref():
+    """Verify ref tracking in the JS client."""
     src = JS_CLIENT_PATH.read_text()
-    assert "sub.version = data.version" in src or "sub.version" in src
+    assert "sub.ref = data.ref" in src or "sub.ref" in src
 
 
 def test_js_client_has_check():
@@ -61,11 +61,11 @@ def test_js_client_exports():
     assert "window.MkioClient" in src
 
 
-def test_js_client_subscribe_sends_filter_and_version():
-    """Verify subscribe sends filter and version for reconnection."""
+def test_js_client_subscribe_sends_filter_and_ref():
+    """Verify subscribe sends filter and ref for reconnection."""
     src = JS_CLIENT_PATH.read_text()
     assert 'msg.filter' in src
-    assert 'msg.version' in src
+    assert 'msg.ref' in src
 
 
 def test_js_client_no_external_deps():

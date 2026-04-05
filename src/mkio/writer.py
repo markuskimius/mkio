@@ -156,7 +156,7 @@ class WriteBatcher:
             for i, req in enumerate(batch):
                 savepoint = f"req_{i}"
                 try:
-                    await conn.execute(f"SAVEPOINT {savepoint}")
+                    await (await conn.execute(f"SAVEPOINT {savepoint}")).close()
                     returned_rows: list[tuple[CompiledOp, dict[str, Any]]] = []
                     for op_idx, (op, params) in enumerate(zip(req.ops, req.params_list)):
                         # Resolve cross-op bindings from previous ops' results
@@ -169,11 +169,11 @@ class WriteBatcher:
                         cursor = await conn.execute(op.sql, params)
                         if op.op_type != "delete":
                             row = await cursor.fetchone()
-                            await cursor.close()
-                            returned_rows.append((op, dict(row) if row else req.data))
                         else:
-                            returned_rows.append((op, req.data))
-                    await conn.execute(f"RELEASE {savepoint}")
+                            row = None
+                        await cursor.close()
+                        returned_rows.append((op, dict(row) if row else req.data))
+                    await (await conn.execute(f"RELEASE {savepoint}")).close()
 
                     version = next_version()
                     successful.append((req, version))
@@ -184,8 +184,8 @@ class WriteBatcher:
                         )
                 except Exception as exc:
                     try:
-                        await conn.execute(f"ROLLBACK TO {savepoint}")
-                        await conn.execute(f"RELEASE {savepoint}")
+                        await (await conn.execute(f"ROLLBACK TO {savepoint}")).close()
+                        await (await conn.execute(f"RELEASE {savepoint}")).close()
                     except Exception:
                         pass
                     failed.append((req, exc))

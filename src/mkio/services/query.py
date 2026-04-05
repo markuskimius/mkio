@@ -67,8 +67,7 @@ class QueryService(Service):
             self.bus.unsubscribe(watch, self._bus_queue)
 
     async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
-        ref = msg.get("ref")
-        client_version = msg.get("version")
+        client_ref = msg.get("ref")
         filter_expr = msg.get("filter")
 
         filter_fn = None
@@ -78,18 +77,18 @@ class QueryService(Service):
         sub = QuerySubscriber(ws=ws, filter_fn=filter_fn, formatter=self._formatter)
 
         # Check for delta reconnection
-        if client_version and self._change_log:
+        if client_ref and self._change_log:
             oldest_version = self._change_log[0][0]
-            if compare_versions(client_version, oldest_version) >= 0:
+            if compare_versions(client_ref, oldest_version) >= 0:
                 changes = []
                 for ver, op, row in self._change_log:
-                    if compare_versions(ver, client_version) > 0:
+                    if compare_versions(ver, client_ref) > 0:
                         out_row = sub.formatter(row) if sub.formatter else row
                         if sub.filter_fn and not sub.filter_fn(out_row):
                             continue
-                        changes.append({"op": op, "row": out_row, "version": ver})
-                latest_ver = self._change_log[-1][0] if self._change_log else client_version
-                resp = make_delta(ref, self.name, latest_ver, changes)
+                        changes.append({"op": op, "row": out_row})
+                latest_ref = self._change_log[-1][0] if self._change_log else client_ref
+                resp = make_delta(latest_ref, self.name, changes)
                 await ws.send_bytes(resp)
                 await self.notify_monitors("out", resp)
                 self._subscribers.append(sub)
@@ -104,8 +103,8 @@ class QueryService(Service):
                 continue
             out_rows.append(out_row)
 
-        latest_ver = self._change_log[-1][0] if self._change_log else ""
-        resp = make_snapshot(ref, self.name, latest_ver, out_rows)
+        latest_ref = self._change_log[-1][0] if self._change_log else ""
+        resp = make_snapshot(latest_ref, self.name, out_rows)
         await ws.send_bytes(resp)
         await self.notify_monitors("out", resp)
         self._subscribers.append(sub)
@@ -137,7 +136,7 @@ class QueryService(Service):
                 if sub.filter_fn and not sub.filter_fn(out_row):
                     continue
                 try:
-                    msg_bytes = make_update(self.name, event.version, event.op, out_row)
+                    msg_bytes = make_update(self.name, ref=event.version, op=event.op, row=out_row)
                     await sub.ws.send_bytes(msg_bytes)
                     if not notified_monitor:
                         await self.notify_monitors("out", msg_bytes)

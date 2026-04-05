@@ -134,7 +134,7 @@ class MkioClient {
    * @param {string} service
    * @param {Object} opts
    * @param {string} [opts.filter]
-   * @param {string} [opts.version]
+   * @param {string} [opts.ref] - Ref from last received message for recovery
    * @param {Function} [opts.onSnapshot] - (rows) => void
    * @param {Function} [opts.onDelta] - (changes) => void
    * @param {Function} [opts.onUpdate] - (op, row) => void
@@ -143,16 +143,16 @@ class MkioClient {
     const sub = {
       service,
       filter: opts.filter || null,
-      version: opts.version || null,
+      ref: opts.ref || null,
       onSnapshot: opts.onSnapshot || (() => {}),
       onDelta: opts.onDelta || (() => {}),
       onUpdate: opts.onUpdate || (() => {}),
     };
     this._subscriptions.set(service, sub);
 
-    const msg = { service, type: "subscribe", ref: makeRef() };
+    const msg = { service, type: "subscribe" };
     if (sub.filter) msg.filter = sub.filter;
-    if (sub.version) msg.version = sub.version;
+    if (sub.ref) msg.ref = sub.ref;
 
     this._ws.send(JSON.stringify(msg));
   }
@@ -201,7 +201,7 @@ class MkioClient {
     // Route to subscription
     if (service && this._subscriptions.has(service)) {
       const sub = this._subscriptions.get(service);
-      if (data.version) sub.version = data.version;
+      if (data.ref) sub.ref = data.ref;
 
       if (type === "snapshot") {
         sub.onSnapshot(data.rows);
@@ -215,9 +215,9 @@ class MkioClient {
 
   _resubscribe() {
     for (const [service, sub] of this._subscriptions) {
-      const msg = { service, type: "subscribe", ref: makeRef() };
+      const msg = { service, type: "subscribe" };
       if (sub.filter) msg.filter = sub.filter;
-      if (sub.version) msg.version = sub.version;
+      if (sub.ref) msg.ref = sub.ref;
       this._ws.send(JSON.stringify(msg));
     }
   }

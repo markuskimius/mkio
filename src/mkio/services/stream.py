@@ -81,8 +81,7 @@ class StreamService(Service):
             self.bus.unsubscribe(watch, self._bus_queue)
 
     async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
-        ref = msg.get("ref")
-        client_version = msg.get("version")
+        client_ref = msg.get("ref")
         filter_expr = msg.get("filter")
 
         filter_fn = None
@@ -93,36 +92,34 @@ class StreamService(Service):
 
         rows_to_send: list[dict[str, Any]] = []
 
-        if client_version and self._buffer:
+        if client_ref and self._buffer:
             # Find position in ring buffer
             buffer_start_ver = self._buffer[0][0]
-            if compare_versions(client_version, buffer_start_ver) >= 0:
+            if compare_versions(client_ref, buffer_start_ver) >= 0:
                 # Replay from buffer
                 for ver, row in self._buffer:
-                    if compare_versions(ver, client_version) > 0:
+                    if compare_versions(ver, client_ref) > 0:
                         out_row = sub.formatter(row) if sub.formatter else row
                         if sub.filter_fn and not sub.filter_fn(out_row):
                             continue
                         rows_to_send.append(out_row)
             else:
-                # Version older than buffer — read from SQLite
-                # We can't easily filter by version in SQLite since versions are assigned
-                # at publish time, not stored in the table. Send full buffer instead.
+                # Ref older than buffer — send full buffer instead
                 for ver, row in self._buffer:
                     out_row = sub.formatter(row) if sub.formatter else row
                     if sub.filter_fn and not sub.filter_fn(out_row):
                         continue
                     rows_to_send.append(out_row)
-        elif not client_version:
-            # No version — send entire buffer
+        elif not client_ref:
+            # No ref — send entire buffer
             for ver, row in self._buffer:
                 out_row = sub.formatter(row) if sub.formatter else row
                 if sub.filter_fn and not sub.filter_fn(out_row):
                     continue
                 rows_to_send.append(out_row)
 
-        latest_ver = self._buffer[-1][0] if self._buffer else ""
-        resp = make_snapshot(ref, self.name, latest_ver, rows_to_send)
+        latest_ref = self._buffer[-1][0] if self._buffer else ""
+        resp = make_snapshot(latest_ref, self.name, rows_to_send)
         await ws.send_bytes(resp)
         await self.notify_monitors("out", resp)
         self._subscribers.append(sub)
@@ -157,7 +154,7 @@ class StreamService(Service):
                 if sub.filter_fn and not sub.filter_fn(out_row):
                     continue
                 try:
-                    msg_bytes = make_update(self.name, event.version, event.op, out_row)
+                    msg_bytes = make_update(self.name, ref=event.version, op=event.op, row=out_row)
                     await sub.ws.send_bytes(msg_bytes)
                     if not notified_monitor:
                         await self.notify_monitors("out", msg_bytes)

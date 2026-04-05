@@ -208,7 +208,6 @@ async def test_monitor_sees_subscribe_and_updates(client):
     await sub_ws.send_bytes(dumps({
         "service": "live_orders",
         "type": "subscribe",
-        "ref": "sub1",
     }))
     # Consume snapshot on subscriber
     await sub_ws.receive()
