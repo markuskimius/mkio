@@ -91,7 +91,7 @@
         event: 'order_placed',
         order_id: form.id.value,
       };
-      await client.send('place_order', data);
+      await client.send('orders', data, { op: 'place' });
       form.reset();
     });
   </script>

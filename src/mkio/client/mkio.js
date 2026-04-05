@@ -111,9 +111,11 @@ class MkioClient {
    * @param {string} [ref]
    * @returns {Promise<Object>}
    */
-  send(service, data, ref) {
-    ref = ref || makeRef();
-    const msg = { service, data, ref };
+  send(service, data, opts = {}) {
+    const ref = opts.ref || makeRef();
+    const msg = { service, data, ref, ...opts };
+    delete msg.ref;  // already set above
+    msg.ref = ref;
 
     return new Promise((resolve, reject) => {
       this._pending.set(ref, { resolve, reject });

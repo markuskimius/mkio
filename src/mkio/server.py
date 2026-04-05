@@ -100,7 +100,16 @@ async def _api_services(request: web.Request) -> web.Response:
         if "watch_tables" in svc.config:
             info["watch_tables"] = svc.config["watch_tables"]
         if "ops" in svc.config:
-            info["tables"] = list({op["table"] for op in svc.config["ops"]})
+            ops = svc.config["ops"]
+            if isinstance(ops, dict):
+                # Named ops: collect tables from all op sets
+                tables: set[str] = set()
+                for op_list in ops.values():
+                    tables.update(op["table"] for op in op_list)
+                info["tables"] = list(tables)
+                info["ops"] = list(ops.keys())
+            else:
+                info["tables"] = list({op["table"] for op in ops})
         result.append(info)
     return web.json_response(result)
 

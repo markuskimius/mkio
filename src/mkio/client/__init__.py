@@ -98,11 +98,15 @@ class MkioClient:
         service: str,
         data: dict[str, Any],
         ref: str | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
-        """Send a transaction message and wait for the result."""
+        """Send a transaction message and wait for the result.
+
+        Extra keyword arguments (e.g. op="place") are included in the message.
+        """
         if ref is None:
             ref = make_ref()
-        msg = {"service": service, "data": data, "ref": ref}
+        msg: dict[str, Any] = {"service": service, "data": data, "ref": ref, **kwargs}
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()

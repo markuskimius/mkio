@@ -7,33 +7,29 @@ batch_max_wait_ms = 2.0
 # --- Database schema ---
 
 [tables.orders]
-columns = { id = "TEXT PRIMARY KEY", symbol = "TEXT NOT NULL", qty = "INTEGER", price = "REAL DEFAULT 0", status = "TEXT DEFAULT 'pending'" }
+columns = { id = "TEXT PRIMARY KEY", side = "TEXT", symbol = "TEXT NOT NULL", qty = "INTEGER", price = "REAL DEFAULT 0", status = "TEXT DEFAULT 'pending'" }
 
 [tables.audit_log]
 columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", event = "TEXT", order_id = "TEXT" }
 append_only = true
 
-# --- Transaction services ---
+# --- Transaction service (all order operations at one endpoint) ---
+# Client sends "op" field to select which operation: "place", "cancel", "update_qty"
 
-[services.place_order]
+[services.orders]
 type = "transaction"
-ops = [
-    { table = "orders", op_type = "insert", fields = ["id", "symbol", "qty", "price"] },
+
+[services.orders.ops]
+place = [
+    { table = "orders", op_type = "insert", fields = ["id", "side", "symbol", "qty", "price"] },
     { table = "audit_log", op_type = "insert", fields = ["event", "order_id"] },
 ]
-
-[services.cancel_order]
-type = "transaction"
-table = "orders"
-op_type = "delete"
-key = ["id"]
-
-[services.update_qty]
-type = "transaction"
-table = "orders"
-op_type = "update"
-key = ["id"]
-fields = ["qty"]
+cancel = [
+    { table = "orders", op_type = "delete", key = ["id"] },
+]
+update_qty = [
+    { table = "orders", op_type = "update", key = ["id"], fields = ["qty"] },
+]
 
 # --- Live data services ---
 
@@ -41,7 +37,7 @@ fields = ["qty"]
 type = "subpub"
 primary_table = "orders"
 key = "id"
-filterable = ["status", "symbol"]
+filterable = ["status", "symbol", "side"]
 change_log_size = 10000
 
 [services.audit_feed]
@@ -52,7 +48,7 @@ buffer_size = 10000
 [services.all_orders]
 type = "query"
 primary_table = "orders"
-filterable = ["status", "symbol"]
+filterable = ["status", "symbol", "side"]
 change_log_size = 10000
 
 # --- Static file serving ---
