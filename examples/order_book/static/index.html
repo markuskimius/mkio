@@ -112,26 +112,22 @@
         const statusClass = 'status-' + (row.status || '').toLowerCase();
         const actions = STATUS_ACTIONS[row.status] || [];
         const actionButtons = actions.map(a =>
-          `<button class="btn-${a}" onclick="updateStatus(${row.id}, '${a}')">${a[0].toUpperCase() + a.slice(1)}</button>`
+          `<button class="btn-${a}" onclick="doAction(${row.id}, '${a}')">${a[0].toUpperCase() + a.slice(1)}</button>`
         ).join('');
         tr.innerHTML = `<td>${row.id}</td><td class="${sideClass}">${row.side}</td><td>${row.symbol}</td><td>${row.qty}</td><td>${row.price}</td><td class="${statusClass}">${row.status}</td><td class="actions">${actionButtons}</td>`;
         tbody.appendChild(tr);
       }
     }
 
-    async function updateStatus(id, action) {
-      const statusMap = { accept: 'accepted', reject: 'rejected', fill: 'filled', cancel: 'cancelled' };
+    async function doAction(id, action) {
       try {
-        const result = await client.send('orders', {
-          id: id,
-          status: statusMap[action],
-          event: 'order_' + action + 'ed',
-        }, { op: 'update_status' });
-        if (result.type === 'error') showError(result.message || 'Update failed');
+        const result = await client.send('orders', { id }, { op: action });
+        if (result.type === 'error') showError(result.message || 'Action failed');
       } catch (e) {
-        showError(e.message || 'Update failed');
+        showError(e.message || 'Action failed');
       }
     }
+
 
     client.connect().then(() => {
       client.subscribe('live_orders', {
@@ -163,10 +159,9 @@
         symbol: form.symbol.value,
         qty: parseInt(form.qty.value),
         price: parseFloat(form.price.value),
-        event: 'order_placed',
       };
       try {
-        const result = await client.send('orders', data, { op: 'place' });
+        const result = await client.send('orders', data, { op: 'new' });
         if (result.type === 'error') {
           showError(result.message || 'Order failed');
           return;

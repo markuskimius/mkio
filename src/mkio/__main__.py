@@ -144,79 +144,89 @@ def _print_service_detail(detail: dict[str, Any]) -> None:
 
 def _print_transaction_detail(detail: dict[str, Any]) -> None:
     ops = detail.get("ops", {})
-    for op_name, op_info in ops.items():
+
+    # Collect all op names and their primary fields for a summary table
+    op_names = list(ops.keys())
+    if not op_names:
+        return
+
+    # Find max widths for alignment
+    name_w = max(len(n) for n in op_names)
+    name_w = max(name_w, 2)
+
+    print("  Operations:")
+    print()
+    for op_name in op_names:
+        op_info = ops[op_name]
         op_desc = op_info.get("description", "")
-        label = f"  Op: {op_name}"
-        if op_desc:
-            label += f" — {op_desc}"
-        print(label)
+        steps = op_info.get("steps", [])
+        primary = steps[0] if steps else {}
+        fields = primary.get("fields", {})
 
-        for i, step in enumerate(op_info.get("steps", [])):
-            if len(op_info.get("steps", [])) > 1:
-                table_label = f"    [{step['table']}] {step['op_type']}"
+        # Build a concise field summary
+        parts = []
+        for f, info in fields.items():
+            typ_short = info.get("type", "")[0:3].lower() if info.get("type") else ""
+            if info.get("key"):
+                parts.append(f"{f}* (key)")
+            elif info.get("required"):
+                parts.append(f"{f}*")
+            elif info.get("default"):
+                parts.append(f"{f}={info['default']}")
             else:
-                table_label = None
+                parts.append(f)
 
-            fields = step.get("fields", {})
-            auto = step.get("auto", {})
+        field_str = ", ".join(parts) if parts else "(no fields)"
+        desc_str = f"  — {op_desc}" if op_desc else ""
+
+        print(f"    {op_name:<{name_w}}  {field_str}{desc_str}")
+
+    # Detailed field info for each op
+    print()
+    for op_name in op_names:
+        op_info = ops[op_name]
+        steps = op_info.get("steps", [])
+        if not steps:
+            continue
+
+        primary = steps[0]
+        fields = primary.get("fields", {})
+        auto = primary.get("auto", {})
+
+        if not fields and not auto:
+            continue
+
+        print(f"  {op_name}:")
+        if fields:
+            col_w = max(len(f) for f in fields)
+            for f, info in fields.items():
+                typ = info.get("type", "")
+                notes = []
+                if info.get("key"):
+                    notes.append("required, key")
+                elif info.get("required"):
+                    notes.append("required")
+                if info.get("default"):
+                    notes.append(f"default: {info['default']}")
+                note_str = f"  {', '.join(notes)}" if notes else ""
+                print(f"    {f:<{col_w}}  {typ:<10}{note_str}")
+
+        if auto:
+            auto_names = ", ".join(f"{f} ({info.get('source', '')})" for f, info in auto.items())
+            print(f"    auto: {auto_names}")
+
+        # Secondary steps (audit, etc.)
+        for step in steps[1:]:
             bind = step.get("bind", {})
-
-            # Only show the first (primary) step's fields in detail
-            # For secondary steps (audit, etc.), show a summary
-            if i > 0 and bind:
-                bound_cols = ", ".join(f"{k} from {v}" for k, v in bind.items())
-                user_fields = [f for f in fields if f not in bind]
-                parts = []
-                if user_fields:
-                    parts.append(", ".join(user_fields))
-                parts.append(bound_cols)
-                print(f"    Also writes to: {step['table']} ({'; '.join(parts)})")
-                continue
-
-            if table_label:
-                print(table_label)
-
-            if fields:
-                # Separate key fields, required fields, optional fields
-                key_fields = {f: info for f, info in fields.items() if info.get("key")}
-                req_fields = {f: info for f, info in fields.items()
-                              if info.get("required") and not info.get("key")}
-                opt_fields = {f: info for f, info in fields.items()
-                              if not info.get("required") and not info.get("key")}
-
-                if key_fields or req_fields or opt_fields:
-                    print("    Fields (you provide):")
-                    col_w = max(len(f) for f in fields)
-                    for f, info in fields.items():
-                        typ = info.get("type", "")
-                        notes = []
-                        if info.get("key"):
-                            notes.append("required, key")
-                        elif info.get("required"):
-                            notes.append("required")
-                        if info.get("default"):
-                            notes.append(f"default: {info['default']}")
-                        note_str = f"  ({', '.join(notes)})" if notes else ""
-                        print(f"      {f:<{col_w}}  {typ:<10}{note_str}")
-
-            if auto:
-                print("    Auto-generated:")
-                col_w = max(len(f) for f in auto)
-                for f, info in auto.items():
-                    typ = info.get("type", "")
-                    source = info.get("source", "")
-                    dflt = info.get("default", "")
-                    if source == "default" and dflt:
-                        note = f"default: {dflt}"
-                    else:
-                        note = source
-                    print(f"      {f:<{col_w}}  {typ:<10}  {note}")
+            if bind:
+                bound_parts = ", ".join(f"{k}={v}" for k, v in bind.items())
+                print(f"    + {step['table']}: {bound_parts}")
 
         # Example
         example = op_info.get("example")
         if example:
-            print(f"    Example:")
-            print(f"      {example}")
+            print(f"    example: {example}")
+
         print()
 
     # Recovery info
@@ -226,7 +236,7 @@ def _print_transaction_detail(detail: dict[str, Any]) -> None:
         print(f"    {recovery['description']}")
         check = recovery.get("check_message", {})
         if check:
-            print(f"    Check message: {json.dumps(check)}")
+            print(f"    Check: {json.dumps(check)}")
         print()
 
 

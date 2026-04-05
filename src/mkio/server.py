@@ -205,6 +205,7 @@ def _build_op_step(spec: dict[str, Any], tables: dict[str, dict]) -> dict[str, A
     fields = spec.get("fields", [])
     key = spec.get("key", [])
     raw_bind = spec.get("bind", {})
+    op_defaults = spec.get("defaults", {})
 
     step: dict[str, Any] = {"table": table_name, "op_type": op_type}
 
@@ -213,7 +214,7 @@ def _build_op_step(spec: dict[str, Any], tables: dict[str, dict]) -> dict[str, A
     col_defs = table_config.get("columns", {})
     parsed_cols = _parse_config_columns(col_defs) if col_defs else {}
 
-    # Client-provided fields
+    # Client-provided fields (from fields + key, excluding those fully defaulted)
     client_fields = list(fields) + [k for k in key if k not in fields]
     fields_info: dict[str, Any] = {}
     for f in client_fields:
@@ -222,6 +223,10 @@ def _build_op_step(spec: dict[str, Any], tables: dict[str, dict]) -> dict[str, A
         if f in key:
             info["key"] = True
             info["required"] = True
+        elif f in op_defaults:
+            # Op provides a default — client can override but doesn't have to
+            info["required"] = False
+            info["default"] = op_defaults[f]
         elif col.get("notnull") and col.get("dflt_value") is None and not col.get("pk"):
             info["required"] = True
         else:
@@ -232,8 +237,8 @@ def _build_op_step(spec: dict[str, Any], tables: dict[str, dict]) -> dict[str, A
     if fields_info:
         step["fields"] = fields_info
 
-    # Auto-generated columns (not in fields, key, or bind)
-    all_client = set(fields) | set(key) | set(raw_bind.keys())
+    # Auto-generated columns (not in fields, key, bind, or op defaults)
+    all_client = set(fields) | set(key) | set(raw_bind.keys()) | set(op_defaults.keys())
     auto_info: dict[str, Any] = {}
     for col_name, col in parsed_cols.items():
         if col_name not in all_client:
@@ -247,6 +252,15 @@ def _build_op_step(spec: dict[str, Any], tables: dict[str, dict]) -> dict[str, A
                 info["source"] = "default"
                 info["default"] = col["dflt_value"]
             auto_info[col_name] = info
+    # Op-level defaults for columns not in fields/key go into auto
+    for col_name, val in op_defaults.items():
+        if col_name not in fields and col_name not in key:
+            col = parsed_cols.get(col_name, {})
+            auto_info[col_name] = {
+                "type": col.get("type", "TEXT"),
+                "source": "op_default",
+                "default": val,
+            }
     if auto_info:
         step["auto"] = auto_info
 
@@ -351,6 +365,7 @@ def _build_send_example(
     spec = op_list[0]
     fields = spec.get("fields", [])
     key = spec.get("key", [])
+    op_defaults = spec.get("defaults", {})
     table_name = spec["table"]
     col_defs = tables.get(table_name, {}).get("columns", {})
     parsed = _parse_config_columns(col_defs) if col_defs else {}
@@ -359,6 +374,8 @@ def _build_send_example(
     for f in key:
         example_data[f] = "..."
     for f in fields:
+        if f in op_defaults:
+            continue  # Skip fields with op-level defaults
         col = parsed.get(f, {})
         col_type = col.get("type", "TEXT")
         if col_type in ("INTEGER", "INT"):

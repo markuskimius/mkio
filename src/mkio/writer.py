@@ -20,6 +20,8 @@ class CompiledOp:
     param_names: tuple[str, ...]
     bind: dict[str, tuple[int, str]] = field(default_factory=dict)
     # bind: param_name -> (op_index, field_name) for cross-op references
+    defaults: dict[str, Any] = field(default_factory=dict)
+    # defaults: param_name -> static value (client doesn't need to provide)
 
 
 @dataclass(slots=True)

@@ -117,6 +117,7 @@ def _compile_op(spec: dict[str, Any]) -> CompiledOp:
     fields = list(spec.get("fields", []))
     key = spec.get("key", [])
     raw_bind = spec.get("bind", {})
+    defaults = dict(spec.get("defaults", {}))
 
     # Parse bind references: {"order_id": "$0.id"} -> {"order_id": (0, "id")}
     bind: dict[str, tuple[int, str]] = {}
@@ -128,9 +129,10 @@ def _compile_op(spec: dict[str, Any]) -> CompiledOp:
             raise ValueError(f"Invalid bind reference: {ref!r} (must be '$N.field')")
         bind[col] = (int(idx_str), field_name)
 
-    # Merge bound column names into the field list for SQL generation
+    # Merge bound and defaulted column names into the field list for SQL generation
     bound_cols = list(raw_bind.keys())
-    all_fields = fields + [c for c in bound_cols if c not in fields]
+    default_cols = [c for c in defaults if c not in fields and c not in bound_cols]
+    all_fields = fields + [c for c in bound_cols if c not in fields] + default_cols
 
     # _mkio_ref is always the last parameter (filled by writer at execution time)
     REF_COL = "_mkio_ref"
@@ -140,19 +142,19 @@ def _compile_op(spec: dict[str, Any]) -> CompiledOp:
         col_list = ", ".join(cols)
         placeholders = ", ".join("?" for _ in cols)
         sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) RETURNING *"
-        return CompiledOp(table, op_type, sql, tuple(cols), bind)
+        return CompiledOp(table, op_type, sql, tuple(cols), bind, defaults)
 
     elif op_type == "update":
-        set_fields = fields + [c for c in bound_cols if c not in fields] + [REF_COL]
+        set_fields = fields + [c for c in bound_cols if c not in fields] + default_cols + [REF_COL]
         set_clause = ", ".join(f"{f} = ?" for f in set_fields)
         where_clause = " AND ".join(f"{k} = ?" for k in key)
         sql = f"UPDATE {table} SET {set_clause} WHERE {where_clause} RETURNING *"
-        return CompiledOp(table, op_type, sql, tuple(set_fields) + tuple(key), bind)
+        return CompiledOp(table, op_type, sql, tuple(set_fields) + tuple(key), bind, defaults)
 
     elif op_type == "delete":
         where_clause = " AND ".join(f"{k} = ?" for k in key)
         sql = f"DELETE FROM {table} WHERE {where_clause}"
-        return CompiledOp(table, op_type, sql, tuple(key), bind)
+        return CompiledOp(table, op_type, sql, tuple(key), bind, defaults)
 
     elif op_type == "upsert":
         all_upsert = list(key) + [f for f in all_fields if f not in key] + [REF_COL]
@@ -165,7 +167,7 @@ def _compile_op(spec: dict[str, Any]) -> CompiledOp:
             f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) "
             f"ON CONFLICT({key_list}) DO UPDATE SET {update_clause} RETURNING *"
         )
-        return CompiledOp(table, op_type, sql, tuple(all_upsert), bind)
+        return CompiledOp(table, op_type, sql, tuple(all_upsert), bind, defaults)
 
     else:
         raise ValueError(f"Unknown operation type: {op_type}")
@@ -175,8 +177,16 @@ def _extract_params(op: CompiledOp, data: dict[str, Any]) -> tuple[Any, ...]:
     """Extract parameters from message data in the order the SQL expects.
 
     Bound params and _mkio_ref get None placeholders — resolved by the writer.
+    Defaults are used when the client doesn't provide a value.
     """
-    return tuple(
-        None if (p in op.bind or p == "_mkio_ref") else data[p]
-        for p in op.param_names
-    )
+    result = []
+    for p in op.param_names:
+        if p in op.bind or p == "_mkio_ref":
+            result.append(None)
+        elif p in data:
+            result.append(data[p])
+        elif p in op.defaults:
+            result.append(op.defaults[p])
+        else:
+            result.append(data[p])  # raises KeyError for missing required fields
+    return tuple(result)

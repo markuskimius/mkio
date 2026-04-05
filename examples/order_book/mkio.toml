@@ -14,19 +14,30 @@ columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", event = "TEXT", order_id =
 append_only = true
 
 # --- Transaction service (all order operations at one endpoint) ---
-# Client sends "op" field to select which operation: "place" or "update_status"
 
 [services.orders]
 type = "transaction"
 
 [services.orders.ops]
-place = [
+new = [
     { table = "orders", op_type = "insert", fields = ["side", "symbol", "qty", "price"] },
-    { table = "audit_log", op_type = "insert", fields = ["event"], bind = { order_id = "$0.id", status = "$0.status" } },
+    { table = "audit_log", op_type = "insert", defaults = { event = "new" }, bind = { order_id = "$0.id", status = "$0.status" } },
 ]
-update_status = [
-    { table = "orders", op_type = "update", key = ["id"], fields = ["status"] },
-    { table = "audit_log", op_type = "insert", fields = ["event"], bind = { order_id = "$0.id", status = "$0.status" } },
+accept = [
+    { table = "orders", op_type = "update", key = ["id"], fields = ["status"], defaults = { status = "accepted" } },
+    { table = "audit_log", op_type = "insert", defaults = { event = "accepted" }, bind = { order_id = "$0.id", status = "$0.status" } },
+]
+reject = [
+    { table = "orders", op_type = "update", key = ["id"], fields = ["status"], defaults = { status = "rejected" } },
+    { table = "audit_log", op_type = "insert", defaults = { event = "rejected" }, bind = { order_id = "$0.id", status = "$0.status" } },
+]
+fill = [
+    { table = "orders", op_type = "update", key = ["id"], fields = ["status"], defaults = { status = "filled" } },
+    { table = "audit_log", op_type = "insert", defaults = { event = "filled" }, bind = { order_id = "$0.id", status = "$0.status" } },
+]
+cancel = [
+    { table = "orders", op_type = "update", key = ["id"], fields = ["status"], defaults = { status = "cancelled" } },
+    { table = "audit_log", op_type = "insert", defaults = { event = "cancelled" }, bind = { order_id = "$0.id", status = "$0.status" } },
 ]
 
 # --- Live data services ---
