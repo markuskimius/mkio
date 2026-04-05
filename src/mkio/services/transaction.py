@@ -132,14 +132,18 @@ def _compile_op(spec: dict[str, Any]) -> CompiledOp:
     bound_cols = list(raw_bind.keys())
     all_fields = fields + [c for c in bound_cols if c not in fields]
 
+    # _mkio_ref is always the last parameter (filled by writer at execution time)
+    REF_COL = "_mkio_ref"
+
     if op_type == "insert":
-        col_list = ", ".join(all_fields)
-        placeholders = ", ".join("?" for _ in all_fields)
+        cols = all_fields + [REF_COL]
+        col_list = ", ".join(cols)
+        placeholders = ", ".join("?" for _ in cols)
         sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) RETURNING *"
-        return CompiledOp(table, op_type, sql, tuple(all_fields), bind)
+        return CompiledOp(table, op_type, sql, tuple(cols), bind)
 
     elif op_type == "update":
-        set_fields = fields + [c for c in bound_cols if c not in fields]
+        set_fields = fields + [c for c in bound_cols if c not in fields] + [REF_COL]
         set_clause = ", ".join(f"{f} = ?" for f in set_fields)
         where_clause = " AND ".join(f"{k} = ?" for k in key)
         sql = f"UPDATE {table} SET {set_clause} WHERE {where_clause} RETURNING *"
@@ -151,7 +155,7 @@ def _compile_op(spec: dict[str, Any]) -> CompiledOp:
         return CompiledOp(table, op_type, sql, tuple(key), bind)
 
     elif op_type == "upsert":
-        all_upsert = list(key) + [f for f in all_fields if f not in key]
+        all_upsert = list(key) + [f for f in all_fields if f not in key] + [REF_COL]
         col_list = ", ".join(all_upsert)
         placeholders = ", ".join("?" for _ in all_upsert)
         non_key = [f for f in all_upsert if f not in key]
@@ -170,6 +174,9 @@ def _compile_op(spec: dict[str, Any]) -> CompiledOp:
 def _extract_params(op: CompiledOp, data: dict[str, Any]) -> tuple[Any, ...]:
     """Extract parameters from message data in the order the SQL expects.
 
-    Bound params get None placeholders — resolved by the writer at execution time.
+    Bound params and _mkio_ref get None placeholders — resolved by the writer.
     """
-    return tuple(None if p in op.bind else data[p] for p in op.param_names)
+    return tuple(
+        None if (p in op.bind or p == "_mkio_ref") else data[p]
+        for p in op.param_names
+    )

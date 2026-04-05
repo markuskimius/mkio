@@ -156,16 +156,19 @@ class WriteBatcher:
             for i, req in enumerate(batch):
                 savepoint = f"req_{i}"
                 try:
+                    version = next_version()
                     await (await conn.execute(f"SAVEPOINT {savepoint}")).close()
                     returned_rows: list[tuple[CompiledOp, dict[str, Any]]] = []
                     for op_idx, (op, params) in enumerate(zip(req.ops, req.params_list)):
-                        # Resolve cross-op bindings from previous ops' results
+                        # Resolve cross-op bindings and _mkio_ref
+                        resolved = list(params)
                         if op.bind:
-                            resolved = list(params)
                             for param_name, (src_idx, src_field) in op.bind.items():
                                 param_pos = op.param_names.index(param_name)
                                 resolved[param_pos] = returned_rows[src_idx][1][src_field]
-                            params = tuple(resolved)
+                        if "_mkio_ref" in op.param_names:
+                            resolved[op.param_names.index("_mkio_ref")] = version
+                        params = tuple(resolved)
                         cursor = await conn.execute(op.sql, params)
                         if op.op_type != "delete":
                             row = await cursor.fetchone()
@@ -175,7 +178,6 @@ class WriteBatcher:
                         returned_rows.append((op, dict(row) if row else req.data))
                     await (await conn.execute(f"RELEASE {savepoint}")).close()
 
-                    version = next_version()
                     successful.append((req, version))
 
                     for op, row_data in returned_rows:

@@ -60,6 +60,20 @@ class Database:
                 )
             await self._write_conn.commit()
 
+        # Add internal _mkio_ref column to all tables (for cross-restart recovery)
+        for table_name in self._tables:
+            try:
+                await self._write_conn.execute(
+                    f"ALTER TABLE {table_name} ADD COLUMN _mkio_ref TEXT DEFAULT ''"
+                )
+            except Exception:
+                pass  # Column already exists
+            await self._write_conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{table_name}__mkio_ref "
+                f"ON {table_name}(_mkio_ref)"
+            )
+        await self._write_conn.commit()
+
         # Start periodic WAL checkpoint
         interval = self._config.get("wal_checkpoint_interval_s", 300)
         if interval > 0 and not is_memory:

@@ -492,3 +492,231 @@ async def test_dead_subscriber_removed(subpub_svc, bus):
     await asyncio.sleep(0.1)
 
     assert len(subpub_svc._subscribers) == 0
+
+
+# ---- Cross-restart recovery ------------------------------------------------
+
+async def test_subpub_cross_restart_delta(db, bus, writer):
+    """After inserting via transaction, stopping the service, and creating a new
+    instance from the same DB, a client should get a delta (not full snapshot)."""
+    txn_config = {
+        "type": "transaction",
+        "ops": [
+            {"table": "orders", "op_type": "insert", "fields": ["id", "symbol", "qty"]},
+        ],
+    }
+    txn_svc = TransactionService(config=txn_config, db=db, change_bus=bus, writer=writer)
+    txn_svc.name = "add_order"
+    await txn_svc.start()
+
+    subpub_config = {
+        "type": "subpub",
+        "primary_table": "orders",
+        "watch_tables": ["orders"],
+        "key": "id",
+        "filterable": ["status", "symbol"],
+        "change_log_size": 100,
+    }
+    svc1 = SubPubService(config=subpub_config, db=db, change_bus=bus, writer=writer)
+    svc1.name = "live_orders"
+    await svc1.start()
+
+    # Insert a row via transaction (stamps _mkio_ref in DB)
+    ws = MockWebSocket()
+    await txn_svc.on_message(ws, {
+        "ref": "r1",
+        "data": {"id": "1", "symbol": "AAPL", "qty": 100},
+    })
+
+    # Subscribe and get snapshot ref
+    ws2 = MockWebSocket()
+    await svc1.on_subscribe(ws2, {"type": "subscribe"})
+    snapshot_ref = ws2.get_messages()[0]["ref"]
+    assert snapshot_ref != ""
+
+    # Insert another row
+    ws3 = MockWebSocket()
+    await txn_svc.on_message(ws3, {
+        "ref": "r2",
+        "data": {"id": "2", "symbol": "GOOG", "qty": 50},
+    })
+    await asyncio.sleep(0.1)
+
+    # Stop the service (simulating restart)
+    await svc1.stop()
+
+    # Create a NEW service instance from the same DB (simulating restart)
+    bus2 = ChangeBus()
+    svc2 = SubPubService(config=subpub_config, db=db, change_bus=bus2, writer=writer)
+    svc2.name = "live_orders"
+    await svc2.start()
+
+    # Reconnect with the snapshot ref from before "restart"
+    ws4 = MockWebSocket()
+    await svc2.on_subscribe(ws4, {
+        "type": "subscribe",
+        "ref": snapshot_ref,
+    })
+    msgs = ws4.get_messages()
+    assert msgs[0]["type"] == "delta"
+    # Delta should contain only the row inserted after the snapshot ref
+    assert len(msgs[0]["changes"]) >= 1
+    found = any(c["row"]["symbol"] == "GOOG" for c in msgs[0]["changes"])
+    assert found, "Delta should include the GOOG row inserted after snapshot ref"
+    # _mkio_ref should be visible in client data
+    for c in msgs[0]["changes"]:
+        assert "_mkio_ref" in c["row"]
+
+    await svc2.stop()
+    await txn_svc.stop()
+
+
+async def test_stream_cross_restart_recovery(db, bus, writer):
+    """Stream buffer should have consistent refs across restart."""
+    txn_config = {
+        "type": "transaction",
+        "ops": [
+            {"table": "audit_log", "op_type": "insert", "fields": ["event", "order_id"]},
+        ],
+    }
+    txn_svc = TransactionService(config=txn_config, db=db, change_bus=bus, writer=writer)
+    txn_svc.name = "add_audit"
+    await txn_svc.start()
+
+    stream_config = {
+        "type": "stream",
+        "primary_table": "audit_log",
+        "watch_tables": ["audit_log"],
+        "buffer_size": 100,
+    }
+    svc1 = StreamService(config=stream_config, db=db, change_bus=bus, writer=writer)
+    svc1.name = "audit_feed"
+    await svc1.start()
+
+    # Insert 3 rows
+    for i in range(3):
+        ws = MockWebSocket()
+        await txn_svc.on_message(ws, {
+            "ref": f"r{i}",
+            "data": {"event": f"event_{i}", "order_id": str(i)},
+        })
+    await asyncio.sleep(0.1)
+
+    # Subscribe and get snapshot ref
+    ws2 = MockWebSocket()
+    await svc1.on_subscribe(ws2, {"type": "subscribe"})
+    snapshot_msg = ws2.get_messages()[0]
+    snapshot_ref = snapshot_msg["ref"]
+    initial_count = len(snapshot_msg["rows"])
+
+    # Insert more rows
+    for i in range(3, 6):
+        ws = MockWebSocket()
+        await txn_svc.on_message(ws, {
+            "ref": f"r{i}",
+            "data": {"event": f"event_{i}", "order_id": str(i)},
+        })
+    await asyncio.sleep(0.1)
+
+    # Stop and recreate (simulate restart)
+    await svc1.stop()
+    bus2 = ChangeBus()
+    svc2 = StreamService(config=stream_config, db=db, change_bus=bus2, writer=writer)
+    svc2.name = "audit_feed"
+    await svc2.start()
+
+    # Reconnect with snapshot ref — should only get rows after that ref
+    ws3 = MockWebSocket()
+    await svc2.on_subscribe(ws3, {
+        "type": "subscribe",
+        "ref": snapshot_ref,
+    })
+    msgs = ws3.get_messages()
+    assert msgs[0]["type"] == "snapshot"
+    # Should have only the 3 rows inserted after the snapshot ref
+    assert len(msgs[0]["rows"]) == 3
+    for row in msgs[0]["rows"]:
+        assert "_mkio_ref" in row
+
+    await svc2.stop()
+    await txn_svc.stop()
+
+
+async def test_query_cross_restart_delta(db, bus, writer):
+    """Query service should support delta reconnection after restart."""
+    txn_config = {
+        "type": "transaction",
+        "ops": [
+            {"table": "orders", "op_type": "insert", "fields": ["id", "symbol", "qty"]},
+        ],
+    }
+    txn_svc = TransactionService(config=txn_config, db=db, change_bus=bus, writer=writer)
+    txn_svc.name = "add_order"
+    await txn_svc.start()
+
+    query_config = {
+        "type": "query",
+        "primary_table": "orders",
+        "watch_tables": ["orders"],
+        "filterable": ["status"],
+        "change_log_size": 100,
+    }
+    svc1 = QueryService(config=query_config, db=db, change_bus=bus, writer=writer)
+    svc1.name = "all_orders"
+    await svc1.start()
+
+    # Insert a row
+    ws = MockWebSocket()
+    await txn_svc.on_message(ws, {
+        "ref": "r1",
+        "data": {"id": "1", "symbol": "AAPL", "qty": 100},
+    })
+    await asyncio.sleep(0.1)
+
+    # Subscribe and get ref
+    ws2 = MockWebSocket()
+    await svc1.on_subscribe(ws2, {"type": "subscribe"})
+    snapshot_ref = ws2.get_messages()[0]["ref"]
+
+    # Insert another row
+    ws3 = MockWebSocket()
+    await txn_svc.on_message(ws3, {
+        "ref": "r2",
+        "data": {"id": "2", "symbol": "MSFT", "qty": 50},
+    })
+    await asyncio.sleep(0.1)
+
+    # Restart
+    await svc1.stop()
+    bus2 = ChangeBus()
+    svc2 = QueryService(config=query_config, db=db, change_bus=bus2, writer=writer)
+    svc2.name = "all_orders"
+    await svc2.start()
+
+    # Reconnect with ref
+    ws4 = MockWebSocket()
+    await svc2.on_subscribe(ws4, {
+        "type": "subscribe",
+        "ref": snapshot_ref,
+    })
+    msgs = ws4.get_messages()
+    assert msgs[0]["type"] == "delta"
+    assert len(msgs[0]["changes"]) >= 1
+    found = any(c["row"]["symbol"] == "MSFT" for c in msgs[0]["changes"])
+    assert found
+
+    await svc2.stop()
+    await txn_svc.stop()
+
+
+async def test_mkio_ref_stored_in_db(txn_svc, db):
+    """_mkio_ref should be stored in the database for every write."""
+    ws = MockWebSocket()
+    await txn_svc.on_message(ws, {
+        "ref": "r1",
+        "data": {"id": "1", "symbol": "AAPL", "qty": 100},
+    })
+
+    # Verify _mkio_ref is in the database
+    rows = await db.read("SELECT * FROM orders WHERE id = '1'")
+    assert rows[0].get("_mkio_ref", "") != ""

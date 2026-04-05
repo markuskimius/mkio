@@ -51,6 +51,17 @@ class QueryService(Service):
         self._listener_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
+        # Seed change log from DB for cross-restart delta reconnection
+        recent = await self.db.read(
+            f"SELECT * FROM (SELECT * FROM {self._table} WHERE _mkio_ref != '' "
+            f"ORDER BY _mkio_ref DESC LIMIT ?) ORDER BY _mkio_ref ASC",
+            (self._change_log_size,),
+        )
+        for row in recent:
+            ref = row.get("_mkio_ref", "")
+            if ref:
+                self._change_log.append((ref, "upsert", row))
+
         watch = self.config.get("watch_tables", [self._table])
         self._bus_queue = self.bus.subscribe(watch)
         self._listener_task = asyncio.create_task(self._listen_changes())

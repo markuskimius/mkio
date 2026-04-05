@@ -10,7 +10,7 @@ batch_max_wait_ms = 2.0
 columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", side = "TEXT NOT NULL", symbol = "TEXT NOT NULL", qty = "INTEGER", price = "REAL DEFAULT 0", status = "TEXT DEFAULT 'pending'" }
 
 [tables.audit_log]
-columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", ts = "TIMESTAMP DEFAULT CURRENT_TIMESTAMP", event = "TEXT", order_id = "INTEGER", status = "TEXT" }
+columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", event = "TEXT", order_id = "INTEGER", status = "TEXT" }
 append_only = true
 
 # --- Transaction service (all order operations at one endpoint) ---

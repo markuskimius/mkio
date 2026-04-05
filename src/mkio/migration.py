@@ -152,8 +152,10 @@ def diff_schema(
                         data_impact=f"None — existing rows get default/NULL",
                     ))
 
-        # Removed columns
+        # Removed columns (skip internal _mkio_ref — managed by framework)
         for col_name in existing_cols:
+            if col_name == "_mkio_ref":
+                continue
             if col_name not in config_parsed:
                 changes.append(SchemaChange(
                     table=table_name,
@@ -162,8 +164,10 @@ def diff_schema(
                     data_impact=f'Data in column "{col_name}" will be lost',
                 ))
 
-        # Changed column types
+        # Changed column types (skip internal columns)
         for col_name, col_info in config_parsed.items():
+            if col_name == "_mkio_ref":
+                continue
             if col_name in existing_cols:
                 existing_type = existing_cols[col_name]["type"].upper()
                 config_type = col_info["type"].upper()
@@ -222,7 +226,7 @@ def _build_recreate_steps(
             trigger_change.sql_steps = ["-- handled by prior recreation"]
             return
 
-    existing_cols = set(existing_table["columns"].keys())
+    existing_cols = set(existing_table["columns"].keys()) - {"_mkio_ref"}
     config_parsed = _parse_config_columns(config_table["columns"])
     config_cols = set(config_parsed.keys())
     shared = existing_cols & config_cols

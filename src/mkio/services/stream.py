@@ -50,8 +50,8 @@ class StreamService(Service):
         self._listener_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
-        # Pre-fill buffer with recent rows
-        # For simple queries, use rowid ordering. For JOINs, just limit.
+        # Pre-fill buffer with recent rows, using stored _mkio_ref for
+        # consistent refs across restarts
         if "JOIN" not in self._sql.upper():
             sql = f"{self._sql} ORDER BY rowid DESC LIMIT ?"
         else:
@@ -59,10 +59,10 @@ class StreamService(Service):
         rows = await self.db.read(sql, (self._buffer_size,))
         if "JOIN" not in self._sql.upper():
             rows.reverse()
-        # Assign synthetic versions for pre-existing rows (they don't have real versions)
         from mkio._version import next_version
         for row in rows:
-            ver = next_version()
+            ref = row.get("_mkio_ref", "")
+            ver = ref if ref else next_version()
             self._buffer.append((ver, row))
 
         watch = self.config.get("watch_tables", [self._table])
