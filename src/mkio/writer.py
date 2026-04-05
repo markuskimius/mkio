@@ -50,18 +50,16 @@ class WriteBatcher:
     async def stop(self, drain: bool = True) -> None:
         """Stop the writer. If drain=True, commit all queued writes first."""
         self._stopping = True
-        if drain and not self._queue.empty():
-            # Wake the run loop by putting a sentinel and let it drain
-            sentinel = WriteRequest(
-                ops=(), params_list=(), data={},
-                future=asyncio.get_running_loop().create_future(),
-            )
-            self._queue.put_nowait(sentinel)
+        # Always send a sentinel to wake the run loop (it may be blocked on queue.get)
+        sentinel = WriteRequest(
+            ops=(), params_list=(), data={},
+            future=asyncio.get_running_loop().create_future(),
+        )
+        self._queue.put_nowait(sentinel)
         if self._task:
             if drain:
-                # Give the loop time to drain
                 try:
-                    await asyncio.wait_for(self._task, timeout=5.0)
+                    await asyncio.wait_for(self._task, timeout=2.0)
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     self._task.cancel()
                     try:

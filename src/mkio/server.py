@@ -76,7 +76,12 @@ def serve(config: str | Path | dict[str, Any]) -> None:
         else:
             app.router.add_static(route, path)
 
-    web.run_app(app, host=cfg.get("host", "0.0.0.0"), port=cfg.get("port", 8080))
+    web.run_app(
+        app,
+        host=cfg.get("host", "0.0.0.0"),
+        port=cfg.get("port", 8080),
+        shutdown_timeout=cfg.get("shutdown_timeout", 0),
+    )
 
 
 def _make_index_handler(static_path: Path):

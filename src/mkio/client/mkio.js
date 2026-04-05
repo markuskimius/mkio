@@ -45,12 +45,16 @@ class MkioClient {
    * @param {boolean} [opts.reconnect=true]
    * @param {number} [opts.backoffBase=100] - Initial backoff in ms
    * @param {number} [opts.backoffMax=30000] - Max backoff in ms
+   * @param {Function} [opts.onConnect] - Called on (re)connect
+   * @param {Function} [opts.onDisconnect] - Called on disconnect
    */
   constructor(url, opts = {}) {
     this.url = url;
     this.reconnect = opts.reconnect !== false;
     this.backoffBase = opts.backoffBase || 100;
     this.backoffMax = opts.backoffMax || 30000;
+    this.onConnect = opts.onConnect || (() => {});
+    this.onDisconnect = opts.onDisconnect || (() => {});
 
     this._ws = null;
     this._pending = new Map(); // ref -> {resolve, reject}
@@ -69,6 +73,7 @@ class MkioClient {
       this._ws.onopen = () => {
         this._backoff = this.backoffBase;
         this._resubscribe();
+        this.onConnect();
         resolve();
       };
 
@@ -84,6 +89,7 @@ class MkioClient {
       };
 
       this._ws.onclose = () => {
+        this.onDisconnect();
         if (!this._closed && this.reconnect) {
           this._attemptReconnect();
         }
