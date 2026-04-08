@@ -202,7 +202,7 @@ class MkioClient:
             return
 
         # Route to no-ref pending (sends where client omitted ref)
-        if msg_type == "result" and self._pending_no_ref:
+        if msg_type in ("result", "error") and self._pending_no_ref:
             future = self._pending_no_ref.pop(0)
             if not future.done():
                 future.set_result(data)
