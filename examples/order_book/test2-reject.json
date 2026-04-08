@@ -1,0 +1,7 @@
+{
+  "service": "orders",
+  "data": {
+    "id": 3
+  },
+  "op": "reject"
+}
