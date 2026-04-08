@@ -66,6 +66,7 @@ class MkioClient:
         self._session: aiohttp.ClientSession | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._pending_no_ref: list[asyncio.Future[dict[str, Any]]] = []
         self._subscriptions: dict[str, _Subscription] = {}
         self._receive_task: asyncio.Task[None] | None = None
 
@@ -102,15 +103,19 @@ class MkioClient:
     ) -> dict[str, Any]:
         """Send a transaction message and wait for the result.
 
+        If *ref* is not provided, the server will assign one.
         Extra keyword arguments (e.g. op="place") are included in the message.
         """
-        if ref is None:
-            ref = make_ref()
-        msg: dict[str, Any] = {"service": service, "data": data, "ref": ref, **kwargs}
+        msg: dict[str, Any] = {"service": service, "data": data, **kwargs}
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
-        self._pending[ref] = future
+
+        if ref is not None:
+            msg["ref"] = ref
+            self._pending[ref] = future
+        else:
+            self._pending_no_ref.append(future)
 
         assert self._ws is not None
         await self._ws.send_bytes(dumps(msg))
@@ -192,6 +197,13 @@ class MkioClient:
         # Route to pending future (transaction results, check results)
         if ref and ref in self._pending:
             future = self._pending.pop(ref)
+            if not future.done():
+                future.set_result(data)
+            return
+
+        # Route to no-ref pending (sends where client omitted ref)
+        if msg_type == "result" and self._pending_no_ref:
+            future = self._pending_no_ref.pop(0)
             if not future.done():
                 future.set_result(data)
             return

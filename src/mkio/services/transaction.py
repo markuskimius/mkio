@@ -7,6 +7,7 @@ from typing import Any
 
 from aiohttp.web import WebSocketResponse
 
+from mkio._version import next_version
 from mkio.services.base import Service
 from mkio.writer import CompiledOp
 from mkio.ws_protocol import make_result, make_error
@@ -61,6 +62,8 @@ class TransactionService(Service):
 
     async def on_message(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
         ref = msg.get("ref")
+        if ref is None:
+            ref = next_version()
         msg_type = msg.get("type", "")
 
         # Handle "check" messages for transaction recovery

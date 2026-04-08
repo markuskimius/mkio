@@ -75,15 +75,16 @@ class FakeServer:
                         resp["ref"] = ref
                     await ws.send_bytes(dumps(resp))
                 else:
-                    # Transaction
+                    # Transaction — server always assigns a ref
+                    if not ref:
+                        ref = "20260404 00:00:03.000000000000"
                     resp = {
                         "type": "result",
                         "service": service,
                         "version": "20260404 00:00:02.000000000000",
+                        "ref": ref,
                         "ok": True,
                     }
-                    if ref:
-                        resp["ref"] = ref
                     await ws.send_bytes(dumps(resp))
 
         return ws
@@ -117,6 +118,20 @@ async def test_client_send_with_custom_ref(fake_server):
         my_ref = "20260404 12:00:00.000000000000"
         result = await client.send("test_service", {"id": "1"}, ref=my_ref)
         assert result["ref"] == my_ref
+
+
+async def test_client_send_without_ref(fake_server):
+    """When ref is omitted, client should not include it and still get the result."""
+    server, server_obj = fake_server
+    url = f"ws://localhost:{server.port}/ws"
+
+    async with MkioClient(url, reconnect=False) as client:
+        result = await client.send("test_service", {"id": "1", "name": "hello"})
+        assert result["ok"] is True
+        assert result["type"] == "result"
+        # Server should have received the message without a ref field
+        sent = server_obj.received[-1]
+        assert "ref" not in sent
 
 
 async def test_client_subscribe(fake_server):
