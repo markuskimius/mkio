@@ -401,3 +401,79 @@ async def test_unsubscribe_stops_updates(client):
 
     await ws.close()
     await ws2.close()
+
+
+async def test_msgid_echoed_on_result(client):
+    """Transaction with msgid should echo it back in the result."""
+    ws = await client.ws_connect("/ws")
+    result = await ws_send_recv(ws, {
+        "service": "add_order",
+        "ref": "ref_msgid",
+        "msgid": "client-msg-42",
+        "data": {"id": "m1", "symbol": "AAPL", "qty": 100},
+    })
+    assert result["type"] == "result"
+    assert result["ok"] is True
+    assert result["msgid"] == "client-msg-42"
+    await ws.close()
+
+
+async def test_msgid_echoed_on_error(client):
+    """Transaction error should echo msgid back."""
+    ws = await client.ws_connect("/ws")
+    result = await ws_send_recv(ws, {
+        "service": "add_order",
+        "ref": "ref_msgid_err",
+        "msgid": "client-msg-99",
+        "data": {},  # Missing required fields
+    })
+    assert result["type"] == "error"
+    assert result["msgid"] == "client-msg-99"
+    await ws.close()
+
+
+async def test_msgid_absent_when_not_sent(client):
+    """Result without msgid in request should not have msgid in response."""
+    ws = await client.ws_connect("/ws")
+    result = await ws_send_recv(ws, {
+        "service": "add_order",
+        "ref": "ref_no_msgid",
+        "data": {"id": "m2", "symbol": "GOOG", "qty": 50},
+    })
+    assert result["type"] == "result"
+    assert "msgid" not in result
+    await ws.close()
+
+
+async def test_msgid_with_live_updates(client):
+    """Transaction with msgid should not interfere with subscription updates."""
+    ws_sub = await client.ws_connect("/ws")
+
+    # Subscribe to live_orders
+    await ws_sub.send_bytes(dumps({
+        "service": "live_orders",
+        "type": "subscribe",
+    }))
+    await ws_sub.receive()  # Consume snapshot
+
+    # Send transaction with msgid
+    ws_tx = await client.ws_connect("/ws")
+    result = await ws_send_recv(ws_tx, {
+        "service": "add_order",
+        "ref": "ref_live",
+        "msgid": "live-test-1",
+        "data": {"id": "live1", "symbol": "TSLA", "qty": 75},
+    })
+    assert result["ok"] is True
+    assert result["msgid"] == "live-test-1"
+
+    # Subscriber should still get the update
+    resp = await asyncio.wait_for(ws_sub.receive(), timeout=2.0)
+    update = loads(resp.data)
+    assert update["type"] == "update"
+    assert update["op"] == "insert"
+    assert update["row"]["symbol"] == "TSLA"
+    assert "msgid" not in update  # Updates don't carry msgid
+
+    await ws_sub.close()
+    await ws_tx.close()

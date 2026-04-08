@@ -524,16 +524,17 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             service_name = url_service_name or msg.get("service")
             ref = msg.get("ref")
+            msgid = msg.get("msgid")
             msg_type = msg.get("type", "")
 
             # Handle monitor requests — no service required for "list"
             if msg_type == "monitor":
                 target = service_name
                 if not target:
-                    await ws.send_bytes(make_error(ref, "Missing 'service' field"))
+                    await ws.send_bytes(make_error(ref, "Missing 'service' field", msgid=msgid))
                     continue
                 if target not in services:
-                    await ws.send_bytes(make_error(ref, f"Unknown service: {target}"))
+                    await ws.send_bytes(make_error(ref, f"Unknown service: {target}", msgid=msgid))
                     continue
                 monitors[target].add(ws)
                 monitoring.add(target)
@@ -544,12 +545,12 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                 continue
 
             if not service_name:
-                await ws.send_bytes(make_error(ref, "Missing 'service' field"))
+                await ws.send_bytes(make_error(ref, "Missing 'service' field", msgid=msgid))
                 continue
 
             svc = services.get(service_name)
             if svc is None:
-                await ws.send_bytes(make_error(ref, f"Unknown service: {service_name}"))
+                await ws.send_bytes(make_error(ref, f"Unknown service: {service_name}", msgid=msgid))
                 continue
 
             # Notify monitors of inbound message

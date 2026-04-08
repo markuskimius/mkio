@@ -65,15 +65,16 @@ class TransactionService(Service):
         if ref is None:
             ref = next_ref()
         msg_type = msg.get("type", "")
+        msgid = msg.get("msgid")
 
         # Handle "check" messages for transaction recovery
         if msg_type == "check":
             check_ref = msg.get("ref", "")
             cached = self._result_cache.get(check_ref)
             if cached is not None:
-                resp = make_result(check_ref, self.name, cached)
+                resp = make_result(check_ref, self.name, cached, msgid=msgid)
             else:
-                resp = make_result(check_ref, self.name, {"status": "unknown"})
+                resp = make_result(check_ref, self.name, {"status": "unknown"}, msgid=msgid)
             await ws.send_bytes(resp)
             await self.notify_monitors("out", resp)
             return
@@ -88,15 +89,15 @@ class TransactionService(Service):
             result = await self.writer.submit(compiled_ops, params_list, data, ref=ref)
             # Cache result for recovery
             self._cache_result(ref, result)
-            resp = make_result(ref, self.name, result)
+            resp = make_result(ref, self.name, result, msgid=msgid)
             await ws.send_bytes(resp)
             await self.notify_monitors("out", resp)
         except KeyError as e:
-            resp = make_error(ref, f"Missing field: {e}")
+            resp = make_error(ref, f"Missing field: {e}", msgid=msgid)
             await ws.send_bytes(resp)
             await self.notify_monitors("out", resp)
         except Exception as e:
-            resp = make_error(ref, str(e))
+            resp = make_error(ref, str(e), msgid=msgid)
             await ws.send_bytes(resp)
             await self.notify_monitors("out", resp)
 

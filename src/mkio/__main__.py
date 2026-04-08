@@ -411,7 +411,7 @@ def _cmd_send() -> None:
         pass
 
 
-_ENVELOPE_KEYS = {"op", "ref", "service"}
+_ENVELOPE_KEYS = {"op", "ref", "service", "msgid"}
 
 
 def _load_messages(data_arg: str) -> list[dict[str, Any]]:
@@ -508,15 +508,19 @@ async def _send_messages(
                 data = msg["data"]
                 row_op = msg.get("op")
                 row_ref = msg.get("ref")
+                row_msgid = msg.get("msgid")
             else:
                 data = msg
                 row_op = None
                 row_ref = None
+                row_msgid = None
 
             kwargs: dict[str, Any] = {}
             effective_op = row_op or op_name
             if effective_op:
                 kwargs["op"] = effective_op
+            if row_msgid is not None:
+                kwargs["msgid"] = row_msgid
 
             try:
                 result = await client.send(service, data, ref=row_ref, **kwargs)

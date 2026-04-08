@@ -138,6 +138,9 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 // Named op transaction
 {"service": "orders", "ref": "...", "op": "new", "data": {"side": "Buy", "symbol": "AAPL", "qty": 100, "price": 150}}
 
+// Transaction with msgid (echoed back on result/error for async correlation)
+{"service": "orders", "ref": "...", "op": "new", "msgid": "req-42", "data": {"side": "Buy", "symbol": "AAPL", "qty": 100, "price": 150}}
+
 // Subscribe
 {"service": "live_orders", "type": "subscribe", "filter": "status == 'pending'"}
 

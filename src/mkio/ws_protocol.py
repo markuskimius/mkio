@@ -19,18 +19,24 @@ def make_result(
     ref: str,
     service: str,
     payload: dict[str, Any] | None = None,
+    *,
+    msgid: str | None = None,
 ) -> bytes:
     envelope: dict[str, Any] = {"type": "result", "service": service, "ref": ref}
+    if msgid is not None:
+        envelope["msgid"] = msgid
     if payload:
         envelope.update(payload)
     envelope.setdefault("ok", True)
     return dumps(envelope)
 
 
-def make_error(ref: str | None, message: str) -> bytes:
+def make_error(ref: str | None, message: str, *, msgid: str | None = None) -> bytes:
     envelope: dict[str, Any] = {"type": "error", "message": message}
     if ref is not None:
         envelope["ref"] = ref
+    if msgid is not None:
+        envelope["msgid"] = msgid
     return dumps(envelope)
 
 
