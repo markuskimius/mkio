@@ -72,7 +72,7 @@ async def test_single_write(writer, db):
         data={"id": "1", "symbol": "AAPL", "qty": 100},
     )
     assert result["ok"] is True
-    assert "version" in result
+    assert "ref" in result
 
     rows = await db.read("SELECT * FROM orders WHERE id = '1'")
     assert len(rows) == 1
@@ -80,7 +80,7 @@ async def test_single_write(writer, db):
 
 
 async def test_concurrent_writes(writer, db):
-    """100 concurrent writes should all resolve with unique versions."""
+    """100 concurrent writes should all resolve with unique refs."""
     futures = []
     for i in range(100):
         f = writer.submit(
@@ -92,8 +92,8 @@ async def test_concurrent_writes(writer, db):
 
     results = await asyncio.gather(*futures)
     assert len(results) == 100
-    versions = {r["version"] for r in results}
-    assert len(versions) == 100  # All unique
+    refs = {r["ref"] for r in results}
+    assert len(refs) == 100  # All unique
 
     rows = await db.read("SELECT COUNT(*) as cnt FROM orders")
     assert rows[0]["cnt"] == 100
@@ -168,7 +168,7 @@ async def test_change_events_published(writer, bus):
     event = await asyncio.wait_for(q.get(), timeout=1.0)
     assert event.table == "orders"
     assert event.op == "insert"
-    assert event.version  # Non-empty version string
+    assert event.ref  # Non-empty ref string
 
 
 async def test_multi_op_publishes_per_table(writer, bus):

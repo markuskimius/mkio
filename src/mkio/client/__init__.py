@@ -3,43 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
 
 from mkio._json import dumps, loads
-
-# ---------------------------------------------------------------------------
-# Ref generator (client-side, same format as server versions)
-# ---------------------------------------------------------------------------
-
-_last_time_ns: int = 0
-_counter: int = 0
-
-
-def make_ref() -> str:
-    """Generate a ref string in YYYYMMDD HH:mm:ss.mmmuuunnnppp UTC format."""
-    global _last_time_ns, _counter
-
-    now_ns = time.time_ns()
-    if now_ns <= _last_time_ns:
-        _counter += 1
-    else:
-        _counter = 0
-        _last_time_ns = now_ns
-
-    dt = datetime.fromtimestamp(now_ns / 1_000_000_000, tz=timezone.utc)
-    total_ns = now_ns % 1_000_000_000
-    ms = total_ns // 1_000_000
-    us = (total_ns // 1_000) % 1_000
-    ns = total_ns % 1_000
-    ps = _counter % 1000
-
-    return dt.strftime("%Y%m%d %H:%M:%S") + f".{ms:03d}{us:03d}{ns:03d}{ps:03d}"
+from mkio._ref import next_ref as make_ref
 
 
 # ---------------------------------------------------------------------------
@@ -155,10 +125,9 @@ class MkioClient:
         except asyncio.CancelledError:
             pass
 
-    async def check(self, service: str, version: str) -> dict[str, Any]:
+    async def check(self, service: str, ref: str) -> dict[str, Any]:
         """Check if a transaction committed (for recovery after reconnect)."""
-        ref = make_ref()
-        msg = {"service": service, "type": "check", "version": version, "ref": ref}
+        msg = {"service": service, "type": "check", "ref": ref}
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()

@@ -7,7 +7,7 @@ Config-driven Python microservice framework. Single TCP port serves HTTP + WebSo
 ```bash
 pip install -e ".[dev]"        # Install with dev dependencies
 pip install -e ".[fast,dev]"   # With orjson + uvloop acceleration
-pytest tests/                  # Run all tests (159 tests)
+pytest tests/                  # Run all tests (160 tests)
 pytest tests/ -x -v            # Stop on first failure, verbose
 ```
 
@@ -16,7 +16,7 @@ pytest tests/ -x -v            # Stop on first failure, verbose
 ```
 src/mkio/
 ├── _json.py          # orjson-with-fallback (dumps -> bytes, loads)
-├── _version.py       # "YYYYMMDD HH:mm:ss.mmmuuunnnppp" version strings
+├── _ref.py           # "YYYYMMDD HH:mm:ss.mmmuuunnnppp" ref strings
 ├── _expr.py          # Expression language: tokenizer, parser, evaluator
 ├── config.py         # TOML/dict loader, normalization, validation
 ├── migration.py      # Schema diff, change classification, data preservation
@@ -41,9 +41,9 @@ src/mkio/
 - **Write path**: TransactionService -> WriteBatcher queue -> batch with SAVEPOINTs -> single COMMIT -> ChangeBus publish -> fan out to subscribers
 - **In-memory databases** use shared-cache URI (`file:mkio_{uuid}?mode=memory&cache=shared`) so write and read connections see the same data
 - **Expression language** is parsed once (at subscribe/startup), evaluated per row via AST walk
-- **Version strings** are lexicographically sortable UTC timestamps with sub-nanosecond counter for uniqueness
+- **Ref strings** are lexicographically sortable UTC timestamps with sub-nanosecond counter for uniqueness
 - **Schema migration** uses recreate-table strategy for changes SQLite's ALTER TABLE can't handle
-- **`_mkio_ref` column** is automatically added to all tables by the framework. The writer stamps each row with the version string on INSERT/UPDATE/UPSERT. On startup, services seed their change logs from the DB using this column, enabling delta reconnection across server restarts. Migration system excludes `_mkio_ref` from schema diffs.
+- **`_mkio_ref` column** is automatically added to all tables by the framework. The writer stamps each row with the transaction's `ref` on INSERT/UPDATE/UPSERT. If the client supplies a `ref`, it is used directly; otherwise the server generates one. On startup, services seed their change logs from the DB using this column, enabling delta reconnection across server restarts. Migration system excludes `_mkio_ref` from schema diffs.
 - **Op-level `defaults`** in transaction op specs provide static values the client doesn't send (e.g., `defaults = { status = "accepted" }`). Stored in `CompiledOp.defaults`, used by `_extract_params` as fallback when the field isn't in client data.
 
 ## Conventions
@@ -52,7 +52,7 @@ src/mkio/
 - All async tests use `pytest-asyncio` with `asyncio_mode = "auto"`
 - `from mkio._json import dumps, loads` everywhere (never raw json/orjson)
 - Services communicate changes via `ChangeBus` (never direct DB polling)
-- **Subscribe protocol** uses `ref` as the recovery cursor (not `version`). Clients send `"ref": "<last ref>"` to resume from that point. Transaction protocol uses `ref` for correlation and `version` for the committed transaction ID — these are separate concepts.
+- **Subscribe protocol** uses `ref` as the recovery cursor. Clients send `"ref": "<last ref>"` to resume from that point. Transaction results include `ref` which is the same value stamped into `_mkio_ref`.
 - **Monitor protocol**: WS clients send `{"type": "monitor", "service": "..."}` to tap into a service's inbound/outbound message flow.
 - **Service discovery**: `GET /api/services` lists services, `GET /api/services/<name>` returns detailed usage info (fields, types, examples).
 - **CLI tools**: `mkio services <url> [service]` lists/inspects services, `mkio send` sends transactions, `mkio subscribe` streams live data, `mkio monitor` taps traffic

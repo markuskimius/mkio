@@ -7,7 +7,7 @@ from typing import Any
 
 from aiohttp.web import WebSocketResponse
 
-from mkio._version import next_version
+from mkio._ref import next_ref
 from mkio.services.base import Service
 from mkio.writer import CompiledOp
 from mkio.ws_protocol import make_result, make_error
@@ -63,17 +63,17 @@ class TransactionService(Service):
     async def on_message(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
         ref = msg.get("ref")
         if ref is None:
-            ref = next_version()
+            ref = next_ref()
         msg_type = msg.get("type", "")
 
         # Handle "check" messages for transaction recovery
         if msg_type == "check":
-            version = msg.get("version", "")
-            cached = self._result_cache.get(version)
+            check_ref = msg.get("ref", "")
+            cached = self._result_cache.get(check_ref)
             if cached is not None:
-                resp = make_result(ref, self.name, version, cached)
+                resp = make_result(check_ref, self.name, cached)
             else:
-                resp = make_result(ref, self.name, "", {"status": "unknown"})
+                resp = make_result(check_ref, self.name, {"status": "unknown"})
             await ws.send_bytes(resp)
             await self.notify_monitors("out", resp)
             return
@@ -85,11 +85,10 @@ class TransactionService(Service):
             params_list = tuple(
                 _extract_params(op, data) for op in compiled_ops
             )
-            result = await self.writer.submit(compiled_ops, params_list, data)
-            version = result.get("version", "")
+            result = await self.writer.submit(compiled_ops, params_list, data, ref=ref)
             # Cache result for recovery
-            self._cache_result(version, result)
-            resp = make_result(ref, self.name, version, result)
+            self._cache_result(ref, result)
+            resp = make_result(ref, self.name, result)
             await ws.send_bytes(resp)
             await self.notify_monitors("out", resp)
         except KeyError as e:

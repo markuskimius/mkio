@@ -1,7 +1,7 @@
-"""Version string generator: YYYYMMDD HH:mm:ss.mmmuuunnnppp in UTC.
+"""Ref string generator: YYYYMMDD HH:mm:ss.mmmuuunnnppp in UTC.
 
-Used for server-generated versions and client-generated refs.
 Monotonically increasing, lexicographically sortable, human-readable.
+Used by both server and client to generate refs.
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ _last_time_ns: int = 0
 _counter: int = 0
 
 
-def next_version() -> str:
-    """Generate the next monotonically increasing version string.
+def next_ref() -> str:
+    """Generate the next monotonically increasing ref string.
 
     Uses time.time_ns() for the clock portion. When multiple calls occur
     within the same nanosecond, a counter fills the picosecond digits to
@@ -43,13 +43,13 @@ def next_version() -> str:
     return dt.strftime("%Y%m%d %H:%M:%S") + f".{ms:03d}{us:03d}{ns:03d}{ps:03d}"
 
 
-def compare_versions(a: str, b: str) -> int:
-    """Compare two version strings. Returns -1, 0, or 1.
+def compare_refs(a: str, b: str) -> int:
+    """Compare two ref strings. Returns -1, 0, or 1.
 
     Missing trailing digits are treated as zeros.
     """
-    na = normalize_version(a)
-    nb = normalize_version(b)
+    na = normalize_ref(a)
+    nb = normalize_ref(b)
     if na < nb:
         return -1
     elif na > nb:
@@ -57,8 +57,8 @@ def compare_versions(a: str, b: str) -> int:
     return 0
 
 
-def normalize_version(v: str) -> str:
-    """Normalize a version string to full 31-character precision.
+def normalize_ref(v: str) -> str:
+    """Normalize a ref string to full 31-character precision.
 
     Pads missing sub-second digits with zeros.
     Example: "20260404 15:30:45.123" -> "20260404 15:30:45.123000000000"

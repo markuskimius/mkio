@@ -64,15 +64,12 @@ class FakeServer:
                     }
                     await ws.send_bytes(dumps(resp))
                 elif msg_type == "check":
-                    version = data.get("version", "")
                     resp = {
                         "type": "result",
                         "service": service,
-                        "version": version,
+                        "ref": ref,
                         "ok": True,
                     }
-                    if ref:
-                        resp["ref"] = ref
                     await ws.send_bytes(dumps(resp))
                 else:
                     # Transaction — server always assigns a ref
@@ -81,7 +78,6 @@ class FakeServer:
                     resp = {
                         "type": "result",
                         "service": service,
-                        "version": "20260404 00:00:02.000000000000",
                         "ref": ref,
                         "ok": True,
                     }
@@ -107,7 +103,7 @@ async def test_client_send(fake_server):
         result = await client.send("test_service", {"id": "1", "name": "hello"})
         assert result["ok"] is True
         assert result["type"] == "result"
-        assert "version" in result
+        assert "ref" in result
 
 
 async def test_client_send_with_custom_ref(fake_server):

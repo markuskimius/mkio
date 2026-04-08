@@ -10,7 +10,7 @@ from typing import Any, Callable
 from aiohttp.web import WebSocketResponse
 
 from mkio._expr import compile_filter
-from mkio._version import compare_versions
+from mkio._ref import compare_refs
 from mkio.change_bus import ChangeEvent
 from mkio.services.base import Service
 from mkio.ws_protocol import make_snapshot, make_delta, make_update
@@ -89,11 +89,11 @@ class QueryService(Service):
 
         # Check for delta reconnection
         if client_ref and self._change_log:
-            oldest_version = self._change_log[0][0]
-            if compare_versions(client_ref, oldest_version) >= 0:
+            oldest_ref = self._change_log[0][0]
+            if compare_refs(client_ref, oldest_ref) >= 0:
                 changes = []
                 for ver, op, row in self._change_log:
-                    if compare_versions(ver, client_ref) > 0:
+                    if compare_refs(ver, client_ref) > 0:
                         out_row = sub.formatter(row) if sub.formatter else row
                         if sub.filter_fn and not sub.filter_fn(out_row):
                             continue
@@ -137,7 +137,7 @@ class QueryService(Service):
                 # would require a full re-query which is expensive
                 continue
 
-            self._change_log.append((event.version, event.op, row))
+            self._change_log.append((event.ref, event.op, row))
 
             # Fan out
             dead: list[QuerySubscriber] = []
@@ -147,7 +147,7 @@ class QueryService(Service):
                 if sub.filter_fn and not sub.filter_fn(out_row):
                     continue
                 try:
-                    msg_bytes = make_update(self.name, ref=event.version, op=event.op, row=out_row)
+                    msg_bytes = make_update(self.name, ref=event.ref, op=event.op, row=out_row)
                     await sub.ws.send_bytes(msg_bytes)
                     if not notified_monitor:
                         await self.notify_monitors("out", msg_bytes)

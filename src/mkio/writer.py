@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from mkio._version import next_version
+from mkio._ref import next_ref
 from mkio.change_bus import ChangeBus, ChangeEvent
 from mkio.database import Database
 
@@ -30,6 +30,7 @@ class WriteRequest:
     params_list: tuple[tuple[Any, ...], ...]
     data: dict[str, Any]
     future: asyncio.Future[dict[str, Any]]
+    ref: str | None = None
 
 
 class WriteBatcher:
@@ -82,13 +83,14 @@ class WriteBatcher:
         ops: tuple[CompiledOp, ...],
         params_list: tuple[tuple[Any, ...], ...],
         data: dict[str, Any],
+        ref: str | None = None,
     ) -> dict[str, Any]:
         """Submit a write request. Returns when the write commits."""
         if self._stopping:
             raise RuntimeError("Writer is stopping, no new submissions accepted")
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
-        req = WriteRequest(ops=ops, params_list=params_list, data=data, future=future)
+        req = WriteRequest(ops=ops, params_list=params_list, data=data, future=future, ref=ref)
         self._queue.put_nowait(req)
         return await future
 
@@ -151,14 +153,14 @@ class WriteBatcher:
         """Execute all writes in a single SQLite transaction with SAVEPOINTs."""
         conn = self._db.write_conn
         events: list[ChangeEvent] = []
-        successful: list[tuple[WriteRequest, str]] = []  # (req, version)
+        successful: list[tuple[WriteRequest, str]] = []  # (req, ref)
         failed: list[tuple[WriteRequest, Exception]] = []
 
         try:
             for i, req in enumerate(batch):
                 savepoint = f"req_{i}"
                 try:
-                    version = next_version()
+                    ref = req.ref if req.ref else next_ref()
                     await (await conn.execute(f"SAVEPOINT {savepoint}")).close()
                     returned_rows: list[tuple[CompiledOp, dict[str, Any]]] = []
                     for op_idx, (op, params) in enumerate(zip(req.ops, req.params_list)):
@@ -169,7 +171,7 @@ class WriteBatcher:
                                 param_pos = op.param_names.index(param_name)
                                 resolved[param_pos] = returned_rows[src_idx][1][src_field]
                         if "_mkio_ref" in op.param_names:
-                            resolved[op.param_names.index("_mkio_ref")] = version
+                            resolved[op.param_names.index("_mkio_ref")] = ref
                         params = tuple(resolved)
                         cursor = await conn.execute(op.sql, params)
                         if op.op_type != "delete":
@@ -180,11 +182,11 @@ class WriteBatcher:
                         returned_rows.append((op, dict(row) if row else req.data))
                     await (await conn.execute(f"RELEASE {savepoint}")).close()
 
-                    successful.append((req, version))
+                    successful.append((req, ref))
 
                     for op, row_data in returned_rows:
                         events.append(
-                            ChangeBus.make_event(op.table, op.op_type, row_data, version)
+                            ChangeBus.make_event(op.table, op.op_type, row_data, ref)
                         )
                 except Exception as exc:
                     try:
@@ -207,9 +209,9 @@ class WriteBatcher:
             self._bus.publish(events)
 
         # Resolve futures
-        for req, version in successful:
+        for req, ref in successful:
             if not req.future.done():
-                req.future.set_result({"ok": True, "version": version})
+                req.future.set_result({"ok": True, "ref": ref})
 
         for req, exc in failed:
             if not req.future.done():

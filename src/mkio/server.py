@@ -152,10 +152,10 @@ def _build_service_detail(
         detail["ops"] = _build_transaction_ops(name, config, tables)
         detail["recovery"] = {
             "description": (
-                "Each result includes a version string. To check if a transaction "
-                "committed after a disconnect, send a check message with that version."
+                "Each result includes a ref string. To check if a transaction "
+                "committed after a disconnect, send a check message with that ref."
             ),
-            "check_message": {"service": name, "type": "check", "version": "<version>"},
+            "check_message": {"service": name, "type": "check", "ref": "<ref>"},
         }
     else:
         detail.update(_build_listener_detail(name, config, tables))

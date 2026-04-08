@@ -48,7 +48,7 @@ def test_js_client_tracks_ref():
 def test_js_client_has_check():
     """Verify the JS client supports transaction recovery check."""
     src = JS_CLIENT_PATH.read_text()
-    assert "check(service, version)" in src
+    assert "check(service, ref)" in src
 
 
 def test_js_client_exports():

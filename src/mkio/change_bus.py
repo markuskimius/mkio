@@ -15,7 +15,7 @@ class ChangeEvent:
     table: str
     op: str  # "insert" | "update" | "delete"
     row: dict[str, Any]
-    version: str
+    ref: str
     raw_bytes: bytes  # Pre-serialized JSON envelope
 
 
@@ -46,14 +46,14 @@ class ChangeBus:
                     pass  # Backpressure: slow consumer misses this event
 
     @staticmethod
-    def make_event(table: str, op: str, row: dict[str, Any], version: str) -> ChangeEvent:
+    def make_event(table: str, op: str, row: dict[str, Any], ref: str) -> ChangeEvent:
         """Build a ChangeEvent with pre-serialized bytes."""
         envelope = {
             "type": "update",
             "table": table,
             "op": op,
             "row": row,
-            "version": version,
+            "ref": ref,
         }
         raw = dumps(envelope)
-        return ChangeEvent(table=table, op=op, row=row, version=version, raw_bytes=raw)
+        return ChangeEvent(table=table, op=op, row=row, ref=ref, raw_bytes=raw)

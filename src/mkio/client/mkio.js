@@ -172,12 +172,11 @@ class MkioClient {
   /**
    * Check if a transaction committed (for recovery after reconnect).
    * @param {string} service
-   * @param {string} version
+   * @param {string} ref
    * @returns {Promise<Object>}
    */
-  check(service, version) {
-    const ref = makeRef();
-    const msg = { service, type: "check", version, ref };
+  check(service, ref) {
+    const msg = { service, type: "check", ref };
 
     return new Promise((resolve, reject) => {
       this._pending.set(ref, { resolve, reject });

@@ -107,7 +107,6 @@ async def test_transaction_insert(txn_svc, db):
     assert msgs[0]["type"] == "result"
     assert msgs[0]["ok"] is True
     assert msgs[0]["ref"] == "ref1"
-    assert "version" in msgs[0]
 
     rows = await db.read("SELECT * FROM orders WHERE id = '1'")
     assert len(rows) == 1
@@ -131,25 +130,23 @@ async def test_transaction_result_cache(txn_svc):
         "ref": "ref1",
         "data": {"id": "1", "symbol": "AAPL", "qty": 100},
     })
-    version = ws.get_messages()[0]["version"]
+    tx_ref = ws.get_messages()[0]["ref"]
 
-    # Check with known version
+    # Check with known ref
     ws.clear()
     await txn_svc.on_message(ws, {
-        "ref": "ref2",
+        "ref": tx_ref,
         "type": "check",
-        "version": version,
     })
     msgs = ws.get_messages()
     assert msgs[0]["type"] == "result"
     assert msgs[0]["ok"] is True
 
-    # Check with unknown version
+    # Check with unknown ref
     ws.clear()
     await txn_svc.on_message(ws, {
-        "ref": "ref3",
+        "ref": "19700101 00:00:00.000000000000",
         "type": "check",
-        "version": "19700101 00:00:00.000000000000",
     })
     msgs = ws.get_messages()
     assert msgs[0].get("status") == "unknown"
@@ -324,9 +321,9 @@ async def test_stream_reconnect_with_ref(stream_svc, bus):
     initial_count = len(snapshot_msg["rows"])
 
     # Push new events
-    from mkio._version import next_version
+    from mkio._ref import next_ref
     for i in range(3):
-        ver = next_version()
+        ver = next_ref()
         event = ChangeBus.make_event(
             "audit_log", "insert",
             {"id": 100 + i, "event": f"post_{i}", "order_id": str(100 + i)},

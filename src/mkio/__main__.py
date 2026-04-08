@@ -520,9 +520,9 @@ async def _send_messages(
 
             try:
                 result = await client.send(service, data, ref=row_ref, **kwargs)
-                version = result.get("version", "")
+                ref = result.get("ref", "")
                 if result.get("ok"):
-                    print(f"[{i}/{total}] ok version={version}")
+                    print(f"[{i}/{total}] ok ref={ref}")
                 else:
                     err_msg = result.get("message", "unknown error")
                     print(f"[{i}/{total}] error: {err_msg}")
@@ -585,11 +585,11 @@ async def _subscribe_service(
 def _print_subscribe_message(data: dict[str, Any]) -> None:
     """Pretty-print a subscription message."""
     msg_type = data.get("type", "")
-    version = data.get("version", "")
+    ref = data.get("ref", "")
     now = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
 
     is_tty = sys.stdout.isatty()
-    ver_suffix = f" ref={version}" if version else ""
+    ver_suffix = f" ref={ref}" if ref else ""
 
     if msg_type == "snapshot":
         rows = data.get("rows", [])

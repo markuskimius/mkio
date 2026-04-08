@@ -1,4 +1,4 @@
-"""Stream service: append-only ring buffer with version-based cursor reconnect."""
+"""Stream service: append-only ring buffer with ref-based cursor reconnect."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any, Callable
 from aiohttp.web import WebSocketResponse
 
 from mkio._expr import compile_filter
-from mkio._version import compare_versions
+from mkio._ref import compare_refs
 from mkio.change_bus import ChangeEvent
 from mkio.services.base import Service
 from mkio.ws_protocol import make_snapshot, make_update
@@ -43,7 +43,7 @@ class StreamService(Service):
         self._filterable = set(self.config.get("filterable", []))
         self._formatter = self.config.get("_compiled_formatter")
 
-        # Ring buffer: (version, row_dict)
+        # Ring buffer: (ref, row_dict)
         self._buffer: deque[tuple[str, dict[str, Any]]] = deque(maxlen=self._buffer_size)
         self._subscribers: list[StreamSubscriber] = []
         self._bus_queue: asyncio.Queue[ChangeEvent] | None = None
@@ -59,10 +59,10 @@ class StreamService(Service):
         rows = await self.db.read(sql, (self._buffer_size,))
         if "JOIN" not in self._sql.upper():
             rows.reverse()
-        from mkio._version import next_version
+        from mkio._ref import next_ref
         for row in rows:
             ref = row.get("_mkio_ref", "")
-            ver = ref if ref else next_version()
+            ver = ref if ref else next_ref()
             self._buffer.append((ver, row))
 
         watch = self.config.get("watch_tables", [self._table])
@@ -95,10 +95,10 @@ class StreamService(Service):
         if client_ref and self._buffer:
             # Find position in ring buffer
             buffer_start_ver = self._buffer[0][0]
-            if compare_versions(client_ref, buffer_start_ver) >= 0:
+            if compare_refs(client_ref, buffer_start_ver) >= 0:
                 # Replay from buffer
                 for ver, row in self._buffer:
-                    if compare_versions(ver, client_ref) > 0:
+                    if compare_refs(ver, client_ref) > 0:
                         out_row = sub.formatter(row) if sub.formatter else row
                         if sub.filter_fn and not sub.filter_fn(out_row):
                             continue
@@ -144,7 +144,7 @@ class StreamService(Service):
                 if rows:
                     row = rows[0]
 
-            self._buffer.append((event.version, row))
+            self._buffer.append((event.ref, row))
 
             # Fan out
             dead: list[StreamSubscriber] = []
@@ -154,7 +154,7 @@ class StreamService(Service):
                 if sub.filter_fn and not sub.filter_fn(out_row):
                     continue
                 try:
-                    msg_bytes = make_update(self.name, ref=event.version, op=event.op, row=out_row)
+                    msg_bytes = make_update(self.name, ref=event.ref, op=event.op, row=out_row)
                     await sub.ws.send_bytes(msg_bytes)
                     if not notified_monitor:
                         await self.notify_monitors("out", msg_bytes)

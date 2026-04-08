@@ -139,7 +139,7 @@ async def test_ws_transaction_roundtrip(client):
     assert result["type"] == "result"
     assert result["ok"] is True
     assert result["ref"] == "ref1"
-    assert "version" in result
+    assert result["ref"] == "ref1"
     await ws.close()
 
 
@@ -334,7 +334,7 @@ async def test_js_client_serving(client):
 
 
 async def test_transaction_check_recovery(client):
-    """Send transaction, get version, check it via 'check' message."""
+    """Send transaction, get ref, check it via 'check' message."""
     ws = await client.ws_connect("/ws")
 
     # Insert
@@ -343,24 +343,22 @@ async def test_transaction_check_recovery(client):
         "ref": "r1",
         "data": {"id": "chk1", "symbol": "AAPL", "qty": 100},
     })
-    version = result["version"]
+    tx_ref = result["ref"]
 
-    # Check with known version
+    # Check with known ref
     check_result = await ws_send_recv(ws, {
         "service": "add_order",
         "type": "check",
-        "version": version,
-        "ref": "chk_ref",
+        "ref": tx_ref,
     })
     assert check_result["type"] == "result"
     assert check_result["ok"] is True
 
-    # Check with unknown version
+    # Check with unknown ref
     unknown = await ws_send_recv(ws, {
         "service": "add_order",
         "type": "check",
-        "version": "19700101 00:00:00.000000000000",
-        "ref": "chk_ref2",
+        "ref": "19700101 00:00:00.000000000000",
     })
     assert unknown.get("status") == "unknown"
     await ws.close()

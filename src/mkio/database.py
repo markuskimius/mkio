@@ -108,9 +108,9 @@ class Database:
         """Create a backup of the database file."""
         backup_dir = Path(self._config.get("backup_dir", "./backups"))
         backup_dir.mkdir(parents=True, exist_ok=True)
-        from mkio._version import next_version
-        version = next_version().replace(" ", "_").replace(":", "").replace(".", "_")
-        dest = backup_dir / f"{Path(self._path).stem}_backup_{version}.db"
+        from mkio._ref import next_ref
+        ref = next_ref().replace(" ", "_").replace(":", "").replace(".", "_")
+        dest = backup_dir / f"{Path(self._path).stem}_backup_{ref}.db"
         shutil.copy2(self._path, dest)
         print(f"  Backup created: {dest}")
 

@@ -16,14 +16,11 @@ def parse_message(data: bytes | str) -> dict[str, Any]:
 
 
 def make_result(
-    ref: str | None,
+    ref: str,
     service: str,
-    version: str,
     payload: dict[str, Any] | None = None,
 ) -> bytes:
-    envelope: dict[str, Any] = {"type": "result", "service": service, "version": version}
-    if ref is not None:
-        envelope["ref"] = ref
+    envelope: dict[str, Any] = {"type": "result", "service": service, "ref": ref}
     if payload:
         envelope.update(payload)
     envelope.setdefault("ok", True)
