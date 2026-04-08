@@ -138,13 +138,16 @@ class SubPubService(Service):
         while True:
             event: ChangeEvent = await self._bus_queue.get()
 
-            # Update cache
+            # Update cache and resolve effective op
+            effective_op = event.op
             if event.table == self._table:
                 # Primary table — direct cache update for simple queries
                 if "JOIN" not in self._sql.upper():
                     key_val = event.row.get(self._key_field)
                     if event.op in ("insert", "update", "upsert"):
+                        existed = key_val in self._cache
                         self._cache[key_val] = event.row
+                        effective_op = "update" if existed else "insert"
                     elif event.op == "delete":
                         self._cache.pop(key_val, None)
                 else:
@@ -154,10 +157,10 @@ class SubPubService(Service):
                 await self._requery_all()
 
             # Append to change log
-            self._change_log.append((event.ref, event.op, event.row))
+            self._change_log.append((event.ref, effective_op, event.row))
 
             # Fan out to subscribers
-            await self._fan_out(event)
+            await self._fan_out_op(event, effective_op)
 
     async def _requery_row(self, event: ChangeEvent) -> None:
         """Re-query a single row when using JOINs."""
@@ -181,7 +184,7 @@ class SubPubService(Service):
         for row in rows:
             self._cache[row[self._key_field]] = row
 
-    async def _fan_out(self, event: ChangeEvent) -> None:
+    async def _fan_out_op(self, event: ChangeEvent, op: str) -> None:
         """Send update to all subscribers, respecting filters and formatters."""
         dead: list[Subscriber] = []
         notified_monitor = False
@@ -190,7 +193,7 @@ class SubPubService(Service):
             if sub.filter_fn and not sub.filter_fn(out_row):
                 continue
             try:
-                msg_bytes = make_update(self.name, ref=event.ref, op=event.op, row=out_row)
+                msg_bytes = make_update(self.name, ref=event.ref, op=op, row=out_row)
                 await sub.ws.send_bytes(msg_bytes)
                 if not notified_monitor:
                     await self.notify_monitors("out", msg_bytes)
