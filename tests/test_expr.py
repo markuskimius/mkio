@@ -257,6 +257,34 @@ def test_register_keyword_name_raises():
         register_function("AND", lambda: None)
 
 
+# -- IF function --------------------------------------------------------------
+
+def test_if_true_branch():
+    assert evaluate(parse("IF(qty > 50, 'big', 'small')"), ROW) == "big"
+
+
+def test_if_false_branch():
+    assert evaluate(parse("IF(qty < 50, 'big', 'small')"), ROW) == "small"
+
+
+def test_if_with_expressions():
+    row = {"side": "Buy", "price": 10.0}
+    assert evaluate(parse("IF(side == 'Buy', price, -price)"), row) == 10.0
+    row["side"] = "Sell"
+    assert evaluate(parse("IF(side == 'Buy', price, -price)"), row) == -10.0
+
+
+def test_if_wrong_arg_count():
+    with pytest.raises(ExprError, match="3 arguments"):
+        evaluate(parse("IF(1, 2)"), {})
+
+
+def test_if_in_formatter():
+    fmt = compile_formatter({"price": "IF(side == 'Buy', price, -price)"})
+    assert fmt({"side": "Buy", "price": 5.0}) == {"price": 5.0}
+    assert fmt({"side": "Sell", "price": 5.0}) == {"price": -5.0}
+
+
 # -- Security -----------------------------------------------------------------
 
 def test_rejects_attribute_access():

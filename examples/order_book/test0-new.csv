@@ -1,4 +1,4 @@
 service,op,msgid,data.side,data.symbol,data.qty,data.price
 "orders","new","1","Buy","A",100,12.34
-"orders","new","2","Sell","B",200,23.45
-"orders","new","3","Buy","C",300,34.56
+"orders","new","2","Buy","B",200,23.45
+"orders","new","3","Sell","B",300,34.56

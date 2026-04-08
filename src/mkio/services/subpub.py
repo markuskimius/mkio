@@ -32,6 +32,7 @@ class SubPubService(Service):
         watch_tables: list[str]
         key: str (primary key field for cache indexing)
         sql: str (optional, defaults to SELECT * FROM primary_table)
+        where: str (optional, expression filter applied to rows before caching)
         filterable: list[str] (optional)
         publish: dict (optional, expression formatter)
         change_log_size: int (default 10000)
@@ -44,6 +45,7 @@ class SubPubService(Service):
         self._sql = self.config.get("sql", f"SELECT * FROM {self._table}")
         self._filterable = set(self.config.get("filterable", []))
         self._formatter = self.config.get("_compiled_formatter")
+        self._where = self.config.get("_compiled_where")
         self._change_log_size = self.config.get("change_log_size", 10000)
 
         self._cache: dict[Any, dict[str, Any]] = {}
@@ -57,6 +59,8 @@ class SubPubService(Service):
     async def start(self) -> None:
         rows = await self.db.read(self._sql)
         for row in rows:
+            if self._where and not self._where(row):
+                continue
             self._cache[row[self._key_field]] = row
 
         # Seed change log from DB for cross-restart delta reconnection
@@ -68,6 +72,8 @@ class SubPubService(Service):
         for row in recent:
             ref = row.get("_mkio_ref", "")
             if ref:
+                if self._where and not self._where(row):
+                    continue
                 self._change_log.append((ref, "upsert", row))
 
         watch = self.config.get("watch_tables", [self._table])
@@ -138,6 +144,9 @@ class SubPubService(Service):
         while True:
             event: ChangeEvent = await self._bus_queue.get()
 
+            # Apply where filter
+            passes_where = not self._where or self._where(event.row)
+
             # Update cache and resolve effective op
             effective_op = event.op
             if event.table == self._table:
@@ -145,9 +154,17 @@ class SubPubService(Service):
                 if "JOIN" not in self._sql.upper():
                     key_val = event.row.get(self._key_field)
                     if event.op in ("insert", "update", "upsert"):
-                        existed = key_val in self._cache
-                        self._cache[key_val] = event.row
-                        effective_op = "update" if existed else "insert"
+                        if passes_where:
+                            existed = key_val in self._cache
+                            self._cache[key_val] = event.row
+                            effective_op = "update" if existed else "insert"
+                        else:
+                            # Row no longer matches — remove from cache if present
+                            if key_val in self._cache:
+                                self._cache.pop(key_val)
+                                effective_op = "delete"
+                            else:
+                                continue
                     elif event.op == "delete":
                         self._cache.pop(key_val, None)
                 else:
@@ -172,7 +189,7 @@ class SubPubService(Service):
         # Append a WHERE clause for the primary key
         sql = f"SELECT * FROM ({self._sql}) AS _sub WHERE {self._key_field} = ?"
         rows = await self.db.read(sql, (key_val,))
-        if rows:
+        if rows and (not self._where or self._where(rows[0])):
             self._cache[key_val] = rows[0]
         else:
             self._cache.pop(key_val, None)
@@ -182,6 +199,8 @@ class SubPubService(Service):
         rows = await self.db.read(self._sql)
         self._cache.clear()
         for row in rows:
+            if self._where and not self._where(row):
+                continue
             self._cache[row[self._key_field]] = row
 
     async def _fan_out_op(self, event: ChangeEvent, op: str) -> None:

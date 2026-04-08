@@ -6,7 +6,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from mkio._expr import compile_formatter
+from mkio._expr import compile_filter, compile_formatter
 
 
 _DEFAULTS = {
@@ -80,6 +80,10 @@ def _normalize_service(
     # Compile publish formatter
     if "publish" in svc:
         svc["_compiled_formatter"] = compile_formatter(svc["publish"])
+
+    # Compile where filter
+    if "where" in svc:
+        svc["_compiled_where"] = compile_filter(svc["where"])
 
     # Validate filterable fields
     if "filterable" in svc:

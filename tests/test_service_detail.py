@@ -54,7 +54,7 @@ TEST_CONFIG = {
                 ],
             },
         },
-        "live_orders": {
+        "last_trade": {
             "type": "subpub",
             "primary_table": "orders",
             "key": "id",
@@ -167,11 +167,11 @@ async def test_detail_transaction_update_op(client):
 # ---- Listener detail --------------------------------------------------------
 
 async def test_detail_subpub(client):
-    resp = await client.get("/api/services/live_orders")
+    resp = await client.get("/api/services/last_trade")
     assert resp.status == 200
     data = await resp.json()
 
-    assert data["name"] == "live_orders"
+    assert data["name"] == "last_trade"
     assert data["type"] == "subpub"
     assert data["primary_table"] == "orders"
     assert data["key"] == "id"
@@ -190,7 +190,7 @@ async def test_detail_subpub(client):
 
     # Subscribe protocol
     sub = data["subscribe"]
-    assert sub["message"]["service"] == "live_orders"
+    assert sub["message"]["service"] == "last_trade"
     assert sub["message"]["type"] == "subscribe"
     assert "recovery" in sub
     assert "ref" in sub["recovery"].lower()
@@ -291,7 +291,7 @@ async def test_detail_example_generation(client):
     assert "--op place" in place["example"]
 
     # Listener should have subscribe example
-    resp = await client.get("/api/services/live_orders")
+    resp = await client.get("/api/services/last_trade")
     data = await resp.json()
     assert "mkio subscribe" in data["example"]["subscribe"]
     assert "--filter" in data["example"]["subscribe_filter"]

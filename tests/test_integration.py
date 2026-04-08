@@ -62,7 +62,7 @@ TEST_CONFIG = {
                 {"table": "orders", "op_type": "delete", "key": ["id"]},
             ],
         },
-        "live_orders": {
+        "last_trade": {
             "type": "subpub",
             "primary_table": "orders",
             "watch_tables": ["orders"],
@@ -184,7 +184,7 @@ async def test_subpub_subscribe_snapshot(client):
 
     # Subscribe
     await ws.send_bytes(dumps({
-        "service": "live_orders",
+        "service": "last_trade",
         "type": "subscribe",
         "ref": "sub_ref",
     }))
@@ -218,7 +218,7 @@ async def test_multi_client_fan_out(client):
     for _ in range(3):
         ws = await client.ws_connect("/ws")
         await ws.send_bytes(dumps({
-            "service": "live_orders",
+            "service": "last_trade",
             "type": "subscribe",
             "ref": f"sub_{_}",
         }))
@@ -370,14 +370,14 @@ async def test_unsubscribe_stops_updates(client):
 
     # Subscribe
     await ws.send_bytes(dumps({
-        "service": "live_orders",
+        "service": "last_trade",
         "type": "subscribe",
     }))
     await ws.receive()  # Snapshot
 
     # Unsubscribe
     await ws.send_bytes(dumps({
-        "service": "live_orders",
+        "service": "last_trade",
         "type": "unsubscribe",
         "ref": "u1",
     }))
@@ -393,9 +393,9 @@ async def test_unsubscribe_stops_updates(client):
     # ws should NOT receive update — set a short timeout
     try:
         resp = await asyncio.wait_for(ws.receive(), timeout=0.3)
-        # If we get something, it shouldn't be an update for live_orders
+        # If we get something, it shouldn't be an update for last_trade
         data = loads(resp.data)
-        assert data.get("type") != "update" or data.get("service") != "live_orders"
+        assert data.get("type") != "update" or data.get("service") != "last_trade"
     except asyncio.TimeoutError:
         pass  # Expected: no message
 
@@ -449,9 +449,9 @@ async def test_msgid_with_live_updates(client):
     """Transaction with msgid should not interfere with subscription updates."""
     ws_sub = await client.ws_connect("/ws")
 
-    # Subscribe to live_orders
+    # Subscribe to last_trade
     await ws_sub.send_bytes(dumps({
-        "service": "live_orders",
+        "service": "last_trade",
         "type": "subscribe",
     }))
     await ws_sub.receive()  # Consume snapshot

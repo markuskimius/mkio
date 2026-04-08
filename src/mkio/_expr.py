@@ -318,7 +318,7 @@ class _Parser:
             if self.peek().type == "LPAREN":
                 # Function call
                 fname = upper
-                if fname not in FUNCTIONS and fname not in _KEYWORDS:
+                if fname not in FUNCTIONS and fname not in _KEYWORDS and fname != "IF":
                     raise ExprError(f"Unknown function: {tok.value}")
                 self.advance()  # consume (
                 args: list[Node] = []
@@ -407,6 +407,11 @@ def evaluate(node: Node, row: dict[str, Any]) -> Any:
         raise ExprError(f"Unknown binary op: {node.op}")
 
     if isinstance(node, FuncCall):
+        if node.name == "IF":
+            if len(node.args) != 3:
+                raise ExprError("IF() requires exactly 3 arguments")
+            cond = evaluate(node.args[0], row)
+            return evaluate(node.args[1], row) if cond else evaluate(node.args[2], row)
         fn = FUNCTIONS.get(node.name)
         if fn is None:
             raise ExprError(f"Unknown function: {node.name}")

@@ -130,7 +130,7 @@
 
 
     client.connect().then(() => {
-      client.subscribe('live_orders', {
+      client.subscribe('all_orders', {
         onSnapshot(rows) {
           ordersMap.clear();
           rows.forEach(r => ordersMap.set(r.id, r));

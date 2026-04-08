@@ -42,12 +42,17 @@ cancel = [
 
 # --- Live data services ---
 
-[services.live_orders]
+[services.last_trade]
 type = "subpub"
 primary_table = "orders"
-key = "id"
-filterable = ["status", "symbol"]
+key = "symbol"
+where = "status == 'filled'"
 change_log_size = 10000
+
+[services.last_trade.publish]
+symbol = "symbol"
+price = "IF(side == 'Buy', price, -price)"
+time = "_mkio_ref"
 
 [services.audit_feed]
 type = "stream"

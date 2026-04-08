@@ -293,7 +293,7 @@ def _print_listener_detail(detail: dict[str, Any]) -> None:
 def _cmd_monitor() -> None:
     if len(sys.argv) < 4:
         print("Usage: mkio monitor <url> <service>")
-        print("  e.g. mkio monitor ws://localhost:8080 live_orders")
+        print("  e.g. mkio monitor ws://localhost:8080 last_trade")
         sys.exit(1)
     _check_unknown_flags(sys.argv[2:], set(), "mkio monitor <url> <service>")
     url = sys.argv[2].rstrip("/")

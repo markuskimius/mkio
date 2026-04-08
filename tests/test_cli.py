@@ -58,7 +58,7 @@ TEST_CONFIG = {
                 ],
             },
         },
-        "live_orders": {
+        "last_trade": {
             "type": "subpub",
             "primary_table": "orders",
             "key": "id",
@@ -349,7 +349,7 @@ async def test_subscribe_subpub(client):
     received: list[dict] = []
 
     async with MkioClient(ws_url, reconnect=False) as mk:
-        async for msg in mk.subscribe("live_orders"):
+        async for msg in mk.subscribe("last_trade"):
             received.append(msg)
             if msg.get("type") == "snapshot":
                 # Insert another order to trigger update
@@ -421,7 +421,7 @@ async def test_subscribe_with_filter_subpub(client):
     received: list[dict] = []
 
     async with MkioClient(ws_url, reconnect=False) as mk:
-        async for msg in mk.subscribe("live_orders", filter="symbol == 'AAPL'"):
+        async for msg in mk.subscribe("last_trade", filter="symbol == 'AAPL'"):
             received.append(msg)
             if msg.get("type") == "snapshot":
                 # Insert a matching and non-matching order

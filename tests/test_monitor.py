@@ -38,7 +38,7 @@ TEST_CONFIG = {
                 {"table": "orders", "op_type": "insert", "fields": ["id", "symbol", "qty"]},
             ],
         },
-        "live_orders": {
+        "last_trade": {
             "type": "subpub",
             "primary_table": "orders",
             "watch_tables": ["orders"],
@@ -93,14 +93,14 @@ async def test_api_services_list(client):
 
     names = {s["name"] for s in data}
     assert "add_order" in names
-    assert "live_orders" in names
+    assert "last_trade" in names
 
     # Check metadata
     txn = next(s for s in data if s["name"] == "add_order")
     assert txn["type"] == "transaction"
     assert "tables" in txn
 
-    subpub = next(s for s in data if s["name"] == "live_orders")
+    subpub = next(s for s in data if s["name"] == "last_trade")
     assert subpub["type"] == "subpub"
     assert subpub["primary_table"] == "orders"
 
@@ -195,18 +195,18 @@ async def test_monitor_sees_transaction_inbound_and_outbound(client):
 
 async def test_monitor_sees_subscribe_and_updates(client):
     """Monitor should see subscribe inbound, snapshot outbound, and live update outbound."""
-    # Set up monitor for live_orders
+    # Set up monitor for last_trade
     mon_ws = await client.ws_connect("/ws")
     ack = await ws_send_recv(mon_ws, {
         "type": "monitor",
-        "service": "live_orders",
+        "service": "last_trade",
     })
     assert ack["type"] == "monitor_ack"
 
     # Subscribe from another connection
     sub_ws = await client.ws_connect("/ws")
     await sub_ws.send_bytes(dumps({
-        "service": "live_orders",
+        "service": "last_trade",
         "type": "subscribe",
     }))
     # Consume snapshot on subscriber
@@ -236,11 +236,11 @@ async def test_monitor_sees_subscribe_and_updates(client):
     # Wait for the live update on subscriber
     await asyncio.wait_for(sub_ws.receive(), timeout=2.0)
 
-    # Monitor should see the outbound update for live_orders
+    # Monitor should see the outbound update for last_trade
     msg = await asyncio.wait_for(mon_ws.receive(), timeout=2.0)
     update_msg = loads(msg.data)
     assert update_msg["direction"] == "out"
-    assert update_msg["service"] == "live_orders"
+    assert update_msg["service"] == "last_trade"
     assert update_msg["message"]["type"] == "update"
     assert update_msg["message"]["op"] == "insert"
 

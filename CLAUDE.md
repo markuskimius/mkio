@@ -7,7 +7,7 @@ Config-driven Python microservice framework. Single TCP port serves HTTP + WebSo
 ```bash
 pip install -e ".[dev]"        # Install with dev dependencies
 pip install -e ".[fast,dev]"   # With orjson + uvloop acceleration
-pytest tests/                  # Run all tests (166 tests)
+pytest tests/                  # Run all tests (174 tests)
 pytest tests/ -x -v            # Stop on first failure, verbose
 ```
 
@@ -28,7 +28,7 @@ src/mkio/
 ├── services/
 │   ├── base.py       # Service base class with monitor notification
 │   ├── transaction.py # Config-driven SQL ops + result cache
-│   ├── subpub.py     # In-memory cache + live push + delta reconnect
+│   ├── subpub.py     # In-memory cache + live push + delta reconnect + where filter
 │   ├── stream.py     # Ring buffer + ref-based cursor
 │   └── query.py      # SQLite snapshot + change feed
 └── client/
@@ -40,7 +40,7 @@ src/mkio/
 
 - **Write path**: TransactionService -> WriteBatcher queue -> batch with SAVEPOINTs -> single COMMIT -> ChangeBus publish -> fan out to subscribers
 - **In-memory databases** use shared-cache URI (`file:mkio_{uuid}?mode=memory&cache=shared`) so write and read connections see the same data
-- **Expression language** is parsed once (at subscribe/startup), evaluated per row via AST walk
+- **Expression language** is parsed once (at subscribe/startup), evaluated per row via AST walk. Built-in functions: `UPPER`, `LOWER`, `ROUND`, `ABS`, `COALESCE`, `IF(cond, then, else)`. `IF` short-circuits (only the chosen branch is evaluated).
 - **Ref strings** are lexicographically sortable UTC timestamps with sub-nanosecond counter for uniqueness
 - **Schema migration** uses recreate-table strategy for changes SQLite's ALTER TABLE can't handle
 - **`_mkio_ref` column** is automatically added to all tables by the framework. The writer stamps each row with the transaction's `ref` on INSERT/UPDATE/UPSERT. If the client supplies a `ref`, it is used directly; otherwise the server generates one. On startup, services seed their change logs from the DB using this column, enabling delta reconnection across server restarts. Migration system excludes `_mkio_ref` from schema diffs.

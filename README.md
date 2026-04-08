@@ -24,10 +24,9 @@ table = "orders"
 op_type = "insert"
 fields = ["id", "symbol", "qty"]
 
-[services.live_orders]
-type = "subpub"
+[services.all_orders]
+type = "query"
 primary_table = "orders"
-key = "id"
 filterable = ["status", "symbol"]
 
 [static]
@@ -53,7 +52,7 @@ serve({...})  # or pass a dict
 - **Single port** — HTTP pages and WebSocket messages on one port
 - **Config-driven** — define tables, transactions, and live data services in TOML
 - **Transaction services** — insert, update, delete, upsert across multiple tables atomically
-- **SubPub** — in-memory cache with live push to subscribers, client-side filtering
+- **SubPub** — in-memory cache with live push to subscribers, client-side filtering, server-side `where` and `publish` formatting
 - **Stream** — append-only ring buffer with cursor-based reconnection
 - **Query** — snapshot + change feed from SQLite
 - **Expression language** — safe, extensible filter and formatter expressions (`qty > 100 AND status == 'pending'`)
@@ -91,18 +90,19 @@ Bind references (`$0.id`) pull values from a prior op's RETURNING row. Op-level 
 
 ### SubPub
 
-Subscribe to get a snapshot from an in-memory cache, then receive live updates as data changes. Supports client filters and server-side formatting.
+Subscribe to get a snapshot from an in-memory cache, then receive live updates as data changes. Supports client filters, server-side `where` filtering (rows that don't match are never cached or published), and `publish` formatting with expressions including `IF(cond, then, else)`.
 
 ```toml
-[services.live_orders]
+[services.last_trade]
 type = "subpub"
 primary_table = "orders"
-key = "id"
-filterable = ["status", "symbol"]
+key = "symbol"
+where = "status == 'filled'"
+change_log_size = 10000
 
-[services.live_orders.publish]
-ticker = "UPPER(symbol)"
-total = "qty * price"
+[services.last_trade.publish]
+symbol = "symbol"
+price = "IF(side == 'Buy', price, -price)"
 ```
 
 ### Stream
@@ -142,10 +142,10 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 {"service": "orders", "ref": "...", "op": "new", "msgid": "req-42", "data": {"side": "Buy", "symbol": "AAPL", "qty": 100, "price": 150}}
 
 // Subscribe
-{"service": "live_orders", "type": "subscribe", "filter": "status == 'pending'"}
+{"service": "all_orders", "type": "subscribe", "filter": "status == 'pending'"}
 
-// Reconnect with ref (gets delta instead of full snapshot)
-{"service": "live_orders", "type": "subscribe", "ref": "20260404 15:30:45.123456000000"}
+// Reconnect with ref (resumes from last seen position)
+{"service": "audit_feed", "type": "subscribe", "ref": "20260404 15:30:45.123456000000"}
 ```
 
 ## Client Libraries
@@ -158,7 +158,7 @@ from mkio.client import MkioClient
 async with MkioClient("ws://localhost:8080/ws") as client:
     result = await client.send("add_order", {"id": "1", "symbol": "AAPL", "qty": 100})
 
-    async for msg in client.subscribe("live_orders", filter="status == 'pending'"):
+    async for msg in client.subscribe("all_orders", filter="status == 'pending'"):
         print(msg)
         # msg["ref"] tracks position for recovery on reconnect
 ```
@@ -173,7 +173,7 @@ Auto-served at `/mkio.js` — no CDN or bundler needed.
 const client = new MkioClient("ws://localhost:8080/ws");
 await client.connect();
 
-client.subscribe("live_orders", {
+client.subscribe("all_orders", {
     filter: "status == 'pending'",
     onSnapshot: (rows) => renderTable(rows),
     onUpdate: (op, row) => updateRow(op, row),
@@ -183,7 +183,7 @@ client.subscribe("live_orders", {
 
 ## Expression Language
 
-Used for client filters and server-side publish formatters.
+Used for client filters, server-side `where` filters, and `publish` formatters.
 
 | Category | Syntax |
 |----------|--------|
@@ -192,7 +192,7 @@ Used for client filters and server-side publish formatters.
 | Arithmetic | `+`, `-`, `*`, `/` |
 | String | `CONTAINS`, `STARTS_WITH` |
 | Null | `IS NULL`, `IS NOT NULL` |
-| Functions | `UPPER()`, `LOWER()`, `ROUND()`, `ABS()`, `COALESCE()` |
+| Functions | `UPPER()`, `LOWER()`, `ROUND()`, `ABS()`, `COALESCE()`, `IF(cond, then, else)` |
 
 Extend with custom functions:
 
@@ -232,9 +232,9 @@ mkio send http://localhost:8080 orders mixed.csv                 # CSV with per-
 ### Subscribe to live data
 
 ```bash
-mkio subscribe http://localhost:8080 live_orders
-mkio subscribe http://localhost:8080 live_orders --filter "status == 'pending'"
-mkio subscribe http://localhost:8080 live_orders --ref "20260404 15:30:45.123456000000"  # Recovery mode
+mkio subscribe http://localhost:8080 all_orders
+mkio subscribe http://localhost:8080 all_orders --filter "status == 'pending'"
+mkio subscribe http://localhost:8080 all_orders --ref "20260404 15:30:45.123456000000"  # Resume from ref
 ```
 
 ### Monitor a service
@@ -242,12 +242,12 @@ mkio subscribe http://localhost:8080 live_orders --ref "20260404 15:30:45.123456
 Tap into a service's inbound and outbound message flow in real time:
 
 ```bash
-mkio monitor http://localhost:8080 live_orders
+mkio monitor http://localhost:8080 last_trade
 ```
 
 ```
 [15:30:45.123] >> IN  subscribe
-{ "type": "subscribe", "service": "live_orders" }
+{ "type": "subscribe", "service": "last_trade" }
 
 [15:30:45.125] << OUT snapshot
 { "type": "snapshot", "rows": [...] }

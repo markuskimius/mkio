@@ -176,7 +176,7 @@ async def subpub_svc(db, bus, writer):
         "change_log_size": 100,
     }
     svc = SubPubService(config=config, db=db, change_bus=bus, writer=writer)
-    svc.name = "live_orders"
+    svc.name = "last_trade"
     await svc.start()
     yield svc
     await svc.stop()
@@ -256,6 +256,98 @@ async def test_subpub_unsubscribe(subpub_svc):
     assert len(subpub_svc._subscribers) == 1
     await subpub_svc.on_unsubscribe(ws, {"type": "unsubscribe"})
     assert len(subpub_svc._subscribers) == 0
+
+
+# ---- SubPub Service with where ---------------------------------------------
+
+@pytest_asyncio.fixture
+async def subpub_where_svc(db, bus, writer):
+    # Seed data: one pending, one filled
+    await db.write_conn.execute(
+        "INSERT INTO orders (id, symbol, qty, status) VALUES (?, ?, ?, ?)",
+        ("1", "AAPL", 100, "pending"),
+    )
+    await db.write_conn.execute(
+        "INSERT INTO orders (id, symbol, qty, status) VALUES (?, ?, ?, ?)",
+        ("2", "MSFT", 50, "filled"),
+    )
+    await db.write_conn.commit()
+
+    from mkio._expr import compile_filter
+
+    config = {
+        "type": "subpub",
+        "primary_table": "orders",
+        "watch_tables": ["orders"],
+        "key": "id",
+        "where": "status == 'filled'",
+        "_compiled_where": compile_filter("status == 'filled'"),
+        "change_log_size": 100,
+    }
+    svc = SubPubService(config=config, db=db, change_bus=bus, writer=writer)
+    svc.name = "last_trade_where"
+    await svc.start()
+    yield svc
+    await svc.stop()
+
+
+async def test_subpub_where_filters_startup(subpub_where_svc):
+    """Only rows matching where should appear in the snapshot."""
+    ws = MockWebSocket()
+    await subpub_where_svc.on_subscribe(ws, {"type": "subscribe"})
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "snapshot"
+    assert len(msgs[0]["rows"]) == 1
+    assert msgs[0]["rows"][0]["symbol"] == "MSFT"
+
+
+async def test_subpub_where_filters_live_insert(subpub_where_svc, bus):
+    """Live inserts that don't match where should be ignored."""
+    ws = MockWebSocket()
+    await subpub_where_svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+
+    # Insert a pending order — should be filtered out
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "3", "symbol": "GOOG", "qty": 200, "status": "pending"},
+        "20260404 00:00:00.000000000001",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+    assert ws.get_messages() == []
+
+    # Insert a filled order — should come through
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "4", "symbol": "TSLA", "qty": 75, "status": "filled"},
+        "20260404 00:00:00.000000000002",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["row"]["symbol"] == "TSLA"
+
+
+async def test_subpub_where_removes_on_mismatch(subpub_where_svc, bus):
+    """If an update causes a row to no longer match where, it should be removed."""
+    ws = MockWebSocket()
+    await subpub_where_svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+
+    # Update MSFT (filled) to pending — should produce a delete
+    event = ChangeBus.make_event(
+        "orders", "update",
+        {"id": "2", "symbol": "MSFT", "qty": 50, "status": "pending"},
+        "20260404 00:00:00.000000000003",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["op"] == "delete"
 
 
 # ---- Stream Service --------------------------------------------------------
@@ -515,7 +607,7 @@ async def test_subpub_cross_restart_delta(db, bus, writer):
         "change_log_size": 100,
     }
     svc1 = SubPubService(config=subpub_config, db=db, change_bus=bus, writer=writer)
-    svc1.name = "live_orders"
+    svc1.name = "last_trade"
     await svc1.start()
 
     # Insert a row via transaction (stamps _mkio_ref in DB)
@@ -545,7 +637,7 @@ async def test_subpub_cross_restart_delta(db, bus, writer):
     # Create a NEW service instance from the same DB (simulating restart)
     bus2 = ChangeBus()
     svc2 = SubPubService(config=subpub_config, db=db, change_bus=bus2, writer=writer)
-    svc2.name = "live_orders"
+    svc2.name = "last_trade"
     await svc2.start()
 
     # Reconnect with the snapshot ref from before "restart"

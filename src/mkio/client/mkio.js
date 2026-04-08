@@ -189,8 +189,8 @@ class MkioClient {
   _dispatch(data) {
     const { type, ref, service } = data;
 
-    // Route to pending promise
-    if (ref && this._pending.has(ref)) {
+    // Route to pending promise (only result/error, not subscription updates)
+    if (ref && this._pending.has(ref) && (type === "result" || type === "error")) {
       const { resolve } = this._pending.get(ref);
       this._pending.delete(ref);
       resolve(data);
