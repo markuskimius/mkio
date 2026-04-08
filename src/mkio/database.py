@@ -42,9 +42,9 @@ class Database:
             self._read_conn = await aiosqlite.connect(self._path)
 
         for conn in (self._write_conn, self._read_conn):
-            await conn.execute("PRAGMA journal_mode=WAL")
-            await conn.execute("PRAGMA synchronous=NORMAL")
-            await conn.execute("PRAGMA cache_size=-64000")
+            await (await conn.execute("PRAGMA journal_mode=WAL")).close()
+            await (await conn.execute("PRAGMA synchronous=NORMAL")).close()
+            await (await conn.execute("PRAGMA cache_size=-64000")).close()
 
         self._write_conn.row_factory = aiosqlite.Row
         self._read_conn.row_factory = aiosqlite.Row
@@ -55,23 +55,23 @@ class Database:
                 col_defs = ", ".join(
                     f"{col} {typ}" for col, typ in spec["columns"].items()
                 )
-                await self._write_conn.execute(
+                await (await self._write_conn.execute(
                     f"CREATE TABLE IF NOT EXISTS {name} ({col_defs})"
-                )
+                )).close()
             await self._write_conn.commit()
 
         # Add internal _mkio_ref column to all tables (for cross-restart recovery)
         for table_name in self._tables:
             try:
-                await self._write_conn.execute(
+                await (await self._write_conn.execute(
                     f"ALTER TABLE {table_name} ADD COLUMN _mkio_ref TEXT DEFAULT ''"
-                )
+                )).close()
             except Exception:
                 pass  # Column already exists
-            await self._write_conn.execute(
+            await (await self._write_conn.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_{table_name}__mkio_ref "
                 f"ON {table_name}(_mkio_ref)"
-            )
+            )).close()
         await self._write_conn.commit()
 
         # Start periodic WAL checkpoint
@@ -135,12 +135,12 @@ class Database:
     async def checkpoint(self) -> None:
         """Force a WAL checkpoint, merging WAL into main DB."""
         if self._write_conn:
-            await self._write_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            await (await self._write_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")).close()
 
     async def backup(self, dest_path: str) -> None:
         """Create a safe live backup of the database."""
         if self._write_conn:
-            await self._write_conn.execute(f"VACUUM INTO '{dest_path}'")
+            await (await self._write_conn.execute(f"VACUUM INTO '{dest_path}'")).close()
 
     async def _periodic_checkpoint(self, interval_s: float) -> None:
         """Periodically checkpoint the WAL."""
