@@ -7,7 +7,7 @@ Config-driven Python microservice framework. Single TCP port serves HTTP + WebSo
 ```bash
 pip install -e ".[dev]"        # Install with dev dependencies
 pip install -e ".[fast,dev]"   # With orjson + uvloop acceleration
-pytest tests/                  # Run all tests (155 tests)
+pytest tests/                  # Run all tests (159 tests)
 pytest tests/ -x -v            # Stop on first failure, verbose
 ```
 
@@ -43,6 +43,8 @@ src/mkio/
 - **Expression language** is parsed once (at subscribe/startup), evaluated per row via AST walk
 - **Version strings** are lexicographically sortable UTC timestamps with sub-nanosecond counter for uniqueness
 - **Schema migration** uses recreate-table strategy for changes SQLite's ALTER TABLE can't handle
+- **`_mkio_ref` column** is automatically added to all tables by the framework. The writer stamps each row with the version string on INSERT/UPDATE/UPSERT. On startup, services seed their change logs from the DB using this column, enabling delta reconnection across server restarts. Migration system excludes `_mkio_ref` from schema diffs.
+- **Op-level `defaults`** in transaction op specs provide static values the client doesn't send (e.g., `defaults = { status = "accepted" }`). Stored in `CompiledOp.defaults`, used by `_extract_params` as fallback when the field isn't in client data.
 
 ## Conventions
 

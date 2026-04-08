@@ -59,7 +59,7 @@ serve({...})  # or pass a dict
 - **Expression language** — safe, extensible filter and formatter expressions (`qty > 100 AND status == 'pending'`)
 - **Schema migration** — automatic detection of safe/destructive changes with interactive confirmation
 - **Write batching** — hundreds of writes committed in a single SQLite transaction for high throughput
-- **Reconnection recovery** — ref-based delta sync across all service types
+- **Reconnection recovery** — ref-based delta sync across all service types, persisted across server restarts via `_mkio_ref` column
 - **Client libraries** — Python and JavaScript clients with auto-reconnect and ref tracking
 - **Graceful shutdown** — drains pending writes, checkpoints WAL, clean close
 - **Service monitoring** — tap into any service's inbound/outbound message flow via CLI or WebSocket
@@ -77,17 +77,17 @@ Execute INSERT, UPDATE, DELETE, or UPSERT operations. Supports multi-table atomi
 type = "transaction"
 
 [services.orders.ops]
-place = [
+new = [
     { table = "orders", op_type = "insert", fields = ["side", "symbol", "qty", "price"] },
-    { table = "audit_log", op_type = "insert", fields = ["event"], bind = { order_id = "$0.id", status = "$0.status" } },
+    { table = "audit_log", op_type = "insert", defaults = { event = "new" }, bind = { order_id = "$0.id", status = "$0.status" } },
 ]
-update_status = [
-    { table = "orders", op_type = "update", key = ["id"], fields = ["status"] },
-    { table = "audit_log", op_type = "insert", fields = ["event"], bind = { order_id = "$0.id", status = "$0.status" } },
+accept = [
+    { table = "orders", op_type = "update", key = ["id"], fields = ["status"], defaults = { status = "accepted" } },
+    { table = "audit_log", op_type = "insert", defaults = { event = "accepted" }, bind = { order_id = "$0.id", status = "$0.status" } },
 ]
 ```
 
-Bind references (`$0.id`) pull values from a prior op's RETURNING row, so audit entries automatically capture the new order's ID and status.
+Bind references (`$0.id`) pull values from a prior op's RETURNING row. Op-level `defaults` provide static values the client doesn't need to send — here, `event` and `status` are set automatically per operation.
 
 ### SubPub
 
@@ -136,7 +136,7 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 {"service": "add_order", "ref": "...", "data": {"id": "1", "symbol": "AAPL", "qty": 100}}
 
 // Named op transaction
-{"service": "orders", "ref": "...", "op": "place", "data": {"side": "Buy", "symbol": "AAPL", "qty": 100, "price": 150}}
+{"service": "orders", "ref": "...", "op": "new", "data": {"side": "Buy", "symbol": "AAPL", "qty": 100, "price": 150}}
 
 // Subscribe
 {"service": "live_orders", "type": "subscribe", "filter": "status == 'pending'"}
@@ -220,9 +220,9 @@ Detail view shows fields, types, required/optional, auto-generated columns, and 
 ### Send transactions
 
 ```bash
-mkio send http://localhost:8080 orders --op place '{"side":"Buy","symbol":"AAPL","qty":100,"price":150}'
-mkio send http://localhost:8080 orders --op place orders.json    # From JSON file
-mkio send http://localhost:8080 orders --op place orders.csv     # From CSV file
+mkio send http://localhost:8080 orders --op new '{"side":"Buy","symbol":"AAPL","qty":100,"price":150}'
+mkio send http://localhost:8080 orders --op new orders.json    # From JSON file
+mkio send http://localhost:8080 orders --op new orders.csv     # From CSV file
 mkio send http://localhost:8080 orders mixed.csv                 # CSV with per-row op column
 ```
 
