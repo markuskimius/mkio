@@ -255,6 +255,50 @@ mkio monitor http://localhost:8080 last_trade
 
 The monitor protocol is a native framework feature — any mkio application supports it.
 
+## Using mkio from a Claude-Based Project
+
+mkio ships agent-facing docs inside the package for AI-assisted integration. Three files in `src/mkio/agents/`:
+
+- `AGENTS.md` — protocol, refs, discovery, service types (always needed)
+- `AGENTS.python.md` — Python client API + worked example
+- `AGENTS.js.md` — JS client API + worked example
+
+### Option A: Reference in your project's CLAUDE.md
+
+```markdown
+# Python-only consumer
+@/path/to/mkio/src/mkio/agents/AGENTS.md
+@/path/to/mkio/src/mkio/agents/AGENTS.python.md
+
+# JS-only consumer
+@/path/to/mkio/src/mkio/agents/AGENTS.md
+@/path/to/mkio/src/mkio/agents/AGENTS.js.md
+
+# Both
+@/path/to/mkio/src/mkio/agents/AGENTS.md
+@/path/to/mkio/src/mkio/agents/AGENTS.python.md
+@/path/to/mkio/src/mkio/agents/AGENTS.js.md
+```
+
+To find the installed path: `python -c "import mkio, os; print(os.path.join(os.path.dirname(mkio.__file__), 'agents'))"`
+
+### Option B: Install the Claude Code skill
+
+```bash
+cp -r <mkio-checkout>/skills/mkio ~/.claude/skills/
+```
+
+The skill auto-triggers on mkio-related work and reads the agent docs from the installed package.
+
+### Runtime service discovery
+
+A stdlib-only helper fetches service descriptors as LLM-friendly JSON:
+
+```bash
+python -m mkio.skill_helpers.discover http://localhost:8080           # list services
+python -m mkio.skill_helpers.discover http://localhost:8080 orders    # full descriptor
+```
+
 ## Schema Migration
 
 When the config schema changes between restarts, mkio detects and classifies each difference:
