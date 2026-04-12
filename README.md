@@ -234,6 +234,30 @@ Used for client filters, server-side `where` filters, and `publish` formatters.
 
 Use parentheses to override precedence, e.g. `(status == 'new' OR status == 'pending') AND qty > 100`.
 
+### Built-in Functions
+
+| Function | Signature | Description |
+|---|---|---|
+| `UPPER` | `UPPER(s)` | Uppercase a string. Non-string values pass through unchanged. |
+| `LOWER` | `LOWER(s)` | Lowercase a string. Non-string values pass through unchanged. |
+| `ROUND` | `ROUND(x, n=0)` | Round numeric `x` to `n` decimal places. `n` defaults to 0. |
+| `ABS` | `ABS(x)` | Absolute value of a numeric. |
+| `COALESCE` | `COALESCE(a, b, ...)` | Returns the first non-`NULL` argument, or `NULL` if all are `NULL`. Variadic (1+ args). |
+| `IF` | `IF(cond, then, else)` | Returns `then` if `cond` is truthy, else `else`. Short-circuits — only the taken branch is evaluated. |
+
+Notes:
+
+- `IF` is a special form, not a regular function: the non-taken branch is never evaluated, so it's safe to guard against nulls or division-by-zero, e.g. `IF(qty > 0, price / qty, 0)`.
+- `UPPER` / `LOWER` are null-safe via passthrough: `UPPER(NULL)` returns `NULL`.
+- Function names are case-insensitive at parse time but conventionally written uppercase.
+- Custom functions registered via `register_function` appear alongside these built-ins.
+
+Worked example combining several functions:
+
+```
+IF(status == 'filled', UPPER(symbol), COALESCE(note, '-'))
+```
+
 Extend with custom functions:
 
 ```python
