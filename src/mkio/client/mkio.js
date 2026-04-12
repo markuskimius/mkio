@@ -8,40 +8,49 @@
 // Ref generator (same YYYYMMDD HH:mm:ss.mmmuuunnnppp format as server)
 // ---------------------------------------------------------------------------
 
-let _lastMs = 0;
-let _lastSubNs = 0;
+let _lastNs = 0n;
 let _counter = 0;
 
-const _hasPerf =
+// Pick a nanosecond clock once. Adding performance.timeOrigin (~1.77e12 ms)
+// to performance.now() as a single double loses ~500ns of precision, so we
+// keep the wall-clock anchor and the high-res offset separate.
+let _nowNs;
+if (typeof process !== "undefined" && process.hrtime && process.hrtime.bigint) {
+  const _originNs = BigInt(Math.trunc(performance.timeOrigin * 1e6));
+  const _startHr = process.hrtime.bigint();
+  _nowNs = () => _originNs + (process.hrtime.bigint() - _startHr);
+} else if (
   typeof performance !== "undefined" &&
   typeof performance.now === "function" &&
-  typeof performance.timeOrigin === "number";
+  typeof performance.timeOrigin === "number"
+) {
+  const _originNs = BigInt(Math.trunc(performance.timeOrigin)) * 1_000_000n;
+  _nowNs = () => _originNs + BigInt(Math.round(performance.now() * 1e6));
+} else {
+  _nowNs = () => BigInt(Date.now()) * 1_000_000n;
+}
 
 function makeRef() {
-  // Wall-clock ms + sub-ms nanoseconds. performance.timeOrigin+now() gives
-  // fractional ms; browsers typically expose 5us resolution, Node gives ns.
-  let epochMs;
-  let subNs;
-  if (_hasPerf) {
-    const t = performance.timeOrigin + performance.now();
-    epochMs = Math.floor(t);
-    subNs = Math.round((t - epochMs) * 1_000_000);
-    if (subNs >= 1_000_000) {
-      epochMs += 1;
-      subNs = 0;
-    }
+  // Tiered monotonic counter: counter fills the picosecond slot first
+  // (preserving real platform precision), then spills into _lastNs on
+  // overflow so refs stay strictly increasing without wrapping. Chrome
+  // clamps performance.now() to 100us in non-COI contexts, which is why
+  // the spill path matters there.
+  let nowNs = _nowNs();
+  if (nowNs > _lastNs) {
+    _lastNs = nowNs;
+    _counter = 0;
   } else {
-    epochMs = Date.now();
-    subNs = 0;
+    _counter++;
+    if (_counter >= 1000) {
+      _lastNs = _lastNs + 1n;
+      _counter = 0;
+    }
+    nowNs = _lastNs;
   }
 
-  if (epochMs < _lastMs || (epochMs === _lastMs && subNs <= _lastSubNs)) {
-    _counter++;
-  } else {
-    _counter = 0;
-    _lastMs = epochMs;
-    _lastSubNs = subNs;
-  }
+  const epochMs = Number(nowNs / 1_000_000n);
+  const subNs = Number(nowNs % 1_000_000n);
 
   const d = new Date(epochMs);
   const yyyy = d.getUTCFullYear();
@@ -53,7 +62,7 @@ function makeRef() {
   const ms = String(d.getUTCMilliseconds()).padStart(3, "0");
   const us = String(Math.floor(subNs / 1000)).padStart(3, "0");
   const ns = String(subNs % 1000).padStart(3, "0");
-  const ps = String(_counter % 1000).padStart(3, "0");
+  const ps = String(_counter).padStart(3, "0");
 
   return `${yyyy}${MM}${dd} ${HH}:${mm}:${ss}.${ms}${us}${ns}${ps}`;
 }
