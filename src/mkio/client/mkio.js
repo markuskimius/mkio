@@ -9,18 +9,41 @@
 // ---------------------------------------------------------------------------
 
 let _lastMs = 0;
+let _lastSubNs = 0;
 let _counter = 0;
 
+const _hasPerf =
+  typeof performance !== "undefined" &&
+  typeof performance.now === "function" &&
+  typeof performance.timeOrigin === "number";
+
 function makeRef() {
-  const now = Date.now();
-  if (now <= _lastMs) {
+  // Wall-clock ms + sub-ms nanoseconds. performance.timeOrigin+now() gives
+  // fractional ms; browsers typically expose 5us resolution, Node gives ns.
+  let epochMs;
+  let subNs;
+  if (_hasPerf) {
+    const t = performance.timeOrigin + performance.now();
+    epochMs = Math.floor(t);
+    subNs = Math.round((t - epochMs) * 1_000_000);
+    if (subNs >= 1_000_000) {
+      epochMs += 1;
+      subNs = 0;
+    }
+  } else {
+    epochMs = Date.now();
+    subNs = 0;
+  }
+
+  if (epochMs < _lastMs || (epochMs === _lastMs && subNs <= _lastSubNs)) {
     _counter++;
   } else {
     _counter = 0;
-    _lastMs = now;
+    _lastMs = epochMs;
+    _lastSubNs = subNs;
   }
 
-  const d = new Date(now);
+  const d = new Date(epochMs);
   const yyyy = d.getUTCFullYear();
   const MM = String(d.getUTCMonth() + 1).padStart(2, "0");
   const dd = String(d.getUTCDate()).padStart(2, "0");
@@ -28,10 +51,11 @@ function makeRef() {
   const mm = String(d.getUTCMinutes()).padStart(2, "0");
   const ss = String(d.getUTCSeconds()).padStart(2, "0");
   const ms = String(d.getUTCMilliseconds()).padStart(3, "0");
-  // JS only has ms precision; fill us/ns/ps with counter
-  const sub = String(_counter).padStart(9, "0");
+  const us = String(Math.floor(subNs / 1000)).padStart(3, "0");
+  const ns = String(subNs % 1000).padStart(3, "0");
+  const ps = String(_counter % 1000).padStart(3, "0");
 
-  return `${yyyy}${MM}${dd} ${HH}:${mm}:${ss}.${ms}${sub}`;
+  return `${yyyy}${MM}${dd} ${HH}:${mm}:${ss}.${ms}${us}${ns}${ps}`;
 }
 
 // ---------------------------------------------------------------------------
