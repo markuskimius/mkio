@@ -217,7 +217,7 @@ Used for client filters, server-side `where` filters, and `publish` formatters.
 | Arithmetic | `+`, `-`, `*`, `/` |
 | String | `CONTAINS`, `STARTS_WITH` |
 | Null | `IS NULL`, `IS NOT NULL` |
-| Functions | `UPPER()`, `LOWER()`, `ROUND()`, `ABS()`, `COALESCE()`, `IF(cond, then, else)` |
+| Functions | `UPPER()`, `LOWER()`, `ROUND()`, `ABS()`, `COALESCE()`, `IF()` |
 | Membership | `IN` (right side is a list/tuple/set supplied by host code) |
 | Grouping | `(` ... `)` |
 
