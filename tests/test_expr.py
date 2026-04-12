@@ -257,6 +257,13 @@ def test_register_keyword_name_raises():
         register_function("AND", lambda: None)
 
 
+def test_register_special_form_name_raises():
+    with pytest.raises(ExprError, match="keyword"):
+        register_function("IF", lambda *a: None)
+    with pytest.raises(ExprError, match="keyword"):
+        register_function("if", lambda *a: None)
+
+
 # -- IF function --------------------------------------------------------------
 
 def test_if_true_branch():
