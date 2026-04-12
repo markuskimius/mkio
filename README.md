@@ -100,7 +100,9 @@ accept = [
 ]
 ```
 
-Bind references (`$0.id`) pull values from a prior op's RETURNING row. Op-level `defaults` provide static values the client doesn't need to send — here, `event` and `status` are set automatically per operation.
+Clients select a named set by sending `"op": "new"` (or `"accept"`, etc.) in the transaction message. For a service with only one workflow, `ops` may instead be a plain list — clients then omit the `op` field.
+
+Bind references (`$N.field`) pull values from a prior op's `RETURNING` row, where `N` is the zero-based index of an earlier op in the same op set. Only `insert`, `update`, and `upsert` ops produce `RETURNING` rows that can be bound against. Op-level `defaults` provide static values the client doesn't need to send — here, `event` and `status` are set automatically per operation.
 
 ### SubPub
 
