@@ -91,9 +91,19 @@ function defaultMonitorFormatter(entry) {
     refStyle
   );
   // eslint-disable-next-line no-console
-  console.log(msg);
+  console.log(_nullProtoClone(msg));
   // eslint-disable-next-line no-console
   console.groupEnd();
+}
+
+// Deep-clone into null-prototype objects so DevTools shows an expandable
+// tree without the "[[Prototype]]: Object" entry on every node.
+function _nullProtoClone(v) {
+  if (v === null || typeof v !== "object") return v;
+  if (Array.isArray(v)) return v.map(_nullProtoClone);
+  const out = Object.create(null);
+  for (const k of Object.keys(v)) out[k] = _nullProtoClone(v[k]);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
