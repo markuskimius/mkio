@@ -26,10 +26,9 @@ def test_js_makeref_produces_correct_format():
     src = JS_CLIENT_PATH.read_text()
     # Verify the format string pattern is present
     assert "padStart(2" in src  # Zero-padded date components
-    assert "padStart(3" in src  # Milliseconds
-    assert "padStart(9" in src  # Sub-ms counter
-    # The template literal should produce YYYYMMDD HH:mm:ss.mmmnnnnnnnnn
-    assert "${yyyy}${MM}${dd} ${HH}:${mm}:${ss}.${ms}${sub}" in src
+    assert "padStart(3" in src  # Milliseconds + us/ns/ps sub-ms components
+    # The template literal should produce YYYYMMDD HH:mm:ss.mmmuuunnnppp
+    assert "${yyyy}${MM}${dd} ${HH}:${mm}:${ss}.${ms}${us}${ns}${ps}" in src
 
 
 def test_js_client_has_reconnect():

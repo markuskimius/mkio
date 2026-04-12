@@ -61,12 +61,14 @@ _KEYWORDS = frozenset({
     "TRUE", "FALSE",
 })
 
+_SPECIAL_FORMS = frozenset({"IF"})
+
 
 def register_function(name: str, fn: Callable[..., Any]) -> None:
     """Add a custom function to the expression language."""
     upper = name.upper()
-    if upper in _KEYWORDS:
-        raise ExprError(f"Cannot register function with keyword name: {name}")
+    if upper in _KEYWORDS or upper in _SPECIAL_FORMS:
+        raise ExprError(f"Cannot register function with reserved keyword name: {name}")
     FUNCTIONS[upper] = fn
 
 
@@ -318,7 +320,7 @@ class _Parser:
             if self.peek().type == "LPAREN":
                 # Function call
                 fname = upper
-                if fname not in FUNCTIONS and fname not in _KEYWORDS and fname != "IF":
+                if fname not in FUNCTIONS and fname not in _SPECIAL_FORMS:
                     raise ExprError(f"Unknown function: {tok.value}")
                 self.advance()  # consume (
                 args: list[Node] = []
