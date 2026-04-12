@@ -123,6 +123,7 @@ class MkioClient {
     this._subscriptions = new Map(); // service -> subscription
     this._backoff = this.backoffBase;
     this._closed = false;
+    this._reconnectTimer = null;
 
     // Debugging: monitor hook and service-usage tracking.
     this._monitor = null; // null | {services: Set|null, fn}
@@ -141,17 +142,22 @@ class MkioClient {
 
   connect() {
     return new Promise((resolve, reject) => {
-      this._ws = new WebSocket(this.url);
-      this._ws.binaryType = "arraybuffer";
+      // Bind to this specific socket: if a later reconnect replaces
+      // this._ws, the handlers below must not act on the stale one.
+      const ws = new WebSocket(this.url);
+      ws.binaryType = "arraybuffer";
+      this._ws = ws;
 
-      this._ws.onopen = () => {
+      ws.onopen = () => {
+        if (ws !== this._ws || this._closed) return;
         this._backoff = this.backoffBase;
         this._resubscribe();
         this.onConnect();
         resolve();
       };
 
-      this._ws.onmessage = (event) => {
+      ws.onmessage = (event) => {
+        if (ws !== this._ws) return;
         let data;
         if (typeof event.data === "string") {
           data = JSON.parse(event.data);
@@ -162,15 +168,17 @@ class MkioClient {
         this._dispatch(data);
       };
 
-      this._ws.onclose = () => {
+      ws.onclose = () => {
+        if (ws !== this._ws) return;
         this.onDisconnect();
         if (!this._closed && this.reconnect) {
           this._attemptReconnect();
         }
       };
 
-      this._ws.onerror = (err) => {
-        if (this._ws.readyState !== WebSocket.OPEN) {
+      ws.onerror = (err) => {
+        if (ws !== this._ws) return;
+        if (ws.readyState !== WebSocket.OPEN) {
           reject(err);
         }
       };
@@ -179,6 +187,10 @@ class MkioClient {
 
   close() {
     this._closed = true;
+    if (this._reconnectTimer !== null) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
     if (this._ws) {
       this._ws.close();
     }
@@ -360,7 +372,12 @@ class MkioClient {
   }
 
   _attemptReconnect() {
-    setTimeout(() => {
+    // Dedupe: one failed connect fires both onerror and onclose, each of
+    // which wants to schedule a reconnect. Also blocks rescheduling while
+    // a pending attempt has not yet run.
+    if (this._reconnectTimer !== null || this._closed) return;
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
       this._backoff = Math.min(this._backoff * 2, this.backoffMax);
       this.connect().catch(() => {
         if (!this._closed && this.reconnect) {
