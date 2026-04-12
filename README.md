@@ -4,6 +4,20 @@ Config-driven microservice framework for Python. Define your schema, services, a
 
 A single TCP port serves HTTP and WebSocket, backed by an embedded SQLite database. Designed for restricted environments where runtime downloads aren't possible — everything installs via `pip`.
 
+## Contents
+
+- [Quick Start](#quick-start)
+- [Features](#features)
+- [Service Types](#service-types)
+- [WebSocket Protocol](#websocket-protocol)
+- [Client Libraries](#client-libraries)
+- [Expression Language](#expression-language)
+- [Performance](#performance)
+- [CLI Tools](#cli-tools)
+- [Using mkio from a Claude-Based Project](#using-mkio-from-a-claude-based-project)
+- [Schema Migration](#schema-migration)
+- [License](#license)
+
 ## Quick Start
 
 ```bash
