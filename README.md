@@ -181,6 +181,15 @@ client.subscribe("all_orders", {
 </script>
 ```
 
+**Compatibility:** Runs in all evergreen browsers (Chrome, Edge, Firefox, Safari) with no polyfills. Also works in Node.js ≥22, where `WebSocket`, `TextDecoder`, and `performance` are available as globals. On Node 18–21, assign a `WebSocket` polyfill to `globalThis` before importing:
+
+```js
+globalThis.WebSocket = require("ws");
+const { MkioClient } = require("./mkio.js");
+```
+
+The file uses CommonJS `module.exports`; load it via `require(...)` in Node, or `<script src="/mkio.js">` in the browser.
+
 ## Expression Language
 
 Used for client filters, server-side `where` filters, and `publish` formatters.
