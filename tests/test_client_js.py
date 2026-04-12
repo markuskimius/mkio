@@ -115,6 +115,72 @@ def test_js_client_instance_registry():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_js_client_reconnect_race_does_not_throw():
+    """A single failed connect must not stack multiple reconnects, and a stale
+    socket's onopen must not fire _resubscribe against a newer CONNECTING socket.
+    Regression test for the InvalidStateError race when the server is killed."""
+    script = r"""
+global.WebSocket = class {
+  constructor(url) {
+    this.url = url;
+    this.readyState = 0;
+    this.binaryType = null;
+    FakeWS.instances.push(this);
+  }
+  send(data) {
+    if (this.readyState !== 1) {
+      throw new Error("Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.");
+    }
+  }
+  close() { this.readyState = 3; }
+};
+global.WebSocket.OPEN = 1;
+const FakeWS = global.WebSocket;
+FakeWS.instances = [];
+
+const { MkioClient } = require(PATH);
+const c = new MkioClient("ws://x/ws", { backoffBase: 1, backoffMax: 1 });
+
+// Inject a subscription without hitting the socket, so _resubscribe has work.
+c._subscriptions.set("orders", {
+  service: "orders", filter: null, ref: null,
+  onSnapshot: () => {}, onDelta: () => {}, onUpdate: () => {},
+});
+
+c.connect().catch(() => {});
+
+// Fire BOTH onerror and onclose on the first socket in the order the browser
+// does. Before the fix, each scheduled its own reconnect.
+const ws1 = FakeWS.instances[0];
+ws1.onerror(new Error("fail"));
+ws1.onclose();
+
+setTimeout(() => {
+  let threw = null;
+  const latest = FakeWS.instances[FakeWS.instances.length - 1];
+  latest.readyState = 1;
+  try {
+    latest.onopen();
+  } catch (e) {
+    threw = e.message;
+  }
+  console.log(JSON.stringify({ sockets: FakeWS.instances.length, threw }));
+  process.exit(0);
+}, 20);
+""".replace("PATH", json.dumps(str(JS_CLIENT_PATH)))
+
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, check=True
+    )
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+
+    # One failed connect must produce exactly one reconnect socket, not two.
+    assert out["sockets"] == 2, f"expected 2 sockets, got {out['sockets']}"
+    # onopen on the live socket must not throw.
+    assert out["threw"] is None, f"onopen threw: {out['threw']}"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_js_client_monitor_hook_runtime():
     """Actually run the client under Node and verify monitor/dispatcher behavior."""
     script = r"""
