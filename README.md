@@ -216,6 +216,23 @@ Used for client filters, server-side `where` filters, and `publish` formatters.
 | String | `CONTAINS`, `STARTS_WITH` |
 | Null | `IS NULL`, `IS NOT NULL` |
 | Functions | `UPPER()`, `LOWER()`, `ROUND()`, `ABS()`, `COALESCE()`, `IF(cond, then, else)` |
+| Membership | `IN` (right side is a list/tuple/set supplied by host code) |
+| Grouping | `(` ... `)` |
+
+**Data types:** string (single-quoted, e.g. `'pending'`), integer, float, boolean (`TRUE`/`FALSE`), and `NULL`.
+
+**Operator precedence** (lowest to highest):
+
+1. `OR`
+2. `AND`
+3. `NOT`
+4. Comparisons: `==` `!=` `<` `>` `<=` `>=`, `IS NULL` / `IS NOT NULL`, `IN`, `CONTAINS`, `STARTS_WITH`
+5. Additive: `+` `-`
+6. Multiplicative: `*` `/`
+7. Unary minus: `-x`
+8. Primary: literals, field references, function calls, parenthesized expressions
+
+Use parentheses to override precedence, e.g. `(status == 'new' OR status == 'pending') AND qty > 100`.
 
 Extend with custom functions:
 
