@@ -439,7 +439,7 @@ function _mkioMonitor(arg) {
     return null;
   }
   let state;
-  if (arg === undefined) {
+  if (arg === undefined || arg === "*") {
     for (const c of clients) state = c.monitor({ services: null });
     // eslint-disable-next-line no-console
     console.log("mkio: monitoring *");
