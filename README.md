@@ -206,6 +206,23 @@ const { MkioClient } = require("./mkio.js");
 
 The file uses CommonJS `module.exports`; load it via `require(...)` in Node, or `<script src="/mkio.js">` in the browser.
 
+#### Debugging from the browser console
+
+Once `/mkio.js` is loaded, a `mkio` object is available in DevTools with methods that mirror the `mkio` CLI (the `<url>` argument is dropped since the page already holds the connection):
+
+```js
+mkio.help()                                // show help
+mkio.services()                            // list services this tab has talked to
+mkio.services("orders")                    // detail for one service (via /api/services)
+mkio.monitor()                             // log every frame to/from any service
+mkio.monitor("orders")                     // filter to one service (call again to add more)
+mkio.monitor("off")                        // stop
+mkio.send("orders", {side:"Buy",...}, {op:"new"})
+mkio.subscribe("all_orders", {filter:"status == 'pending'"})
+```
+
+`mkio.monitor(...)` only taps **this tab's** traffic. For traffic across all connected clients use the CLI's server-side `mkio monitor` instead.
+
 ## Expression Language
 
 Used for client filters, server-side `where` filters, and `publish` formatters.

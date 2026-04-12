@@ -126,6 +126,26 @@ main();
 </script>
 ```
 
+## Debugging from the Browser Console
+
+Once `/mkio.js` is loaded, a global `mkio` object exposes methods that mirror the `mkio` CLI verbs (minus the `<url>` positional, since the page already holds the connection). Useful when helping a user inspect live traffic from DevTools without touching app code:
+
+```javascript
+mkio.help()                                // usage block
+mkio.services()                            // services this tab has talked to
+mkio.services("orders")                    // detail via /api/services/<name>
+mkio.services("*")                         // full server catalogue
+mkio.monitor()                             // log every frame to/from any service
+mkio.monitor("orders")                     // filter to one service (additive across calls)
+mkio.monitor("off")                        // stop
+mkio.send("orders", {...}, {op: "new"})    // returns the same promise as client.send
+mkio.subscribe("all_orders", {filter})     // returns {stop} for unsubscribe
+```
+
+The monitor hook is per-tab only — it instruments `MkioClient` locally via a `_sendRaw` choke-point and a hook in `_dispatch`. This is **not** the server-side monitor protocol; for cross-client traffic use the CLI's `mkio monitor <url> <service>`.
+
+Output uses `console.groupCollapsed` with styled `→` (out) / `←` (in) headers; pass `{services, fn}` to `mkio.monitor` for a custom formatter.
+
 ## Auto-Reconnect Behavior
 
 The client reconnects automatically with exponential backoff when the WebSocket drops. On reconnect:
