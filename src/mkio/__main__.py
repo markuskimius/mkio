@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from mkio._json import loads
+from mkio._ref import local_ts
 
 
 def main() -> None:
@@ -351,7 +352,7 @@ def _print_monitor_message(data: dict[str, Any]) -> None:
     message = data.get("message", {})
     msg_type = message.get("type", "")
 
-    now = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+    now = local_ts()
     arrow = ">>" if direction == "in" else "<<"
 
     # Color codes (if terminal supports it)
@@ -590,7 +591,7 @@ def _print_subscribe_message(data: dict[str, Any]) -> None:
     """Pretty-print a subscription message."""
     msg_type = data.get("type", "")
     ref = data.get("ref", "")
-    now = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+    now = local_ts()
 
     is_tty = sys.stdout.isatty()
     ver_suffix = f" ref={ref}" if ref else ""

@@ -329,10 +329,10 @@ mkio monitor http://localhost:8080 last_trade
 ```
 
 ```
-[15:30:45.123] >> IN  subscribe
+[2026-04-04 15:30:45.123456 -0400] >> IN  subscribe
 { "type": "subscribe", "service": "last_trade" }
 
-[15:30:45.125] << OUT snapshot
+[2026-04-04 15:30:45.125789 -0400] << OUT snapshot
 { "type": "snapshot", "rows": [...] }
 ```
 

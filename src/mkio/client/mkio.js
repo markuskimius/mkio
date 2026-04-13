@@ -68,6 +68,33 @@ function makeRef() {
 }
 
 // ---------------------------------------------------------------------------
+// Local display timestamp (YYYYMMDD HH:MM:SS.mmmuuu ±HHMM)
+// Not a ref — display only, no monotonic counter.
+// ---------------------------------------------------------------------------
+
+function makeLocalTs() {
+  const nowNs = _nowNs();
+  const epochMs = Number(nowNs / 1_000_000n);
+  const subUs = Number((nowNs / 1_000n) % 1_000_000n);
+  const d = new Date(epochMs);
+  const yyyy = d.getFullYear();
+  const MM = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const HH = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  const ms = String(Math.floor(subUs / 1000)).padStart(3, "0");
+  const us = String(subUs % 1000).padStart(3, "0");
+  // getTimezoneOffset() returns minutes west of UTC; ISO ±HHMM is east-positive.
+  const offMin = -d.getTimezoneOffset();
+  const sign = offMin >= 0 ? "+" : "-";
+  const absMin = Math.abs(offMin);
+  const offH = String(Math.floor(absMin / 60)).padStart(2, "0");
+  const offM = String(absMin % 60).padStart(2, "0");
+  return `${yyyy}-${MM}-${dd} ${HH}:${mm}:${ss}.${ms}${us} ${sign}${offH}${offM}`;
+}
+
+// ---------------------------------------------------------------------------
 // Default monitor formatter (styled console output)
 // ---------------------------------------------------------------------------
 
@@ -83,9 +110,12 @@ function defaultMonitorFormatter(entry) {
   const svc = service || "?";
   const typ = type || "(no type)";
   const refStr = ref ? `ref=${ref}` : "";
+  const ts = makeLocalTs();
+  const tsStyle = "color:#888";
   // eslint-disable-next-line no-console
   console.groupCollapsed(
-    `%c${arrow} ${svc}%c ${typ} %c${refStr}`,
+    `%c[${ts}] %c${arrow} ${svc}%c ${typ} %c${refStr}`,
+    tsStyle,
     arrowStyle,
     typeStyle,
     refStyle
@@ -501,13 +531,13 @@ function _mkioSubscribe(service, opts) {
   if (!client) return null;
   const o = { ...(opts || {}) };
   if (!o.onSnapshot) {
-    o.onSnapshot = (rows) => console.log(`\u2190 ${service} snapshot`, rows);
+    o.onSnapshot = (rows) => console.log(`[${makeLocalTs()}] \u2190 ${service} snapshot`, rows);
   }
   if (!o.onDelta) {
-    o.onDelta = (changes) => console.log(`\u2190 ${service} delta`, changes);
+    o.onDelta = (changes) => console.log(`[${makeLocalTs()}] \u2190 ${service} delta`, changes);
   }
   if (!o.onUpdate) {
-    o.onUpdate = (op, row) => console.log(`\u2190 ${service} update ${op}`, row);
+    o.onUpdate = (op, row) => console.log(`[${makeLocalTs()}] \u2190 ${service} update ${op}`, row);
   }
   client.subscribe(service, o);
   return {

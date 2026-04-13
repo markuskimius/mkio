@@ -1,7 +1,7 @@
 """Tests for ref string generator."""
 
 import re
-from mkio._ref import next_ref, compare_refs, normalize_ref
+from mkio._ref import next_ref, compare_refs, normalize_ref, local_ts
 
 
 def test_format():
@@ -42,6 +42,12 @@ def test_compare_different_precision():
     assert compare_refs("20260404 15:30:45.123", "20260404 15:30:45.123000000000") == 0
     assert compare_refs("20260404 15:30:45.123", "20260404 15:30:45.124000000000") == -1
     assert compare_refs("20260404 15:30:45.124", "20260404 15:30:45.123000000000") == 1
+
+
+def test_local_ts_format():
+    v = local_ts()
+    # YYYY-MM-DD HH:MM:SS.mmmuuu ±HHMM
+    assert re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6} [+-]\d{4}$", v), f"Bad format: {v}"
 
 
 def test_normalize():

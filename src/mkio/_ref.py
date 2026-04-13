@@ -43,6 +43,20 @@ def next_ref() -> str:
     return dt.strftime("%Y%m%d %H:%M:%S") + f".{ms:03d}{us:03d}{ns:03d}{ps:03d}"
 
 
+def local_ts() -> str:
+    """Return the current local time for human-readable display.
+
+    Format: ``YYYYMMDD HH:MM:SS.mmmuuu ±HHMM``. Not a ref — no monotonic
+    counter, no uniqueness guarantee.
+    """
+    now_ns = time.time_ns()
+    dt = datetime.fromtimestamp(now_ns / 1_000_000_000).astimezone()
+    total_us = (now_ns // 1_000) % 1_000_000
+    ms = total_us // 1_000
+    us = total_us % 1_000
+    return dt.strftime("%Y-%m-%d %H:%M:%S") + f".{ms:03d}{us:03d} " + dt.strftime("%z")
+
+
 def compare_refs(a: str, b: str) -> int:
     """Compare two ref strings. Returns -1, 0, or 1.
 
