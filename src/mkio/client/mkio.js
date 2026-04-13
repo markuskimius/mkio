@@ -466,7 +466,7 @@ function _mkioPickClient() {
 
 async function _mkioServices(arg) {
   const client = _mkioPickClient();
-  if (!client) return null;
+  if (!client) return undefined;
   if (arg === undefined) {
     const seen = Array.from(client._seenServices).sort();
     const rows = seen.map((s) => ({
@@ -477,15 +477,12 @@ async function _mkioServices(arg) {
     }));
     // eslint-disable-next-line no-console
     console.table(rows);
-    return seen;
+    return undefined;
   }
   const base = _mkioHttpBase(client);
   const url = arg === "*" ? `${base}/api/services` : `${base}/api/services/${encodeURIComponent(arg)}`;
   const resp = await fetch(url);
-  const data = await resp.json();
-  // eslint-disable-next-line no-console
-  console.log(data);
-  return data;
+  return await resp.json();
 }
 
 function _mkioMonitor(arg) {
@@ -493,31 +490,34 @@ function _mkioMonitor(arg) {
   if (clients.length === 0) {
     // eslint-disable-next-line no-console
     console.warn("mkio: no live MkioClient instances");
-    return null;
+    return undefined;
   }
   let state;
   if (arg === undefined || arg === "*") {
     for (const c of clients) state = c.monitor({ services: null });
-    // eslint-disable-next-line no-console
-    console.log("mkio: monitoring *");
-  } else if (arg === "off" || arg === false) {
+    return "mkio: monitoring *";
+  }
+  if (arg === "off" || arg === false) {
     for (const c of clients) c.monitor(false);
-    // eslint-disable-next-line no-console
-    console.log("mkio: monitor off");
-    return null;
-  } else if (typeof arg === "string") {
+    return "mkio: monitor off";
+  }
+  if (typeof arg === "string") {
     for (const c of clients) {
       const existing = c._monitor && c._monitor.services ? Array.from(c._monitor.services) : [];
       const next = new Set(existing);
       next.add(arg);
       state = c.monitor({ services: Array.from(next) });
     }
-    // eslint-disable-next-line no-console
-    console.log(`mkio: monitoring ${Array.from(state.services).join(", ")}`);
-  } else if (arg && typeof arg === "object") {
-    for (const c of clients) state = c.monitor(arg);
+    return `mkio: monitoring ${Array.from(state.services).join(", ")}`;
   }
-  return state;
+  if (arg && typeof arg === "object") {
+    for (const c of clients) state = c.monitor(arg);
+    if (!state) return "mkio: monitor off";
+    return state.services
+      ? `mkio: monitoring ${Array.from(state.services).join(", ")}`
+      : "mkio: monitoring *";
+  }
+  return undefined;
 }
 
 function _mkioSend(service, data, opts) {
@@ -526,9 +526,19 @@ function _mkioSend(service, data, opts) {
   return client.send(service, data, opts || {});
 }
 
+class MkioSubscription {
+  constructor(service, client) {
+    this.service = service;
+    Object.defineProperty(this, "_client", { value: client, enumerable: false });
+  }
+  stop() {
+    this._client.unsubscribe(this.service);
+  }
+}
+
 function _mkioSubscribe(service, opts) {
   const client = _mkioPickClient();
-  if (!client) return null;
+  if (!client) return undefined;
   const o = { ...(opts || {}) };
   if (!o.onSnapshot) {
     o.onSnapshot = (rows) => console.log(`[${makeLocalTs()}] \u2190 ${service} snapshot`, rows);
@@ -540,15 +550,14 @@ function _mkioSubscribe(service, opts) {
     o.onUpdate = (op, row) => console.log(`[${makeLocalTs()}] \u2190 ${service} update ${op}`, row);
   }
   client.subscribe(service, o);
-  return {
-    stop: () => client.unsubscribe(service),
-  };
+  return new MkioSubscription(service, client);
 }
 
 const mkio = {
   help() {
     // eslint-disable-next-line no-console
     console.log(MKIO_HELP);
+    return undefined;
   },
   services(name) {
     return _mkioServices(name);

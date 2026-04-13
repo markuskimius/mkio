@@ -139,7 +139,7 @@ mkio.monitor()                             // log every frame to/from any servic
 mkio.monitor("orders")                     // filter to one service (additive across calls)
 mkio.monitor("off")                        // stop
 mkio.send("orders", {...}, {op: "new"})    // returns the same promise as client.send
-mkio.subscribe("all_orders", {filter})     // returns {stop} for unsubscribe
+mkio.subscribe("all_orders", {filter})     // returns MkioSubscription with .stop()
 ```
 
 The monitor hook is per-tab only — it instruments `MkioClient` locally via a `_sendRaw` choke-point and a hook in `_dispatch`. This is **not** the server-side monitor protocol; for cross-client traffic use the CLI's `mkio monitor <url> <service>`.
