@@ -116,7 +116,7 @@ class MkioClient {
    * @param {Object} [opts]
    * @param {boolean} [opts.reconnect=true]
    * @param {number} [opts.backoffBase=100] - Initial backoff in ms
-   * @param {number} [opts.backoffMax=30000] - Max backoff in ms
+   * @param {number} [opts.backoffMax=1000] - Max backoff in ms
    * @param {Function} [opts.onConnect] - Called on (re)connect
    * @param {Function} [opts.onDisconnect] - Called on disconnect
    */
@@ -124,7 +124,7 @@ class MkioClient {
     this.url = url;
     this.reconnect = opts.reconnect !== false;
     this.backoffBase = opts.backoffBase || 100;
-    this.backoffMax = opts.backoffMax || 30000;
+    this.backoffMax = opts.backoffMax || 1000;
     this.onConnect = opts.onConnect || (() => {});
     this.onDisconnect = opts.onDisconnect || (() => {});
 

@@ -28,7 +28,7 @@ await client.connect()
 await client.close()
 ```
 
-Constructor options: `reconnect` (bool, default True), `backoff_base` (float, default 0.1s), `backoff_max` (float, default 30.0s).
+Constructor options: `reconnect` (bool, default True), `backoff_base` (float, default 0.1s), `backoff_max` (float, default 1.0s).
 
 ### send(service, data, ref=None, **kwargs) -> dict
 

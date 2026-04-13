@@ -18,7 +18,7 @@ Or vendor the file from `src/mkio/client/mkio.js`. Works as a global (`window.Mk
 const client = new MkioClient("ws://localhost:8080/ws", {
   reconnect: true,       // default: true
   backoffBase: 100,      // ms, default: 100
-  backoffMax: 30000,     // ms, default: 30000
+  backoffMax: 1000,      // ms, default: 1000
   onConnect: () => {},   // called on (re)connect
   onDisconnect: () => {},
 });

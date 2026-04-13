@@ -27,7 +27,7 @@ class MkioClient:
         url: str,
         reconnect: bool = True,
         backoff_base: float = 0.1,
-        backoff_max: float = 30.0,
+        backoff_max: float = 1.0,
     ) -> None:
         self.url = url
         self.reconnect = reconnect
