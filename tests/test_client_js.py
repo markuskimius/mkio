@@ -102,7 +102,7 @@ def test_js_client_console_dispatcher():
     """The mkio.<verb> console object exists with CLI-matching methods."""
     src = JS_CLIENT_PATH.read_text()
     assert "const mkio = {" in src
-    for method in ("services(name)", "monitor(arg)", "send(service, data, opts)", "subscribe(service, opts)"):
+    for method in ("services(name)", "monitor(arg)", "send(service, data, opts)", "subscribe(service, protocol, opts)"):
         assert method in src, f"missing mkio method {method}"
     assert "window.mkio" in src
     assert "MKIO_HELP" in src

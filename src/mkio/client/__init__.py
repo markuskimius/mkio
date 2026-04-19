@@ -94,6 +94,7 @@ class MkioClient:
     async def subscribe(
         self,
         service: str,
+        protocol: str,
         topic: str | None = None,
         filter: str | None = None,
         ref: str | None = None,
@@ -104,6 +105,7 @@ class MkioClient:
     ) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to a service. Yields messages (snapshot, update).
 
+        ``protocol`` identifies the expected service protocol ("subpub", "stream", "query").
         Pass ``topic`` for subpub services (required, the primary key value).
         Pass ``filter`` for query services (expression filter).
         Pass ``ref`` from a previous message to resume from that point (stream only).
@@ -114,6 +116,7 @@ class MkioClient:
         """
         sub = _Subscription(
             service=service,
+            protocol=protocol,
             topic=topic,
             filter=filter,
             ref=ref,
@@ -125,7 +128,7 @@ class MkioClient:
         )
         self._subscriptions[service] = sub
 
-        msg: dict[str, Any] = {"service": service, "type": "subscribe"}
+        msg: dict[str, Any] = {"service": service, "type": "subscribe", "protocol": protocol}
         if topic:
             msg["topic"] = topic
         if filter:
@@ -235,6 +238,7 @@ class MkioClient:
                     msg: dict[str, Any] = {
                         "service": service,
                         "type": "subscribe",
+                        "protocol": sub.protocol,
                     }
                     if sub.topic:
                         msg["topic"] = sub.topic
@@ -264,6 +268,7 @@ class _Subscription:
     def __init__(
         self,
         service: str,
+        protocol: str,
         topic: str | None,
         filter: str | None,
         ref: str | None,
@@ -274,6 +279,7 @@ class _Subscription:
         fields: list[str] | None = None,
     ) -> None:
         self.service = service
+        self.protocol = protocol
         self.topic = topic
         self.filter = filter
         self.ref = ref

@@ -262,15 +262,17 @@ class MkioClient {
    * @param {string} [opts.filter] - Expression filter (query only)
    * @param {string} [opts.ref] - Ref from last received message for recovery (stream only)
    * @param {string} [opts.subid] - Subscription ID echoed on all responses
+   * @param {string} protocol - Expected protocol ("subpub", "stream", "query"); server rejects on mismatch
    * @param {boolean} [opts.snapshot=true] - Whether to receive the initial snapshot
    * @param {boolean} [opts.updates=true] - Whether to receive live updates
    * @param {string[]} [opts.fields] - Restrict rows to these fields only
    * @param {Function} [opts.onSnapshot] - (rows) => void
    * @param {Function} [opts.onUpdate] - (op, row) => void
    */
-  subscribe(service, opts = {}) {
+  subscribe(service, protocol, opts = {}) {
     const sub = {
       service,
+      protocol,
       topic: opts.topic || null,
       filter: opts.filter || null,
       ref: opts.ref || null,
@@ -284,7 +286,7 @@ class MkioClient {
     const key = sub.subid || service;
     this._subscriptions.set(key, sub);
 
-    const msg = { service, type: "subscribe" };
+    const msg = { service, type: "subscribe", protocol };
     if (sub.topic) msg.topic = sub.topic;
     if (sub.filter) msg.filter = sub.filter;
     if (sub.ref) msg.ref = sub.ref;
@@ -420,7 +422,7 @@ class MkioClient {
 
   _resubscribe() {
     for (const [, sub] of this._subscriptions) {
-      const msg = { service: sub.service, type: "subscribe" };
+      const msg = { service: sub.service, type: "subscribe", protocol: sub.protocol };
       if (sub.topic) msg.topic = sub.topic;
       if (sub.filter) msg.filter = sub.filter;
       if (sub.ref) msg.ref = sub.ref;
@@ -462,7 +464,7 @@ const MKIO_HELP = [
   'mkio.monitor("<service>")                 tap one service (call again to add more)',
   'mkio.monitor("off")                       stop tapping',
   'mkio.send("<service>", data, {op})        send a transaction',
-  'mkio.subscribe("<service>", {topic})      stream live data (returns {stop})',
+  'mkio.subscribe("<svc>", "<proto>", {topic})  stream live data (returns {stop})',
 ].join("\n");
 
 function _mkioHttpBase(client) {
@@ -557,7 +559,7 @@ class MkioSubscription {
   }
 }
 
-function _mkioSubscribe(service, opts) {
+function _mkioSubscribe(service, protocol, opts) {
   const client = _mkioPickClient();
   if (!client) return undefined;
   const o = { ...(opts || {}) };
@@ -567,7 +569,7 @@ function _mkioSubscribe(service, opts) {
   if (!o.onUpdate) {
     o.onUpdate = (op, row) => console.log(`[${makeLocalTs()}] \u2190 ${service} update ${op}`, row);
   }
-  client.subscribe(service, o);
+  client.subscribe(service, protocol, o);
   return new MkioSubscription(service, client);
 }
 
@@ -586,8 +588,8 @@ const mkio = {
   send(service, data, opts) {
     return _mkioSend(service, data, opts);
   },
-  subscribe(service, opts) {
-    return _mkioSubscribe(service, opts);
+  subscribe(service, protocol, opts) {
+    return _mkioSubscribe(service, protocol, opts);
   },
   instances() {
     return MkioClient.instances();

@@ -307,6 +307,7 @@ def _build_listener_detail(
         "message": {
             "service": name,
             "type": "subscribe",
+            "protocol": svc_type,
         },
     }
     if svc_type == "subpub":
@@ -554,6 +555,22 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
             await _notify_monitors(request.app, service_name, "in", msg)
 
             if msg_type == "subscribe":
+                req_protocol = msg.get("protocol")
+                if req_protocol is None:
+                    await ws.send_bytes(make_error(
+                        ref,
+                        "Missing 'protocol' field in subscribe message",
+                        msgid=msgid,
+                    ))
+                    continue
+                actual = svc.config.get("protocol", "")
+                if req_protocol != actual:
+                    await ws.send_bytes(make_error(
+                        ref,
+                        f"Protocol mismatch: service '{service_name}' is {actual!r}, not {req_protocol!r}",
+                        msgid=msgid,
+                    ))
+                    continue
                 await svc.on_subscribe(ws, msg)
                 subscribed[service_name] = svc
             elif msg_type == "unsubscribe":

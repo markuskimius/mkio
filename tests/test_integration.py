@@ -176,6 +176,50 @@ async def test_missing_service_error(client):
     await ws.close()
 
 
+async def test_subscribe_protocol_mismatch(client):
+    """Subscribing with wrong protocol returns an error."""
+    ws = await client.ws_connect("/ws")
+    result = await ws_send_recv(ws, {
+        "service": "last_trade",
+        "type": "subscribe",
+        "protocol": "query",
+        "topic": "1",
+    })
+    assert result["type"] == "error"
+    assert "Protocol mismatch" in result["message"]
+    assert "'subpub'" in result["message"]
+    assert "'query'" in result["message"]
+    await ws.close()
+
+
+async def test_subscribe_protocol_match(client):
+    """Subscribing with correct protocol succeeds normally."""
+    ws = await client.ws_connect("/ws")
+    await ws.send_bytes(dumps({
+        "service": "last_trade",
+        "type": "subscribe",
+        "protocol": "subpub",
+        "topic": "1",
+    }))
+    resp = await ws.receive()
+    data = loads(resp.data)
+    assert data["type"] == "snapshot"
+    await ws.close()
+
+
+async def test_subscribe_protocol_missing(client):
+    """Subscribing without protocol returns an error."""
+    ws = await client.ws_connect("/ws")
+    result = await ws_send_recv(ws, {
+        "service": "last_trade",
+        "type": "subscribe",
+        "topic": "1",
+    })
+    assert result["type"] == "error"
+    assert "protocol" in result["message"].lower()
+    await ws.close()
+
+
 async def test_subpub_subscribe_snapshot(client):
     """Subscribe to subpub with topic, get not-found, then insert and get update."""
     ws = await client.ws_connect("/ws")
@@ -184,6 +228,7 @@ async def test_subpub_subscribe_snapshot(client):
     await ws.send_bytes(dumps({
         "service": "last_trade",
         "type": "subscribe",
+        "protocol": "subpub",
         "topic": "1",
     }))
     resp = await ws.receive()
@@ -221,6 +266,7 @@ async def test_multi_client_fan_out(client):
         await ws.send_bytes(dumps({
             "service": "last_trade",
             "type": "subscribe",
+            "protocol": "subpub",
             "topic": "fan1",
         }))
         resp = await ws.receive()  # Consume snapshot
@@ -284,6 +330,7 @@ async def test_query_subscribe_and_update(client):
     await ws.send_bytes(dumps({
         "service": "all_orders",
         "type": "subscribe",
+        "protocol": "query",
         "ref": "q_ref",
     }))
     resp = await ws.receive()
@@ -316,6 +363,7 @@ async def test_stream_subscribe_and_live(client):
     await ws.send_bytes(dumps({
         "service": "audit_feed",
         "type": "subscribe",
+        "protocol": "stream",
         "ref": "s_ref",
     }))
     resp = await ws.receive()
@@ -374,6 +422,7 @@ async def test_unsubscribe_stops_updates(client):
     await ws.send_bytes(dumps({
         "service": "last_trade",
         "type": "subscribe",
+        "protocol": "subpub",
         "topic": "unsub1",
     }))
     await ws.receive()  # Snapshot
@@ -456,6 +505,7 @@ async def test_msgid_with_live_updates(client):
     await ws_sub.send_bytes(dumps({
         "service": "last_trade",
         "type": "subscribe",
+        "protocol": "subpub",
         "topic": "live1",
     }))
     await ws_sub.receive()  # Consume snapshot

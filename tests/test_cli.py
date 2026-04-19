@@ -119,7 +119,7 @@ async def test_send_inline_json(client):
 
     # Verify the order was created
     ws = await client.ws_connect("/ws")
-    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe"}))
+    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe", "protocol": "query"}))
     resp = await ws.receive()
     data = loads(resp.data)
     assert data["type"] == "snapshot"
@@ -144,7 +144,7 @@ async def test_send_with_named_op(client):
 
     # Verify updated
     ws = await client.ws_connect("/ws")
-    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe"}))
+    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe", "protocol": "query"}))
     resp = await ws.receive()
     data = loads(resp.data)
     assert data["rows"][0]["status"] == "accepted"
@@ -170,7 +170,7 @@ async def test_send_json_file(client, tmp_path):
 
     # Verify all 3 orders created
     ws = await client.ws_connect("/ws")
-    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe"}))
+    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe", "protocol": "query"}))
     resp = await ws.receive()
     data = loads(resp.data)
     assert len(data["rows"]) == 3
@@ -196,7 +196,7 @@ async def test_send_csv_file(client, tmp_path):
 
     # Verify
     ws = await client.ws_connect("/ws")
-    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe"}))
+    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe", "protocol": "query"}))
     resp = await ws.receive()
     data = loads(resp.data)
     assert len(data["rows"]) == 2
@@ -243,7 +243,7 @@ async def test_send_csv_structured(client, tmp_path):
 
     # Verify status updated
     ws = await client.ws_connect("/ws")
-    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe"}))
+    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe", "protocol": "query"}))
     resp = await ws.receive()
     data = loads(resp.data)
     assert data["rows"][0]["status"] == "accepted"
@@ -276,7 +276,7 @@ async def test_send_csv_per_row_op(client, tmp_path, capsys):
 
     # Verify both orders created
     ws = await client.ws_connect("/ws")
-    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe"}))
+    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe", "protocol": "query"}))
     resp = await ws.receive()
     data = loads(resp.data)
     assert len(data["rows"]) == 2
@@ -348,7 +348,7 @@ async def test_subscribe_subpub(client):
     # Subscribe to topic "AAPL" (we use auto-inc id, so find the id first)
     # The key is "id", so subscribe to the topic we just inserted
     async with MkioClient(ws_url, reconnect=False) as mk:
-        async for msg in mk.subscribe("last_trade", topic="1"):
+        async for msg in mk.subscribe("last_trade", "subpub", topic="1"):
             received.append(msg)
             if msg.get("type") == "snapshot":
                 assert msg["rows"][0]["_mkio_exists"] is True
@@ -371,7 +371,7 @@ async def test_subscribe_stream(client):
     received: list[dict] = []
 
     async with MkioClient(ws_url, reconnect=False) as mk:
-        async for msg in mk.subscribe("audit_feed", ref="00000000 00:00:00.000000000000"):
+        async for msg in mk.subscribe("audit_feed", "stream", ref="00000000 00:00:00.000000000000"):
             received.append(msg)
             if msg.get("type") == "snapshot":
                 # Insert another to trigger update
@@ -393,7 +393,7 @@ async def test_subscribe_query(client):
     received: list[dict] = []
 
     async with MkioClient(ws_url, reconnect=False) as mk:
-        async for msg in mk.subscribe("all_orders"):
+        async for msg in mk.subscribe("all_orders", "query"):
             received.append(msg)
             if msg.get("type") == "snapshot":
                 await _insert_order(client, "Sell", "GOOG", 50, 2800.0)
@@ -414,7 +414,7 @@ async def test_subscribe_subpub_topic_not_found(client):
     received: list[dict] = []
 
     async with MkioClient(ws_url, reconnect=False) as mk:
-        async for msg in mk.subscribe("last_trade", topic="nonexistent"):
+        async for msg in mk.subscribe("last_trade", "subpub", topic="nonexistent"):
             received.append(msg)
             if msg.get("type") == "snapshot":
                 break
@@ -437,7 +437,7 @@ async def test_subscribe_with_filter_query(client):
     received: list[dict] = []
 
     async with MkioClient(ws_url, reconnect=False) as mk:
-        async for msg in mk.subscribe("all_orders", filter="symbol == 'GOOG'"):
+        async for msg in mk.subscribe("all_orders", "query", filter="symbol == 'GOOG'"):
             received.append(msg)
             if msg.get("type") == "snapshot":
                 # Insert matching and non-matching
@@ -467,7 +467,7 @@ async def test_subscribe_with_filter_stream(client):
     received: list[dict] = []
 
     async with MkioClient(ws_url, reconnect=False) as mk:
-        async for msg in mk.subscribe("audit_feed", ref="00000000 00:00:00.000000000000", filter="event == 'order_placed'"):
+        async for msg in mk.subscribe("audit_feed", "stream", ref="00000000 00:00:00.000000000000", filter="event == 'order_placed'"):
             received.append(msg)
             if msg.get("type") == "snapshot":
                 # Insert another order (generates order_placed event)

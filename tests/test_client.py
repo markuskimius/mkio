@@ -136,7 +136,7 @@ async def test_client_subscribe(fake_server):
 
     async with MkioClient(url, reconnect=False) as client:
         msg_count = 0
-        async for msg in client.subscribe("test_service"):
+        async for msg in client.subscribe("test_service", "query"):
             assert msg["type"] == "snapshot"
             assert len(msg["rows"]) == 1
             msg_count += 1
@@ -160,7 +160,7 @@ async def test_client_subscribe_tracks_ref(fake_server):
     url = f"ws://localhost:{server.port}/ws"
 
     async with MkioClient(url, reconnect=False) as client:
-        async for msg in client.subscribe("test_service"):
+        async for msg in client.subscribe("test_service", "query"):
             break
         # Ref should be tracked
         sub = client._subscriptions.get("test_service")

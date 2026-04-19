@@ -562,7 +562,7 @@ def _cmd_subpub() -> None:
     ws_url = _normalize_ws_url(url)
 
     try:
-        asyncio.run(_subscribe_service(ws_url, service, None, None, subid, topic=topic, fields=fields))
+        asyncio.run(_subscribe_service(ws_url, service, "subpub", None, None, subid, topic=topic, fields=fields))
     except KeyboardInterrupt:
         print("\nSubscription stopped.")
 
@@ -588,7 +588,7 @@ def _cmd_stream() -> None:
     ws_url = _normalize_ws_url(url)
 
     try:
-        asyncio.run(_subscribe_service(ws_url, service, filter_expr, ref, subid, fields=fields))
+        asyncio.run(_subscribe_service(ws_url, service, "stream", filter_expr, ref, subid, fields=fields))
     except KeyboardInterrupt:
         print("\nSubscription stopped.")
 
@@ -611,7 +611,7 @@ def _cmd_query() -> None:
     ws_url = _normalize_ws_url(url)
 
     try:
-        asyncio.run(_subscribe_service(ws_url, service, filter_expr, None, subid, snapshot=snapshot, updates=updates, fields=fields))
+        asyncio.run(_subscribe_service(ws_url, service, "query", filter_expr, None, subid, snapshot=snapshot, updates=updates, fields=fields))
     except KeyboardInterrupt:
         print("\nSubscription stopped.")
 
@@ -653,6 +653,7 @@ def _extract_flag(args: list[str], flag: str) -> str | None:
 async def _subscribe_service(
     ws_url: str,
     service: str,
+    protocol: str,
     filter_expr: str | None,
     ref: str | None = None,
     subid: str | None = None,
@@ -664,7 +665,7 @@ async def _subscribe_service(
     from mkio.client import MkioClient
 
     async with MkioClient(ws_url, reconnect=True) as client:
-        async for msg in client.subscribe(service, topic=topic, filter=filter_expr, ref=ref, subid=subid, snapshot=snapshot, updates=updates, fields=fields):
+        async for msg in client.subscribe(service, protocol, topic=topic, filter=filter_expr, ref=ref, subid=subid, snapshot=snapshot, updates=updates, fields=fields):
             _print_subscribe_message(msg)
 
 
