@@ -44,7 +44,7 @@ def _usage() -> None:
     print("  mkio monitor <url> <service>     Monitor a service's messages")
     print("  mkio send <url> <service> [--op <name>] <data>")
     print("                                   Send transaction(s) from JSON/CSV/inline")
-    print("  mkio subpub <url> <service> --topic <key> [--subid <id>] [--fields <f1,f2,...>]")
+    print("  mkio subpub <url> <service> <topic> [--subid <id>] [--fields <f1,f2,...>]")
     print("                                   Subscribe to a subpub service")
     print("  mkio stream <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--ref <ref>]")
     print("                                   Subscribe to a stream service")
@@ -547,19 +547,16 @@ async def _send_messages(
 
 def _cmd_subpub() -> None:
     args = sys.argv[2:]
-    usage = "mkio subpub <url> <service> --topic <key> [--subid <id>] [--fields <f1,f2,...>]"
-    if len(args) < 2:
+    usage = "mkio subpub <url> <service> <topic> [--subid <id>] [--fields <f1,f2,...>]"
+    if len(args) < 3:
         print(f"Usage: {usage}")
         sys.exit(1)
 
     url = args[0].rstrip("/")
     service = args[1]
-    rest = args[2:]
-    _check_unknown_flags(rest, {"--topic", "--fields", "--subid"}, usage)
-    topic = _extract_flag(rest, "--topic")
-    if topic is None:
-        print(f"Error: --topic is required for subpub\nUsage: {usage}")
-        sys.exit(1)
+    topic = args[2]
+    rest = args[3:]
+    _check_unknown_flags(rest, {"--fields", "--subid"}, usage)
     fields = _extract_fields(rest)
     subid = _extract_flag(rest, "--subid")
     ws_url = _normalize_ws_url(url)

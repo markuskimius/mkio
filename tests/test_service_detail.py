@@ -197,7 +197,7 @@ async def test_detail_subpub(client):
 
     # Examples
     assert "subscribe" in data["example"]
-    assert "--topic" in data["example"]["subscribe"]
+    assert "subpub" in data["example"]["subscribe"]
     assert "subscribe_filter" not in data["example"]
     assert "subscribe_recover" not in data["example"]
 
@@ -287,8 +287,7 @@ async def test_detail_example_generation(client):
     assert "mkio send" in place["example"]
     assert "--op place" in place["example"]
 
-    # Listener should have subscribe example with --topic
+    # Listener should have subscribe example with topic as positional arg
     resp = await client.get("/api/services/last_trade")
     data = await resp.json()
     assert "mkio subpub" in data["example"]["subscribe"]
-    assert "--topic" in data["example"]["subscribe"]

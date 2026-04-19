@@ -354,8 +354,8 @@ Each listener service type has its own command with only the relevant options:
 
 ```bash
 # SubPub — topic-based snapshot + live updates
-mkio subpub http://localhost:8080 last_trade --topic AAPL
-mkio subpub http://localhost:8080 last_trade --topic AAPL --fields symbol,price
+mkio subpub http://localhost:8080 last_trade AAPL
+mkio subpub http://localhost:8080 last_trade AAPL --fields symbol,price
 
 # Stream — ring buffer with cursor reconnect (ref defaults to now)
 mkio stream http://localhost:8080 audit_feed

@@ -335,7 +335,7 @@ def _build_listener_detail(
     example: dict[str, str] = {}
     if svc_type == "subpub":
         topic_field = config.get("topic", "id")
-        example["subscribe"] = f"mkio {cli_cmd} <url> {name} --topic <{topic_field}>"
+        example["subscribe"] = f"mkio {cli_cmd} <url> {name} <{topic_field}>"
     else:
         example["subscribe"] = f"mkio {cli_cmd} <url> {name}"
     if filterable and svc_type != "subpub":

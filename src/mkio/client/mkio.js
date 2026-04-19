@@ -258,7 +258,7 @@ class MkioClient {
    * Subscribe to a service with callbacks.
    * @param {string} service
    * @param {Object} opts
-   * @param {string} [opts.topic] - Topic key value (required for subpub)
+   * @param {string} [opts.topic] - Topic value (required for subpub)
    * @param {string} [opts.filter] - Expression filter (query only)
    * @param {string} [opts.ref] - Ref from last received message for recovery (stream only)
    * @param {string} [opts.subid] - Subscription ID echoed on all responses
