@@ -666,6 +666,9 @@ async def _subscribe_service(
 
     async with MkioClient(ws_url, reconnect=True) as client:
         async for msg in client.subscribe(service, protocol, topic=topic, filter=filter_expr, ref=ref, subid=subid, snapshot=snapshot, updates=updates, fields=fields):
+            if msg.get("type") == "nack":
+                print(f"Error: {msg.get('message', 'subscription rejected')}")
+                sys.exit(1)
             _print_subscribe_message(msg)
 
 
