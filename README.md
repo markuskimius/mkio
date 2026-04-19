@@ -73,7 +73,7 @@ serve({...})  # or pass a dict
 - **Schema migration** — automatic detection of safe/destructive changes with interactive confirmation
 - **Write batching** — hundreds of writes committed in a single SQLite transaction for high throughput
 - **Reconnection recovery** — stream services use ref-based cursor reconnection persisted across server restarts via `_mkio_ref` column; subpub and query always replay a full snapshot
-- **Field projection** — subscribers can request specific fields per subscription, reducing payload size
+- **Field projection** — subscribers can request specific fields per subscription, reducing payload size. Framework fields (`_mkio_ref`, `_mkio_row`, `_mkio_topic`, `_mkio_exists`) are always preserved through projection
 - **Client libraries** — Python and JavaScript clients with auto-reconnect and ref tracking
 - **Graceful shutdown** — drains pending writes, checkpoints WAL, clean close
 - **Service monitoring** — tap into any service's inbound/outbound message flow via CLI or WebSocket
@@ -107,7 +107,7 @@ Bind references (`$N.field`) pull values from a prior op's `RETURNING` row, wher
 
 ### SubPub
 
-Subscribe by topic (the `topic` column value) to get a single-row snapshot, then receive live updates as data changes. Always returns one row with `_mkio_exists` indicating whether the topic was found. Supports server-side `where` filtering (rows that don't match are never cached or published), `publish` formatting with expressions, configurable `defaults` (expression strings) for topics that don't exist yet, and custom `sql` for computed topics or JOINs.
+Subscribe by topic (the `topic` column value) to get a single-row snapshot, then receive live updates as data changes. Every published row includes three framework fields: `_mkio_exists` (whether the topic was found), `_mkio_topic` (the subscribed topic value), and `_mkio_ref` (the timestamp ref of the last write, or `null` for not-found topics). Supports server-side `where` filtering (rows that don't match are never cached or published), `publish` formatting with expressions, configurable `defaults` (expression strings) for topics that don't exist yet, and custom `sql` for computed topics or JOINs.
 
 ```toml
 [services.last_trade]
@@ -152,7 +152,7 @@ buffer_size = 10000
 
 ### Query
 
-Snapshot from SQLite with change feed. Supports delta reconnection.
+Snapshot from SQLite with change feed. Every published row includes `_mkio_row` (primary key identifier) and `_mkio_ref` (timestamp ref of the last write).
 
 ```toml
 [services.all_orders]
@@ -202,7 +202,7 @@ async with MkioClient("ws://localhost:8080/ws") as client:
     result = await client.send("add_order", {"id": "1", "symbol": "AAPL", "qty": 100})
 
     async for msg in client.subscribe("last_trade", "subpub", topic="AAPL"):
-        print(msg)  # single row with _mkio_exists
+        print(msg)  # single row with _mkio_exists, _mkio_topic, _mkio_ref
 
     async for msg in client.subscribe("all_orders", "query", filter="status == 'pending'"):
         print(msg)

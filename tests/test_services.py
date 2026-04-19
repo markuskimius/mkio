@@ -192,7 +192,8 @@ async def test_subpub_topic_exists(subpub_svc):
     assert row["id"] == "1"
     assert row["symbol"] == "AAPL"
     assert row["_mkio_exists"] is True
-    assert "_mkio_ref" not in row
+    assert "_mkio_ref" in row
+    assert row["_mkio_topic"] == "1"
 
 
 async def test_subpub_topic_not_found(subpub_svc):
@@ -203,8 +204,9 @@ async def test_subpub_topic_not_found(subpub_svc):
     assert msgs[0]["type"] == "snapshot"
     assert len(msgs[0]["rows"]) == 1
     row = msgs[0]["rows"][0]
-    assert row["id"] == "999"
+    assert row["_mkio_topic"] == "999"
     assert row["_mkio_exists"] is False
+    assert row["_mkio_ref"] is None
     # All fields present with null defaults
     assert row["symbol"] is None
     assert row["qty"] is None
@@ -239,7 +241,8 @@ async def test_subpub_live_update(subpub_svc, bus):
     assert msgs[0]["op"] == "update"
     assert msgs[0]["row"]["symbol"] == "GOOG"
     assert msgs[0]["row"]["_mkio_exists"] is True
-    assert "_mkio_ref" not in msgs[0]["row"]
+    assert msgs[0]["row"]["_mkio_ref"] == "20260404 00:00:00.000000000001"
+    assert msgs[0]["row"]["_mkio_topic"] == "3"
 
 
 async def test_subpub_live_update_only_matching_topic(subpub_svc, bus):
@@ -300,7 +303,8 @@ async def test_subpub_topic_deleted(subpub_svc, bus):
     assert len(msgs) == 1
     assert msgs[0]["op"] == "update"
     assert msgs[0]["row"]["_mkio_exists"] is False
-    assert msgs[0]["row"]["id"] == "1"
+    assert msgs[0]["row"]["_mkio_topic"] == "1"
+    assert msgs[0]["row"]["_mkio_ref"] is None
     assert msgs[0]["row"]["symbol"] is None
 
 
@@ -447,7 +451,8 @@ async def test_subpub_defaults_on_not_found(subpub_defaults_svc):
     msgs = ws.get_messages()
     row = msgs[0]["rows"][0]
     assert row["_mkio_exists"] is False
-    assert row["id"] == "999"
+    assert row["_mkio_topic"] == "999"
+    assert row["_mkio_ref"] is None
     assert row["qty"] == 0
     assert row["status"] == "unknown"
     assert row["symbol"] is None  # no default configured → null
@@ -482,6 +487,29 @@ async def test_subpub_defaults_on_delete(subpub_defaults_svc, bus):
     assert row["qty"] == 0
     assert row["status"] == "unknown"
     assert row["symbol"] is None
+
+
+async def test_subpub_mkio_ref_default_on_not_found(db, bus, writer):
+    """_mkio_ref defaults to null on not-found, or uses configured default."""
+    config = {
+        "protocol": "subpub",
+        "primary_table": "orders",
+        "watch_tables": ["orders"],
+        "topic": "id",
+        "defaults": {"_mkio_ref": "'no-ref'"},
+    }
+    svc = SubPubService(config=config, db=db, change_bus=bus, writer=writer)
+    svc.name = "ref_default"
+    await svc.start()
+
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe", "topic": "999"})
+    msgs = ws.get_messages()
+    row = msgs[0]["rows"][0]
+    assert row["_mkio_exists"] is False
+    assert row["_mkio_ref"] == "no-ref"
+
+    await svc.stop()
 
 
 # ---- SubPub with computed key (sql) ----------------------------------------
@@ -520,6 +548,7 @@ async def test_subpub_computed_key_snapshot(subpub_computed_key_svc):
     assert len(msgs) == 1
     row = msgs[0]["rows"][0]
     assert row["_mkio_exists"] is True
+    assert row["_mkio_topic"] == "1:AAPL"
     assert row["id"] == "1"
     assert row["symbol"] == "AAPL"
     assert row["qty"] == 100
@@ -531,7 +560,7 @@ async def test_subpub_computed_key_not_found(subpub_computed_key_svc):
     msgs = ws.get_messages()
     row = msgs[0]["rows"][0]
     assert row["_mkio_exists"] is False
-    assert row["topic_key"] == "99:NOPE"
+    assert row["_mkio_topic"] == "99:NOPE"
 
 
 async def test_subpub_computed_key_live_update(subpub_computed_key_svc, db, bus):
@@ -706,7 +735,7 @@ async def test_query_fresh_snapshot(query_svc):
     assert "ref" not in msgs[0]
     assert len(msgs[0]["rows"]) == 1
     assert msgs[0]["rows"][0]["symbol"] == "AAPL"
-    assert "_mkio_ref" not in msgs[0]["rows"][0]
+    assert "_mkio_ref" in msgs[0]["rows"][0]
 
 
 async def test_query_live_update(query_svc, bus):
@@ -727,7 +756,7 @@ async def test_query_live_update(query_svc, bus):
     assert msgs[0]["type"] == "update"
     assert "ref" not in msgs[0]
     assert msgs[0]["row"]["symbol"] == "MSFT"
-    assert "_mkio_ref" not in msgs[0]["row"]
+    assert "_mkio_ref" in msgs[0]["row"]
 
 
 async def test_query_snapshot_only(query_svc, bus):
@@ -847,7 +876,7 @@ async def test_subpub_cross_restart_snapshot(db, bus, writer):
     assert len(msgs[0]["rows"]) == 1
     assert msgs[0]["rows"][0]["symbol"] == "AAPL"
     assert msgs[0]["rows"][0]["_mkio_exists"] is True
-    assert "_mkio_ref" not in msgs[0]["rows"][0]
+    assert "_mkio_ref" in msgs[0]["rows"][0]
 
     await svc2.stop()
     await txn_svc.stop()
@@ -1177,7 +1206,7 @@ async def test_query_mkio_row_on_live_update(query_svc, bus):
 
 
 async def test_query_mkio_row_on_update(query_svc, bus):
-    """Live updates include _mkio_row and exclude _mkio_ref."""
+    """Live updates include _mkio_row and _mkio_ref."""
     ws = MockWebSocket()
     await query_svc.on_subscribe(ws, {"type": "subscribe"})
     ws.clear()
@@ -1194,7 +1223,7 @@ async def test_query_mkio_row_on_update(query_svc, bus):
     assert len(msgs) == 1
     assert msgs[0]["type"] == "update"
     assert "_mkio_row" in msgs[0]["row"]
-    assert "_mkio_ref" not in msgs[0]["row"]
+    assert "_mkio_ref" in msgs[0]["row"]
     assert msgs[0]["row"]["_mkio_row"] == msgs[0]["row"]["id"]
 
 
@@ -1298,7 +1327,7 @@ async def test_subpub_fields_snapshot(subpub_svc):
     msgs = ws.get_messages()
     assert msgs[0]["type"] == "snapshot"
     row = msgs[0]["rows"][0]
-    assert set(row.keys()) == {"symbol", "qty", "_mkio_exists"}
+    assert set(row.keys()) == {"symbol", "qty", "_mkio_exists", "_mkio_ref", "_mkio_topic"}
     assert row["_mkio_exists"] is True
 
 
@@ -1321,7 +1350,7 @@ async def test_subpub_fields_update(subpub_svc, bus):
 
     msgs = ws.get_messages()
     assert len(msgs) == 1
-    assert set(msgs[0]["row"].keys()) == {"symbol", "status", "_mkio_exists"}
+    assert set(msgs[0]["row"].keys()) == {"symbol", "status", "_mkio_exists", "_mkio_ref", "_mkio_topic"}
     assert msgs[0]["row"]["_mkio_exists"] is True
 
 
@@ -1336,6 +1365,7 @@ async def test_query_fields_snapshot(query_svc):
     for row in msgs[0]["rows"]:
         assert "symbol" in row
         assert "_mkio_row" in row
+        assert "_mkio_ref" in row
         assert "qty" not in row
 
 
@@ -1360,6 +1390,7 @@ async def test_query_fields_update(query_svc, bus):
     row = msgs[0]["row"]
     assert "symbol" in row
     assert "_mkio_row" in row
+    assert "_mkio_ref" in row
     assert "qty" not in row
 
 

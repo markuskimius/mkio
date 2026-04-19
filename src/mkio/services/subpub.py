@@ -72,6 +72,7 @@ class SubPubService(Service):
         self._not_found_template = {c: None for c in columns}
         if self._defaults_fn:
             self._not_found_template.update(self._defaults_fn(self._not_found_template))
+        self._not_found_template.setdefault("_mkio_ref", None)
 
         self._needs_requery = "JOIN" in self._sql.upper() or self._sql != f"SELECT * FROM {self._table}"
 
@@ -114,28 +115,23 @@ class SubPubService(Service):
 
     def _build_row(self, sub: Subscriber, row: dict[str, Any], *, exists: bool) -> dict[str, Any]:
         if exists:
-            out = sub.formatter(row) if sub.formatter else row
-            out = self._clean_row(out)
+            out = sub.formatter(row) if sub.formatter else dict(row)
             out = self._project(out, sub.fields)
+            out["_mkio_ref"] = row.get("_mkio_ref", "")
+            out["_mkio_topic"] = sub.topic
             out["_mkio_exists"] = True
         else:
             out = dict(self._not_found_template)
-            out[self._topic_field] = sub.topic
             out = self._project(out, sub.fields)
+            out["_mkio_topic"] = sub.topic
             out["_mkio_exists"] = False
         return out
-
-    @staticmethod
-    def _clean_row(row: dict[str, Any]) -> dict[str, Any]:
-        cleaned = dict(row)
-        cleaned.pop("_mkio_ref", None)
-        return cleaned
 
     @staticmethod
     def _project(row: dict[str, Any], fields: list[str] | None) -> dict[str, Any]:
         if not fields:
             return row
-        return {k: v for k, v in row.items() if k in fields}
+        return {k: v for k, v in row.items() if k in fields or k.startswith("_mkio_")}
 
     async def on_unsubscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
         self._subscribers = [s for s in self._subscribers if s.ws is not ws]
@@ -175,7 +171,9 @@ class SubPubService(Service):
         passes_where = not self._where or self._where(event.row)
         if event.op in ("insert", "update", "upsert"):
             if passes_where:
-                self._cache[topic_val] = event.row
+                row = dict(event.row)
+                row["_mkio_ref"] = event.ref
+                self._cache[topic_val] = row
                 return True
             if topic_val in self._cache:
                 self._cache.pop(topic_val)

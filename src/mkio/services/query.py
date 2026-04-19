@@ -116,7 +116,7 @@ class QueryService(Service):
 
     def _tag_row(self, raw_row: dict[str, Any], out_row: dict[str, Any]) -> dict[str, Any]:
         tagged = dict(out_row)
-        tagged.pop("_mkio_ref", None)
+        tagged["_mkio_ref"] = raw_row.get("_mkio_ref", "")
         rid = self._row_id(raw_row)
         if rid is not None:
             tagged["_mkio_row"] = rid
@@ -137,7 +137,8 @@ class QueryService(Service):
         while True:
             event: ChangeEvent = await self._bus_queue.get()
 
-            row = event.row
+            row = dict(event.row)
+            row["_mkio_ref"] = event.ref
             # For secondary table changes with JOINs, re-query
             if event.table != self._table and "JOIN" in self._sql.upper():
                 # Can't easily identify which rows are affected — skip for now

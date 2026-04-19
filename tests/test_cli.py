@@ -423,7 +423,7 @@ async def test_subscribe_subpub_topic_not_found(client):
     assert snapshot["type"] == "snapshot"
     assert len(snapshot["rows"]) == 1
     assert snapshot["rows"][0]["_mkio_exists"] is False
-    assert snapshot["rows"][0]["id"] == "nonexistent"
+    assert snapshot["rows"][0]["_mkio_topic"] == "nonexistent"
 
 
 async def test_subscribe_with_filter_query(client):

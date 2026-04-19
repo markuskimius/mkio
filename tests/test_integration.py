@@ -239,7 +239,7 @@ async def test_subpub_subscribe_snapshot(client):
     assert snapshot["type"] == "snapshot"
     assert len(snapshot["rows"]) == 1
     assert snapshot["rows"][0]["_mkio_exists"] is False
-    assert snapshot["rows"][0]["id"] == "1"
+    assert snapshot["rows"][0]["_mkio_topic"] == "1"
 
     # Insert via transaction
     ws2 = await client.ws_connect("/ws")
@@ -256,6 +256,8 @@ async def test_subpub_subscribe_snapshot(client):
     assert update["type"] == "update"
     assert update["op"] == "update"
     assert update["row"]["_mkio_exists"] is True
+    assert update["row"]["_mkio_topic"] == "1"
+    assert "_mkio_ref" in update["row"]
 
     await ws.close()
     await ws2.close()
