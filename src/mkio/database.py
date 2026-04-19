@@ -132,6 +132,12 @@ class Database:
                 return [dict(r) for r in rows]
             return [dict(r) for r in rows] if rows else []
 
+    async def read_columns(self, sql: str) -> list[str]:
+        """Return column names for a SQL query without fetching rows."""
+        limited = f"SELECT * FROM ({sql}) LIMIT 0"
+        async with self.read_conn.execute(limited) as cursor:
+            return [d[0] for d in cursor.description] if cursor.description else []
+
     async def checkpoint(self) -> None:
         """Force a WAL checkpoint, merging WAL into main DB."""
         if self._write_conn:

@@ -1,4 +1,4 @@
-"""SubPub service: in-memory cache + live push with multi-table support."""
+"""SubPub service: in-memory cache + topic-based single-row push."""
 
 from __future__ import annotations
 
@@ -8,31 +8,29 @@ from typing import Any, Callable
 
 from aiohttp.web import WebSocketResponse
 
-from mkio._expr import compile_filter
 from mkio.change_bus import ChangeEvent
 from mkio.services.base import Service
-from mkio.ws_protocol import make_snapshot, make_update
+from mkio.ws_protocol import make_error, make_snapshot, make_update
 
 
 @dataclass
 class Subscriber:
     ws: WebSocketResponse
-    filter_fn: Callable[[dict[str, Any]], bool] | None = None
+    topic: Any
     formatter: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     subid: str | None = None
     fields: list[str] | None = None
 
 
 class SubPubService(Service):
-    """Subscribe-Publish: snapshot from cache + live updates.
+    """Subscribe-Publish: topic-based single-row snapshot + live updates.
 
     Config:
         primary_table: str
         watch_tables: list[str]
-        key: str (primary key field for cache indexing)
+        key: str (primary key field for cache indexing and topic matching)
         sql: str (optional, defaults to SELECT * FROM primary_table)
         where: str (optional, expression filter applied to rows before caching)
-        filterable: list[str] (optional)
         publish: dict (optional, expression formatter)
     """
 
@@ -41,11 +39,12 @@ class SubPubService(Service):
         self._table = self.config["primary_table"]
         self._key_field = self.config["key"]
         self._sql = self.config.get("sql", f"SELECT * FROM {self._table}")
-        self._filterable = set(self.config.get("filterable", []))
         self._formatter = self.config.get("_compiled_formatter")
         self._where = self.config.get("_compiled_where")
+        self._defaults: dict[str, Any] = dict(self.config.get("defaults", {}))
 
         self._cache: dict[Any, dict[str, Any]] = {}
+        self._not_found_template: dict[str, Any] = {}
         self._subscribers: list[Subscriber] = []
         self._bus_queue: asyncio.Queue[ChangeEvent] | None = None
         self._listener_task: asyncio.Task[None] | None = None
@@ -55,7 +54,19 @@ class SubPubService(Service):
         for row in rows:
             if self._where and not self._where(row):
                 continue
-            self._cache[row[self._key_field]] = row
+            self._cache[str(row[self._key_field])] = row
+
+        # Build the not-found template: all output fields set to null,
+        # then overlaid with configured defaults.
+        publish = self.config.get("publish")
+        if publish:
+            columns = list(publish.keys())
+        elif rows:
+            columns = [c for c in rows[0].keys() if c != "_mkio_ref"]
+        else:
+            columns = [c for c in await self.db.read_columns(self._sql) if c != "_mkio_ref"]
+        self._not_found_template = {c: None for c in columns}
+        self._not_found_template.update(self._defaults)
 
         watch = self.config.get("watch_tables", [self._table])
         self._bus_queue = self.bus.subscribe(watch)
@@ -73,27 +84,39 @@ class SubPubService(Service):
             self.bus.unsubscribe(watch, self._bus_queue)
 
     async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
-        filter_expr = msg.get("filter")
+        topic = msg.get("topic")
+        if topic is None:
+            err = make_error(None, "SubPub subscribe requires 'topic'")
+            await ws.send_bytes(err)
+            await self.notify_monitors("out", err)
+            return
+        topic = str(topic)
+
         subid = msg.get("subid")
         fields = msg.get("fields")
 
-        filter_fn = None
-        if filter_expr and self._filterable:
-            filter_fn = compile_filter(filter_expr)
+        sub = Subscriber(ws=ws, topic=topic, formatter=self._formatter, subid=subid, fields=fields)
 
-        sub = Subscriber(ws=ws, filter_fn=filter_fn, formatter=self._formatter, subid=subid, fields=fields)
+        cached_row = self._cache.get(topic)
+        out_row = self._build_row(sub, cached_row or {}, exists=cached_row is not None)
 
-        rows = []
-        for row in self._cache.values():
-            out_row = sub.formatter(row) if sub.formatter else row
-            if sub.filter_fn and not sub.filter_fn(out_row):
-                continue
-            rows.append(self._project(self._clean_row(out_row), fields))
-
-        resp = make_snapshot(None, self.name, rows, subid=sub.subid)
+        resp = make_snapshot(None, self.name, [out_row], subid=sub.subid)
         await ws.send_bytes(resp)
         await self.notify_monitors("out", resp)
         self._subscribers.append(sub)
+
+    def _build_row(self, sub: Subscriber, row: dict[str, Any], *, exists: bool) -> dict[str, Any]:
+        if exists:
+            out = sub.formatter(row) if sub.formatter else row
+            out = self._clean_row(out)
+            out = self._project(out, sub.fields)
+            out["_mkio_exists"] = True
+        else:
+            out = dict(self._not_found_template)
+            out[self._key_field] = sub.topic
+            out = self._project(out, sub.fields)
+            out["_mkio_exists"] = False
+        return out
 
     @staticmethod
     def _clean_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -111,53 +134,83 @@ class SubPubService(Service):
         self._subscribers = [s for s in self._subscribers if s.ws is not ws]
 
     async def _listen_changes(self) -> None:
-        """Consume change events, update cache, fan out to subscribers."""
+        """Consume change events, update cache, notify topic subscribers."""
         assert self._bus_queue is not None
         while True:
             event: ChangeEvent = await self._bus_queue.get()
 
-            # Apply where filter
-            passes_where = not self._where or self._where(event.row)
-
-            # Update cache and resolve effective op
-            effective_op = event.op
             if event.table == self._table:
-                # Primary table — direct cache update for simple queries
+                key_val = str(event.row.get(self._key_field))
                 if "JOIN" not in self._sql.upper():
-                    key_val = event.row.get(self._key_field)
-                    if event.op in ("insert", "update", "upsert"):
-                        if passes_where:
-                            existed = key_val in self._cache
-                            self._cache[key_val] = event.row
-                            effective_op = "update" if existed else "insert"
-                        else:
-                            # Row no longer matches — remove from cache if present
-                            if key_val in self._cache:
-                                self._cache.pop(key_val)
-                                effective_op = "delete"
-                            else:
-                                continue
-                    elif event.op == "delete":
-                        self._cache.pop(key_val, None)
+                    notify = self._update_cache(event, key_val)
+                    if notify is not None:
+                        await self._notify_topic(key_val, exists=notify)
                 else:
+                    old_row = self._cache.get(key_val)
                     await self._requery_row(event)
+                    new_row = self._cache.get(key_val)
+                    if old_row != new_row:
+                        await self._notify_topic(key_val, exists=new_row is not None)
             else:
-                # Secondary table change — re-query affected rows
+                old_cache = dict(self._cache)
                 await self._requery_all()
+                topics = {sub.topic for sub in self._subscribers}
+                for topic in topics:
+                    if old_cache.get(topic) != self._cache.get(topic):
+                        await self._notify_topic(topic, exists=topic in self._cache)
 
-            # Fan out to subscribers
-            await self._fan_out_op(event, effective_op)
+    def _update_cache(self, event: ChangeEvent, key_val: Any) -> bool | None:
+        """Update cache for a primary-table change without JOINs.
+
+        Returns True (row exists), False (row removed), or None (no change).
+        """
+        passes_where = not self._where or self._where(event.row)
+        if event.op in ("insert", "update", "upsert"):
+            if passes_where:
+                self._cache[key_val] = event.row
+                return True
+            if key_val in self._cache:
+                self._cache.pop(key_val)
+                return False
+            return None
+        if event.op == "delete":
+            if key_val in self._cache:
+                self._cache.pop(key_val)
+                return False
+            return None
+        return None
+
+    async def _notify_topic(self, topic_val: Any, *, exists: bool) -> None:
+        """Send update to all subscribers watching this topic."""
+        dead: list[Subscriber] = []
+        notified_monitor = False
+        for sub in self._subscribers:
+            if sub.topic != topic_val:
+                continue
+            if exists:
+                out_row = self._build_row(sub, self._cache[topic_val], exists=True)
+            else:
+                out_row = self._build_row(sub, {}, exists=False)
+            try:
+                msg_bytes = make_update(self.name, ref=None, op="update", row=out_row, subid=sub.subid)
+                await sub.ws.send_bytes(msg_bytes)
+                if not notified_monitor:
+                    await self.notify_monitors("out", msg_bytes)
+                    notified_monitor = True
+            except (ConnectionError, RuntimeError):
+                dead.append(sub)
+        for sub in dead:
+            self._subscribers.remove(sub)
 
     async def _requery_row(self, event: ChangeEvent) -> None:
         """Re-query a single row when using JOINs."""
-        key_val = event.row.get(self._key_field)
+        key_val = str(event.row.get(self._key_field))
         if event.op == "delete":
             self._cache.pop(key_val, None)
             return
-        # Re-run the JOIN query for this specific key
-        # Append a WHERE clause for the primary key
+        raw_key = event.row.get(self._key_field)
         sql = f"SELECT * FROM ({self._sql}) AS _sub WHERE {self._key_field} = ?"
-        rows = await self.db.read(sql, (key_val,))
+        rows = await self.db.read(sql, (raw_key,))
         if rows and (not self._where or self._where(rows[0])):
             self._cache[key_val] = rows[0]
         else:
@@ -170,23 +223,4 @@ class SubPubService(Service):
         for row in rows:
             if self._where and not self._where(row):
                 continue
-            self._cache[row[self._key_field]] = row
-
-    async def _fan_out_op(self, event: ChangeEvent, op: str) -> None:
-        """Send update to all subscribers, respecting filters and formatters."""
-        dead: list[Subscriber] = []
-        notified_monitor = False
-        for sub in self._subscribers:
-            out_row = sub.formatter(event.row) if sub.formatter else event.row
-            if sub.filter_fn and not sub.filter_fn(out_row):
-                continue
-            try:
-                msg_bytes = make_update(self.name, ref=None, op=op, row=self._project(self._clean_row(out_row), sub.fields), subid=sub.subid)
-                await sub.ws.send_bytes(msg_bytes)
-                if not notified_monitor:
-                    await self.notify_monitors("out", msg_bytes)
-                    notified_monitor = True
-            except (ConnectionError, RuntimeError):
-                dead.append(sub)
-        for sub in dead:
-            self._subscribers.remove(sub)
+            self._cache[str(row[self._key_field])] = row

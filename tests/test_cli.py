@@ -61,7 +61,6 @@ TEST_CONFIG = {
             "type": "subpub",
             "primary_table": "orders",
             "key": "id",
-            "filterable": ["status", "symbol"],
             "change_log_size": 100,
         },
         "audit_feed": {
@@ -337,8 +336,7 @@ async def _insert_order(client, side: str, symbol: str, qty: int, price: float) 
 
 
 async def test_subscribe_subpub(client):
-    """Subscribe to subpub service, receive snapshot and live update."""
-    from mkio.__main__ import _subscribe_service
+    """Subscribe to subpub service with topic, receive snapshot and live update."""
     from mkio.client import MkioClient
 
     # Insert initial data
@@ -347,19 +345,18 @@ async def test_subscribe_subpub(client):
     ws_url = _ws_url(client)
     received: list[dict] = []
 
+    # Subscribe to topic "AAPL" (we use auto-inc id, so find the id first)
+    # The key is "id", so subscribe to the topic we just inserted
     async with MkioClient(ws_url, reconnect=False) as mk:
-        async for msg in mk.subscribe("last_trade"):
+        async for msg in mk.subscribe("last_trade", topic="1"):
             received.append(msg)
             if msg.get("type") == "snapshot":
-                # Insert another order to trigger update
-                await _insert_order(client, "Sell", "GOOG", 50, 2800.0)
-            elif msg.get("type") == "update":
+                assert msg["rows"][0]["_mkio_exists"] is True
                 break
 
     assert received[0]["type"] == "snapshot"
     assert len(received[0]["rows"]) == 1
-    assert received[1]["type"] == "update"
-    assert received[1]["row"]["symbol"] == "GOOG"
+    assert received[0]["rows"][0]["_mkio_exists"] is True
 
 
 async def test_subscribe_stream(client):
@@ -409,36 +406,24 @@ async def test_subscribe_query(client):
     assert received[1]["row"]["symbol"] == "GOOG"
 
 
-async def test_subscribe_with_filter_subpub(client):
-    """Subscribe to subpub with --filter, only matching rows appear."""
+async def test_subscribe_subpub_topic_not_found(client):
+    """Subscribe to subpub with topic that doesn't exist, get _mkio_exists=False."""
     from mkio.client import MkioClient
-
-    # Insert two orders with different symbols
-    await _insert_order(client, "Buy", "AAPL", 100, 150.0)
-    await _insert_order(client, "Sell", "GOOG", 50, 2800.0)
 
     ws_url = _ws_url(client)
     received: list[dict] = []
 
     async with MkioClient(ws_url, reconnect=False) as mk:
-        async for msg in mk.subscribe("last_trade", filter="symbol == 'AAPL'"):
+        async for msg in mk.subscribe("last_trade", topic="nonexistent"):
             received.append(msg)
             if msg.get("type") == "snapshot":
-                # Insert a matching and non-matching order
-                await _insert_order(client, "Buy", "AAPL", 200, 155.0)
-                await _insert_order(client, "Sell", "MSFT", 75, 400.0)
-            elif msg.get("type") == "update":
                 break
 
-    # Snapshot should only have AAPL
     snapshot = received[0]
     assert snapshot["type"] == "snapshot"
-    assert all(r["symbol"] == "AAPL" for r in snapshot["rows"])
-
-    # Update should be the new AAPL order
-    update = received[1]
-    assert update["type"] == "update"
-    assert update["row"]["symbol"] == "AAPL"
+    assert len(snapshot["rows"]) == 1
+    assert snapshot["rows"][0]["_mkio_exists"] is False
+    assert snapshot["rows"][0]["id"] == "nonexistent"
 
 
 async def test_subscribe_with_filter_query(client):

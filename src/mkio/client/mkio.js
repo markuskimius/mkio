@@ -258,7 +258,8 @@ class MkioClient {
    * Subscribe to a service with callbacks.
    * @param {string} service
    * @param {Object} opts
-   * @param {string} [opts.filter]
+   * @param {string} [opts.topic] - Topic key value (required for subpub)
+   * @param {string} [opts.filter] - Expression filter (query only)
    * @param {string} [opts.ref] - Ref from last received message for recovery (stream only)
    * @param {string} [opts.subid] - Subscription ID echoed on all responses
    * @param {boolean} [opts.snapshot=true] - Whether to receive the initial snapshot
@@ -270,6 +271,7 @@ class MkioClient {
   subscribe(service, opts = {}) {
     const sub = {
       service,
+      topic: opts.topic || null,
       filter: opts.filter || null,
       ref: opts.ref || null,
       subid: opts.subid || null,
@@ -283,6 +285,7 @@ class MkioClient {
     this._subscriptions.set(key, sub);
 
     const msg = { service, type: "subscribe" };
+    if (sub.topic) msg.topic = sub.topic;
     if (sub.filter) msg.filter = sub.filter;
     if (sub.ref) msg.ref = sub.ref;
     if (sub.subid) msg.subid = sub.subid;
@@ -418,6 +421,7 @@ class MkioClient {
   _resubscribe() {
     for (const [, sub] of this._subscriptions) {
       const msg = { service: sub.service, type: "subscribe" };
+      if (sub.topic) msg.topic = sub.topic;
       if (sub.filter) msg.filter = sub.filter;
       if (sub.ref) msg.ref = sub.ref;
       if (sub.subid) msg.subid = sub.subid;
@@ -458,7 +462,7 @@ const MKIO_HELP = [
   'mkio.monitor("<service>")                 tap one service (call again to add more)',
   'mkio.monitor("off")                       stop tapping',
   'mkio.send("<service>", data, {op})        send a transaction',
-  'mkio.subscribe("<service>", {filter})     stream live data (returns {stop})',
+  'mkio.subscribe("<service>", {topic})      stream live data (returns {stop})',
 ].join("\n");
 
 function _mkioHttpBase(client) {

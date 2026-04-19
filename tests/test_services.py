@@ -171,7 +171,6 @@ async def subpub_svc(db, bus, writer):
         "primary_table": "orders",
         "watch_tables": ["orders"],
         "key": "id",
-        "filterable": ["status", "symbol"],
         "change_log_size": 100,
     }
     svc = SubPubService(config=config, db=db, change_bus=bus, writer=writer)
@@ -181,66 +180,133 @@ async def subpub_svc(db, bus, writer):
     await svc.stop()
 
 
-async def test_subpub_fresh_snapshot(subpub_svc):
+async def test_subpub_topic_exists(subpub_svc):
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1"})
     msgs = ws.get_messages()
     assert len(msgs) == 1
     assert msgs[0]["type"] == "snapshot"
     assert "ref" not in msgs[0]
-    assert len(msgs[0]["rows"]) == 2
-    for row in msgs[0]["rows"]:
-        assert "_mkio_ref" not in row
+    assert len(msgs[0]["rows"]) == 1
+    row = msgs[0]["rows"][0]
+    assert row["id"] == "1"
+    assert row["symbol"] == "AAPL"
+    assert row["_mkio_exists"] is True
+    assert "_mkio_ref" not in row
 
 
-async def test_subpub_with_filter(subpub_svc):
+async def test_subpub_topic_not_found(subpub_svc):
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {
-        "type": "subscribe",
-        "filter": "status == 'pending'",
-    })
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "999"})
     msgs = ws.get_messages()
+    assert len(msgs) == 1
     assert msgs[0]["type"] == "snapshot"
     assert len(msgs[0]["rows"]) == 1
-    assert msgs[0]["rows"][0]["status"] == "pending"
+    row = msgs[0]["rows"][0]
+    assert row["id"] == "999"
+    assert row["_mkio_exists"] is False
+    # All fields present with null defaults
+    assert row["symbol"] is None
+    assert row["qty"] is None
+    assert row["status"] is None
+
+
+async def test_subpub_requires_topic(subpub_svc):
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "error"
+    assert "topic" in msgs[0]["message"].lower()
+    assert len(subpub_svc._subscribers) == 0
 
 
 async def test_subpub_live_update(subpub_svc, bus):
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "3"})
     ws.clear()
 
-    # Simulate a change event
+    # Insert a row matching the topic
     event = ChangeBus.make_event(
         "orders", "insert", {"id": "3", "symbol": "GOOG", "qty": 200, "status": "pending"}, "20260404 00:00:00.000000000001"
     )
     bus.publish([event])
-
-    # Let the listener task process the event
     await asyncio.sleep(0.1)
 
     msgs = ws.get_messages()
     assert len(msgs) == 1
     assert msgs[0]["type"] == "update"
-    assert "ref" not in msgs[0]
-    assert msgs[0]["op"] == "insert"
+    assert msgs[0]["op"] == "update"
     assert msgs[0]["row"]["symbol"] == "GOOG"
+    assert msgs[0]["row"]["_mkio_exists"] is True
     assert "_mkio_ref" not in msgs[0]["row"]
 
 
-async def test_subpub_always_snapshot_and_updates(subpub_svc, bus):
-    """SubPub always sends snapshot and subscribes for updates."""
+async def test_subpub_live_update_only_matching_topic(subpub_svc, bus):
+    """Subscribers only get updates for their own topic."""
+    ws1 = MockWebSocket()
+    ws2 = MockWebSocket()
+    await subpub_svc.on_subscribe(ws1, {"type": "subscribe", "topic": "1"})
+    await subpub_svc.on_subscribe(ws2, {"type": "subscribe", "topic": "2"})
+    ws1.clear()
+    ws2.clear()
+
+    # Update only topic "1"
+    event = ChangeBus.make_event(
+        "orders", "update", {"id": "1", "symbol": "AAPL", "qty": 150, "status": "pending"}, "20260404 00:00:00.000000000001"
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    assert len(ws1.get_messages()) == 1
+    assert len(ws2.get_messages()) == 0
+
+
+async def test_subpub_topic_appears_as_update(subpub_svc, bus):
+    """When a topic goes from not-found to found, it comes as an update (not insert)."""
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "new"})
+    msgs = ws.get_messages()
+    assert msgs[0]["rows"][0]["_mkio_exists"] is False
+    ws.clear()
+
+    # Now insert the row
+    event = ChangeBus.make_event(
+        "orders", "insert", {"id": "new", "symbol": "TSLA", "qty": 10, "status": "new"}, "20260404 00:00:00.000000000002"
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
     msgs = ws.get_messages()
     assert len(msgs) == 1
-    assert msgs[0]["type"] == "snapshot"
-    assert len(subpub_svc._subscribers) == 1
+    assert msgs[0]["op"] == "update"
+    assert msgs[0]["row"]["_mkio_exists"] is True
+    assert msgs[0]["row"]["symbol"] == "TSLA"
+
+
+async def test_subpub_topic_deleted(subpub_svc, bus):
+    """When a topic's row is deleted, subscriber gets _mkio_exists: False with all fields."""
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1"})
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "delete", {"id": "1"}, "20260404 00:00:00.000000000003"
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["op"] == "update"
+    assert msgs[0]["row"]["_mkio_exists"] is False
+    assert msgs[0]["row"]["id"] == "1"
+    assert msgs[0]["row"]["symbol"] is None
 
 
 async def test_subpub_unsubscribe(subpub_svc):
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1"})
     assert len(subpub_svc._subscribers) == 1
     await subpub_svc.on_unsubscribe(ws, {"type": "unsubscribe"})
     assert len(subpub_svc._subscribers) == 0
@@ -280,23 +346,28 @@ async def subpub_where_svc(db, bus, writer):
 
 
 async def test_subpub_where_filters_startup(subpub_where_svc):
-    """Only rows matching where should appear in the snapshot."""
+    """Only rows matching where should appear as existing topics."""
     ws = MockWebSocket()
-    await subpub_where_svc.on_subscribe(ws, {"type": "subscribe"})
+    # Topic "2" (MSFT, filled) should exist
+    await subpub_where_svc.on_subscribe(ws, {"type": "subscribe", "topic": "2"})
     msgs = ws.get_messages()
-    assert len(msgs) == 1
-    assert msgs[0]["type"] == "snapshot"
-    assert len(msgs[0]["rows"]) == 1
+    assert msgs[0]["rows"][0]["_mkio_exists"] is True
     assert msgs[0]["rows"][0]["symbol"] == "MSFT"
+
+    ws2 = MockWebSocket()
+    # Topic "1" (AAPL, pending) should not exist (filtered by where)
+    await subpub_where_svc.on_subscribe(ws2, {"type": "subscribe", "topic": "1"})
+    msgs2 = ws2.get_messages()
+    assert msgs2[0]["rows"][0]["_mkio_exists"] is False
 
 
 async def test_subpub_where_filters_live_insert(subpub_where_svc, bus):
-    """Live inserts that don't match where should be ignored."""
+    """Live inserts that don't match where should not notify topic subscribers."""
     ws = MockWebSocket()
-    await subpub_where_svc.on_subscribe(ws, {"type": "subscribe"})
+    await subpub_where_svc.on_subscribe(ws, {"type": "subscribe", "topic": "3"})
     ws.clear()
 
-    # Insert a pending order — should be filtered out
+    # Insert a pending order for topic "3" — doesn't match where
     event = ChangeBus.make_event(
         "orders", "insert",
         {"id": "3", "symbol": "GOOG", "qty": 200, "status": "pending"},
@@ -306,7 +377,11 @@ async def test_subpub_where_filters_live_insert(subpub_where_svc, bus):
     await asyncio.sleep(0.1)
     assert ws.get_messages() == []
 
-    # Insert a filled order — should come through
+    # Now insert a filled order for topic "4" — no subscriber for this topic
+    ws2 = MockWebSocket()
+    await subpub_where_svc.on_subscribe(ws2, {"type": "subscribe", "topic": "4"})
+    ws2.clear()
+
     event = ChangeBus.make_event(
         "orders", "insert",
         {"id": "4", "symbol": "TSLA", "qty": 75, "status": "filled"},
@@ -314,18 +389,19 @@ async def test_subpub_where_filters_live_insert(subpub_where_svc, bus):
     )
     bus.publish([event])
     await asyncio.sleep(0.1)
-    msgs = ws.get_messages()
+    msgs = ws2.get_messages()
     assert len(msgs) == 1
+    assert msgs[0]["row"]["_mkio_exists"] is True
     assert msgs[0]["row"]["symbol"] == "TSLA"
 
 
 async def test_subpub_where_removes_on_mismatch(subpub_where_svc, bus):
-    """If an update causes a row to no longer match where, it should be removed."""
+    """If an update causes a row to no longer match where, subscriber gets _mkio_exists: False."""
     ws = MockWebSocket()
-    await subpub_where_svc.on_subscribe(ws, {"type": "subscribe"})
+    await subpub_where_svc.on_subscribe(ws, {"type": "subscribe", "topic": "2"})
     ws.clear()
 
-    # Update MSFT (filled) to pending — should produce a delete
+    # Update MSFT (filled) to pending — should notify exists=False
     event = ChangeBus.make_event(
         "orders", "update",
         {"id": "2", "symbol": "MSFT", "qty": 50, "status": "pending"},
@@ -335,7 +411,77 @@ async def test_subpub_where_removes_on_mismatch(subpub_where_svc, bus):
     await asyncio.sleep(0.1)
     msgs = ws.get_messages()
     assert len(msgs) == 1
-    assert msgs[0]["op"] == "delete"
+    assert msgs[0]["op"] == "update"
+    assert msgs[0]["row"]["_mkio_exists"] is False
+
+
+# ---- SubPub with configured defaults ----------------------------------------
+
+@pytest_asyncio.fixture
+async def subpub_defaults_svc(db, bus, writer):
+    await db.write_conn.execute(
+        "INSERT INTO orders (id, symbol, qty, status) VALUES (?, ?, ?, ?)",
+        ("1", "AAPL", 100, "pending"),
+    )
+    await db.write_conn.commit()
+
+    config = {
+        "type": "subpub",
+        "primary_table": "orders",
+        "watch_tables": ["orders"],
+        "key": "id",
+        "defaults": {"qty": 0, "status": "unknown"},
+        "change_log_size": 100,
+    }
+    svc = SubPubService(config=config, db=db, change_bus=bus, writer=writer)
+    svc.name = "with_defaults"
+    await svc.start()
+    yield svc
+    await svc.stop()
+
+
+async def test_subpub_defaults_on_not_found(subpub_defaults_svc):
+    """Not-found rows use configured defaults instead of null."""
+    ws = MockWebSocket()
+    await subpub_defaults_svc.on_subscribe(ws, {"type": "subscribe", "topic": "999"})
+    msgs = ws.get_messages()
+    row = msgs[0]["rows"][0]
+    assert row["_mkio_exists"] is False
+    assert row["id"] == "999"
+    assert row["qty"] == 0
+    assert row["status"] == "unknown"
+    assert row["symbol"] is None  # no default configured → null
+
+
+async def test_subpub_defaults_not_used_when_found(subpub_defaults_svc):
+    """When the topic exists, real values are used, not defaults."""
+    ws = MockWebSocket()
+    await subpub_defaults_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1"})
+    msgs = ws.get_messages()
+    row = msgs[0]["rows"][0]
+    assert row["_mkio_exists"] is True
+    assert row["qty"] == 100
+    assert row["status"] == "pending"
+
+
+async def test_subpub_defaults_on_delete(subpub_defaults_svc, bus):
+    """Defaults used when a topic transitions from found to not-found."""
+    ws = MockWebSocket()
+    await subpub_defaults_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1"})
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "delete", {"id": "1"}, "20260404 00:00:00.000000000001"
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    row = msgs[0]["row"]
+    assert row["_mkio_exists"] is False
+    assert row["qty"] == 0
+    assert row["status"] == "unknown"
+    assert row["symbol"] is None
 
 
 # ---- Stream Service --------------------------------------------------------
@@ -560,7 +706,7 @@ async def test_query_unsubscribe(query_svc):
 async def test_dead_subscriber_removed(subpub_svc, bus):
     """A closed websocket should be removed from subscribers list."""
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "99"})
     assert len(subpub_svc._subscribers) == 1
 
     ws.closed = True  # Simulate disconnect
@@ -595,7 +741,6 @@ async def test_subpub_cross_restart_snapshot(db, bus, writer):
         "primary_table": "orders",
         "watch_tables": ["orders"],
         "key": "id",
-        "filterable": ["status", "symbol"],
     }
     svc1 = SubPubService(config=subpub_config, db=db, change_bus=bus, writer=writer)
     svc1.name = "last_trade"
@@ -621,14 +766,13 @@ async def test_subpub_cross_restart_snapshot(db, bus, writer):
     await svc2.start()
 
     ws4 = MockWebSocket()
-    await svc2.on_subscribe(ws4, {"type": "subscribe"})
+    await svc2.on_subscribe(ws4, {"type": "subscribe", "topic": "1"})
     msgs = ws4.get_messages()
     assert msgs[0]["type"] == "snapshot"
-    assert len(msgs[0]["rows"]) == 2
-    symbols = {r["symbol"] for r in msgs[0]["rows"]}
-    assert symbols == {"AAPL", "GOOG"}
-    for row in msgs[0]["rows"]:
-        assert "_mkio_ref" not in row
+    assert len(msgs[0]["rows"]) == 1
+    assert msgs[0]["rows"][0]["symbol"] == "AAPL"
+    assert msgs[0]["rows"][0]["_mkio_exists"] is True
+    assert "_mkio_ref" not in msgs[0]["rows"][0]
 
     await svc2.stop()
     await txn_svc.stop()
@@ -774,7 +918,7 @@ async def test_mkio_ref_stored_in_db(txn_svc, db):
 
 async def test_subpub_subid_on_snapshot(subpub_svc):
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "subid": "my-sub-1"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1", "subid": "my-sub-1"})
     msgs = ws.get_messages()
     assert msgs[0]["type"] == "snapshot"
     assert msgs[0]["subid"] == "my-sub-1"
@@ -785,6 +929,7 @@ async def test_subpub_subid_on_snapshot_and_updates(subpub_svc, bus):
     ws = MockWebSocket()
     await subpub_svc.on_subscribe(ws, {
         "type": "subscribe",
+        "topic": "1",
         "subid": "both-sub",
     })
     msgs = ws.get_messages()
@@ -797,7 +942,7 @@ async def test_subpub_subid_on_snapshot_and_updates(subpub_svc, bus):
 
 async def test_subpub_subid_on_live_update(subpub_svc, bus):
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "subid": "live-sub"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "5", "subid": "live-sub"})
     ws.clear()
 
     event = ChangeBus.make_event(
@@ -816,7 +961,7 @@ async def test_subpub_subid_on_live_update(subpub_svc, bus):
 
 async def test_subpub_no_subid_when_omitted(subpub_svc):
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1"})
     msgs = ws.get_messages()
     assert "subid" not in msgs[0]
 
@@ -904,11 +1049,11 @@ async def test_query_no_subid_when_omitted(query_svc):
 
 
 async def test_subpub_multiple_subscribers_different_subids(subpub_svc, bus):
-    """Two subscribers with different subids each get their own subid on updates."""
+    """Two subscribers watching the same topic with different subids each get their own subid."""
     ws1 = MockWebSocket()
     ws2 = MockWebSocket()
-    await subpub_svc.on_subscribe(ws1, {"type": "subscribe", "subid": "sub-A"})
-    await subpub_svc.on_subscribe(ws2, {"type": "subscribe", "subid": "sub-B"})
+    await subpub_svc.on_subscribe(ws1, {"type": "subscribe", "topic": "20", "subid": "sub-A"})
+    await subpub_svc.on_subscribe(ws2, {"type": "subscribe", "topic": "20", "subid": "sub-B"})
     ws1.clear()
     ws2.clear()
 
@@ -1072,18 +1217,21 @@ async def test_subpub_fields_snapshot(subpub_svc):
     ws = MockWebSocket()
     await subpub_svc.on_subscribe(ws, {
         "type": "subscribe",
+        "topic": "1",
         "fields": ["symbol", "qty"],
     })
     msgs = ws.get_messages()
     assert msgs[0]["type"] == "snapshot"
-    for row in msgs[0]["rows"]:
-        assert set(row.keys()) == {"symbol", "qty"}
+    row = msgs[0]["rows"][0]
+    assert set(row.keys()) == {"symbol", "qty", "_mkio_exists"}
+    assert row["_mkio_exists"] is True
 
 
 async def test_subpub_fields_update(subpub_svc, bus):
     ws = MockWebSocket()
     await subpub_svc.on_subscribe(ws, {
         "type": "subscribe",
+        "topic": "99",
         "fields": ["symbol", "status"],
     })
     ws.clear()
@@ -1098,7 +1246,8 @@ async def test_subpub_fields_update(subpub_svc, bus):
 
     msgs = ws.get_messages()
     assert len(msgs) == 1
-    assert set(msgs[0]["row"].keys()) == {"symbol", "status"}
+    assert set(msgs[0]["row"].keys()) == {"symbol", "status", "_mkio_exists"}
+    assert msgs[0]["row"]["_mkio_exists"] is True
 
 
 async def test_query_fields_snapshot(query_svc):

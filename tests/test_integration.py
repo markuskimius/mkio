@@ -66,7 +66,6 @@ TEST_CONFIG = {
             "primary_table": "orders",
             "watch_tables": ["orders"],
             "key": "id",
-            "filterable": ["status", "symbol"],
             "change_log_size": 100,
         },
         "audit_feed": {
@@ -178,19 +177,21 @@ async def test_missing_service_error(client):
 
 
 async def test_subpub_subscribe_snapshot(client):
-    """Subscribe to subpub, get empty snapshot, then insert and get update."""
+    """Subscribe to subpub with topic, get not-found, then insert and get update."""
     ws = await client.ws_connect("/ws")
 
-    # Subscribe
+    # Subscribe to a topic that doesn't exist yet
     await ws.send_bytes(dumps({
         "service": "last_trade",
         "type": "subscribe",
-        "ref": "sub_ref",
+        "topic": "1",
     }))
     resp = await ws.receive()
     snapshot = loads(resp.data)
     assert snapshot["type"] == "snapshot"
-    assert snapshot["rows"] == []  # No data yet
+    assert len(snapshot["rows"]) == 1
+    assert snapshot["rows"][0]["_mkio_exists"] is False
+    assert snapshot["rows"][0]["id"] == "1"
 
     # Insert via transaction
     ws2 = await client.ws_connect("/ws")
@@ -201,25 +202,26 @@ async def test_subpub_subscribe_snapshot(client):
     })
     assert result["ok"] is True
 
-    # Should receive an update on ws
+    # Should receive an update on ws (op is always "update" for subpub)
     resp = await asyncio.wait_for(ws.receive(), timeout=2.0)
     update = loads(resp.data)
     assert update["type"] == "update"
-    assert update["op"] == "insert"
+    assert update["op"] == "update"
+    assert update["row"]["_mkio_exists"] is True
 
     await ws.close()
     await ws2.close()
 
 
 async def test_multi_client_fan_out(client):
-    """3 clients subscribe, write triggers update to all 3."""
+    """3 clients subscribe to the same topic, write triggers update to all 3."""
     subs = []
     for _ in range(3):
         ws = await client.ws_connect("/ws")
         await ws.send_bytes(dumps({
             "service": "last_trade",
             "type": "subscribe",
-            "ref": f"sub_{_}",
+            "topic": "fan1",
         }))
         resp = await ws.receive()  # Consume snapshot
         subs.append(ws)
@@ -238,6 +240,7 @@ async def test_multi_client_fan_out(client):
         update = loads(resp.data)
         assert update["type"] == "update"
         assert update["row"]["symbol"] == "GOOG"
+        assert update["row"]["_mkio_exists"] is True
         await ws.close()
 
     await tx_ws.close()
@@ -371,6 +374,7 @@ async def test_unsubscribe_stops_updates(client):
     await ws.send_bytes(dumps({
         "service": "last_trade",
         "type": "subscribe",
+        "topic": "unsub1",
     }))
     await ws.receive()  # Snapshot
 
@@ -452,6 +456,7 @@ async def test_msgid_with_live_updates(client):
     await ws_sub.send_bytes(dumps({
         "service": "last_trade",
         "type": "subscribe",
+        "topic": "live1",
     }))
     await ws_sub.receive()  # Consume snapshot
 
@@ -470,7 +475,7 @@ async def test_msgid_with_live_updates(client):
     resp = await asyncio.wait_for(ws_sub.receive(), timeout=2.0)
     update = loads(resp.data)
     assert update["type"] == "update"
-    assert update["op"] == "insert"
+    assert update["op"] == "update"
     assert update["row"]["symbol"] == "TSLA"
     assert "msgid" not in update  # Updates don't carry msgid
 

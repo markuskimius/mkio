@@ -85,8 +85,8 @@ def _normalize_service(
     if "where" in svc:
         svc["_compiled_where"] = compile_filter(svc["where"])
 
-    # Validate filterable fields
-    if "filterable" in svc:
+    # Validate filterable fields (query only — subpub uses topic instead)
+    if "filterable" in svc and svc_type != "subpub":
         _validate_filterable(name, svc, config)
 
 

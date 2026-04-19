@@ -285,8 +285,9 @@ def _build_listener_detail(
     if key:
         detail["key"] = key
 
+    svc_type = config.get("type")
     filterable = config.get("filterable", [])
-    if filterable:
+    if filterable and svc_type != "subpub":
         detail["filterable"] = filterable
 
     # Table schema
@@ -302,7 +303,6 @@ def _build_listener_detail(
         detail["schema"] = schema
 
     # Subscribe protocol info
-    svc_type = config.get("type")
     subscribe: dict[str, Any] = {
         "message": {
             "service": name,
@@ -310,7 +310,9 @@ def _build_listener_detail(
         },
     }
     if svc_type == "subpub":
+        subscribe["message"]["topic"] = "<key_value>"
         subscribe["response_types"] = ["snapshot", "update"]
+        subscribe["topic_key"] = config.get("key", "")
     elif svc_type == "stream":
         subscribe["recovery"] = (
             "Send ref from last received message to resume from that point in the buffer. "
@@ -321,7 +323,8 @@ def _build_listener_detail(
     elif svc_type == "query":
         subscribe["response_types"] = ["snapshot", "update"]
 
-    if filterable:
+    filterable = config.get("filterable", [])
+    if filterable and svc_type != "subpub":
         subscribe["message"]["filter"] = "<expr>"
         subscribe["filter_fields"] = filterable
 
@@ -330,8 +333,12 @@ def _build_listener_detail(
     # Examples
     cli_cmd = svc_type if svc_type in ("subpub", "stream", "query") else "subpub"
     example: dict[str, str] = {}
-    example["subscribe"] = f"mkio {cli_cmd} <url> {name}"
-    if filterable:
+    if svc_type == "subpub":
+        key = config.get("key", "id")
+        example["subscribe"] = f"mkio {cli_cmd} <url> {name} --topic <{key}>"
+    else:
+        example["subscribe"] = f"mkio {cli_cmd} <url> {name}"
+    if filterable and svc_type != "subpub":
         f = filterable[0]
         example["subscribe_filter"] = (
             f"mkio {cli_cmd} <url> {name} --filter \"{f} == '...'\""

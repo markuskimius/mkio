@@ -44,7 +44,7 @@ def _usage() -> None:
     print("  mkio monitor <url> <service>     Monitor a service's messages")
     print("  mkio send <url> <service> [--op <name>] <data>")
     print("                                   Send transaction(s) from JSON/CSV/inline")
-    print("  mkio subpub <url> <service> [--filter <expr>] [--fields <f1,f2,...>] [--subid <id>]")
+    print("  mkio subpub <url> <service> --topic <key> [--fields <f1,f2,...>] [--subid <id>]")
     print("                                   Subscribe to a subpub service")
     print("  mkio stream <url> <service> [--filter <expr>] [--fields <f1,f2,...>] [--subid <id>] [--ref <ref>]")
     print("                                   Subscribe to a stream service")
@@ -547,7 +547,7 @@ async def _send_messages(
 
 def _cmd_subpub() -> None:
     args = sys.argv[2:]
-    usage = "mkio subpub <url> <service> [--filter <expr>] [--fields <f1,f2,...>] [--subid <id>]"
+    usage = "mkio subpub <url> <service> --topic <key> [--fields <f1,f2,...>] [--subid <id>]"
     if len(args) < 2:
         print(f"Usage: {usage}")
         sys.exit(1)
@@ -555,14 +555,17 @@ def _cmd_subpub() -> None:
     url = args[0].rstrip("/")
     service = args[1]
     rest = args[2:]
-    _check_unknown_flags(rest, {"--filter", "--fields", "--subid"}, usage)
-    filter_expr = _extract_flag(rest, "--filter")
+    _check_unknown_flags(rest, {"--topic", "--fields", "--subid"}, usage)
+    topic = _extract_flag(rest, "--topic")
+    if topic is None:
+        print(f"Error: --topic is required for subpub\nUsage: {usage}")
+        sys.exit(1)
     fields = _extract_fields(rest)
     subid = _extract_flag(rest, "--subid")
     ws_url = _normalize_ws_url(url)
 
     try:
-        asyncio.run(_subscribe_service(ws_url, service, filter_expr, None, subid, fields=fields))
+        asyncio.run(_subscribe_service(ws_url, service, None, None, subid, topic=topic, fields=fields))
     except KeyboardInterrupt:
         print("\nSubscription stopped.")
 
@@ -659,11 +662,12 @@ async def _subscribe_service(
     snapshot: bool = True,
     updates: bool = True,
     fields: list[str] | None = None,
+    topic: str | None = None,
 ) -> None:
     from mkio.client import MkioClient
 
     async with MkioClient(ws_url, reconnect=True) as client:
-        async for msg in client.subscribe(service, filter=filter_expr, ref=ref, subid=subid, snapshot=snapshot, updates=updates, fields=fields):
+        async for msg in client.subscribe(service, topic=topic, filter=filter_expr, ref=ref, subid=subid, snapshot=snapshot, updates=updates, fields=fields):
             _print_subscribe_message(msg)
 
 

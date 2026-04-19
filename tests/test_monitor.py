@@ -43,7 +43,6 @@ TEST_CONFIG = {
             "primary_table": "orders",
             "watch_tables": ["orders"],
             "key": "id",
-            "filterable": ["status"],
             "change_log_size": 100,
         },
     },
@@ -203,11 +202,12 @@ async def test_monitor_sees_subscribe_and_updates(client):
     })
     assert ack["type"] == "monitor_ack"
 
-    # Subscribe from another connection
+    # Subscribe from another connection with a topic
     sub_ws = await client.ws_connect("/ws")
     await sub_ws.send_bytes(dumps({
         "service": "last_trade",
         "type": "subscribe",
+        "topic": "1",
     }))
     # Consume snapshot on subscriber
     await sub_ws.receive()
@@ -242,7 +242,7 @@ async def test_monitor_sees_subscribe_and_updates(client):
     assert update_msg["direction"] == "out"
     assert update_msg["service"] == "last_trade"
     assert update_msg["message"]["type"] == "update"
-    assert update_msg["message"]["op"] == "insert"
+    assert update_msg["message"]["op"] == "update"
 
     await mon_ws.close()
     await sub_ws.close()

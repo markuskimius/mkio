@@ -92,9 +92,8 @@ def test_filterable_validation_strict():
             "tables": {"orders": {"columns": {"id": "TEXT PRIMARY KEY"}}},
             "services": {
                 "live": {
-                    "type": "subpub",
+                    "type": "query",
                     "primary_table": "orders",
-                    "key": "id",
                     "filterable": ["bogus"],
                 }
             },
@@ -107,9 +106,8 @@ def test_filterable_validation_skipped_for_sql():
         "tables": {"orders": {"columns": {"id": "TEXT PRIMARY KEY"}}},
         "services": {
             "live": {
-                "type": "subpub",
+                "type": "query",
                 "primary_table": "orders",
-                "key": "id",
                 "sql": "SELECT id, id || '-alias' as computed FROM orders",
                 "filterable": ["computed"],
             }

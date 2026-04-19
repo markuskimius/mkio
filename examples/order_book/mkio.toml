@@ -48,6 +48,10 @@ key = "symbol"
 where = "status == 'filled'"
 change_log_size = 10000
 
+[services.last_trade.defaults]
+price = 0
+time = ""
+
 [services.last_trade.publish]
 symbol = "symbol"
 price = "IF(side == 'Buy', price, -price)"

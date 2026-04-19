@@ -57,7 +57,6 @@ TEST_CONFIG = {
             "type": "subpub",
             "primary_table": "orders",
             "key": "id",
-            "filterable": ["status", "symbol"],
             "change_log_size": 100,
         },
         "audit_feed": {
@@ -174,7 +173,6 @@ async def test_detail_subpub(client):
     assert data["type"] == "subpub"
     assert data["primary_table"] == "orders"
     assert data["key"] == "id"
-    assert data["filterable"] == ["status", "symbol"]
 
     # Schema from orders table
     schema = data["schema"]
@@ -187,20 +185,20 @@ async def test_detail_subpub(client):
     assert "price" in schema
     assert "status" in schema
 
-    # Subscribe protocol
+    # Subscribe protocol — subpub uses topic, not filter
     sub = data["subscribe"]
     assert sub["message"]["service"] == "last_trade"
     assert sub["message"]["type"] == "subscribe"
+    assert sub["message"]["topic"] == "<key_value>"
+    assert sub["topic_key"] == "id"
     assert "recovery" not in sub
     assert sub["response_types"] == ["snapshot", "update"]
-    assert "change_log_size" not in sub
-
-    # Filter fields
-    assert sub["filter_fields"] == ["status", "symbol"]
+    assert "filter_fields" not in sub
 
     # Examples
     assert "subscribe" in data["example"]
-    assert "subscribe_filter" in data["example"]
+    assert "--topic" in data["example"]["subscribe"]
+    assert "subscribe_filter" not in data["example"]
     assert "subscribe_recover" not in data["example"]
 
 
@@ -289,8 +287,8 @@ async def test_detail_example_generation(client):
     assert "mkio send" in place["example"]
     assert "--op place" in place["example"]
 
-    # Listener should have subscribe example
+    # Listener should have subscribe example with --topic
     resp = await client.get("/api/services/last_trade")
     data = await resp.json()
     assert "mkio subpub" in data["example"]["subscribe"]
-    assert "--filter" in data["example"]["subscribe_filter"]
+    assert "--topic" in data["example"]["subscribe"]
