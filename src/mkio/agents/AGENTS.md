@@ -55,7 +55,7 @@ python -m mkio.skill_helpers.discover <url> <service>    # full descriptor as JS
 }
 ```
 
-### Example discovery response (listener service)
+### Example discovery response (query service)
 
 ```json
 {
@@ -71,6 +71,21 @@ python -m mkio.skill_helpers.discover <url> <service>    # full descriptor as JS
   },
   "subscribe": {
     "message": {"service": "all_orders", "type": "subscribe", "filter": "<expr>"},
+    "response_types": ["snapshot", "update"]
+  }
+}
+```
+
+### Example discovery response (subpub service)
+
+```json
+{
+  "name": "last_trade",
+  "type": "subpub",
+  "primary_table": "orders",
+  "topic_key": "symbol",
+  "subscribe": {
+    "message": {"service": "last_trade", "type": "subscribe", "topic": "<key value>"},
     "response_types": ["snapshot", "update"]
   }
 }
@@ -107,10 +122,15 @@ Connect to `ws://<host>:<port>/ws` (general) or `ws://<host>:<port>/ws/<service>
 ### Subscribing
 
 ```json
+// SubPub — topic required (the key column value)
+{"service": "last_trade", "type": "subscribe", "topic": "AAPL"}
+
+// Query — with optional filter
 {"service": "all_orders", "type": "subscribe", "filter": "status == 'pending'"}
 ```
 
-- `filter` — expression string (only valid if the service descriptor lists `filterable` fields)
+- `topic` — (subpub only, required) the key column value to subscribe to. Returns a single row with `_mkio_exists: true/false`. If the topic doesn't exist yet, all fields are returned with null values (or configured defaults). When the topic later appears, it's published as an update.
+- `filter` — (query only) expression string, only valid if the service descriptor lists `filterable` fields
 - `fields` — optional list of field names to include in each row (e.g., `["symbol", "qty"]`). Omit to receive all fields. Filtering still operates on the full row before projection.
 - `ref` — (stream only, required) ref from the last received message for cursor-based reconnection
 - `subid` — optional string echoed on every response (snapshot, update) for this subscription, useful for correlating when multiplexing subscriptions on one WebSocket
@@ -122,7 +142,7 @@ Connect to `ws://<host>:<port>/ws` (general) or `ws://<host>:<port>/ws/<service>
 | Type | Shape | When |
 |------|-------|------|
 | `snapshot` | `{"type": "snapshot", "rows": [...]}` | Initial state on subscribe |
-| `update` | `{"type": "update", "op": "insert\|update\|delete", "row": {...}}` | Live change |
+| `update` | `{"type": "update", "op": "insert\|update\|delete", "row": {...}}` | Live change (subpub always uses `op: "update"`) |
 
 Stream service messages include `ref` for cursor-based reconnection. **Query service rows** include a `_mkio_row` field — a collision-free string identifying the row by its primary key(s) across all watched tables. Single PK: `"42"`. Multiple PKs: `["P1",10]`.
 
@@ -176,7 +196,7 @@ Multi-step operations use `bind` to pass values between steps. For example:
 
 ## Expression Language
 
-Used in `filter` (subscribe) and `where`/`publish` (server config). Supports:
+Used in `filter` (query subscribe) and `where`/`publish` (server config). Supports:
 
 - Comparison: `==`, `!=`, `>`, `<`, `>=`, `<=`
 - Logical: `AND`, `OR`, `NOT`

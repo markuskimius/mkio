@@ -66,7 +66,7 @@ serve({...})  # or pass a dict
 - **Single port** — HTTP pages and WebSocket messages on one port
 - **Config-driven** — define tables, transactions, and live data services in TOML
 - **Transaction services** — insert, update, delete, upsert across multiple tables atomically
-- **SubPub** — in-memory cache with live push to subscribers, client-side filtering, server-side `where` and `publish` formatting
+- **SubPub** — topic-based single-row subscription with live push, server-side `where` filtering and `publish` formatting, configurable defaults for missing topics
 - **Stream** — append-only ring buffer with cursor-based reconnection
 - **Query** — snapshot + change feed from SQLite
 - **Expression language** — safe, extensible filter and formatter expressions (`qty > 100 AND status == 'pending'`)
@@ -107,7 +107,7 @@ Bind references (`$N.field`) pull values from a prior op's `RETURNING` row, wher
 
 ### SubPub
 
-Subscribe to get a snapshot from an in-memory cache, then receive live updates as data changes. Supports client filters, server-side `where` filtering (rows that don't match are never cached or published), and `publish` formatting with expressions including `IF(cond, then, else)`.
+Subscribe by topic (the `key` column value) to get a single-row snapshot, then receive live updates as data changes. Always returns one row with `_mkio_exists` indicating whether the topic was found. Supports server-side `where` filtering (rows that don't match are never cached or published), `publish` formatting with expressions, and configurable `defaults` for topics that don't exist yet.
 
 ```toml
 [services.last_trade]
@@ -116,6 +116,10 @@ primary_table = "orders"
 key = "symbol"
 where = "status == 'filled'"
 change_log_size = 10000
+
+[services.last_trade.defaults]
+price = 0
+time = ""
 
 [services.last_trade.publish]
 symbol = "symbol"
@@ -158,7 +162,10 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 // Transaction with msgid (echoed back on result/error for async correlation)
 {"service": "orders", "ref": "...", "op": "new", "msgid": "req-42", "data": {"side": "Buy", "symbol": "AAPL", "qty": 100, "price": 150}}
 
-// Subscribe
+// Subscribe (subpub — topic required)
+{"service": "last_trade", "type": "subscribe", "topic": "AAPL"}
+
+// Subscribe (query — with filter)
 {"service": "all_orders", "type": "subscribe", "filter": "status == 'pending'"}
 
 // Subscribe with subid (echoed on every snapshot and update for this subscription)
@@ -181,6 +188,9 @@ from mkio.client import MkioClient
 async with MkioClient("ws://localhost:8080/ws") as client:
     result = await client.send("add_order", {"id": "1", "symbol": "AAPL", "qty": 100})
 
+    async for msg in client.subscribe("last_trade", topic="AAPL"):
+        print(msg)  # single row with _mkio_exists
+
     async for msg in client.subscribe("all_orders", filter="status == 'pending'"):
         print(msg)
 ```
@@ -194,6 +204,12 @@ Auto-served at `/mkio.js` — no CDN or bundler needed.
 <script>
 const client = new MkioClient("ws://localhost:8080/ws");
 await client.connect();
+
+client.subscribe("last_trade", {
+    topic: "AAPL",
+    onSnapshot: (rows) => renderTrade(rows[0]),
+    onUpdate: (op, row) => renderTrade(row),
+});
 
 client.subscribe("all_orders", {
     filter: "status == 'pending'",
@@ -224,6 +240,7 @@ mkio.monitor()                             // log every frame to/from any servic
 mkio.monitor("orders")                     // filter to one service (call again to add more)
 mkio.monitor("off")                        // stop
 mkio.send("orders", {side:"Buy",...}, {op:"new"})
+mkio.subscribe("last_trade", {topic:"AAPL"})
 mkio.subscribe("all_orders", {filter:"status == 'pending'"})
 ```
 
@@ -323,10 +340,9 @@ mkio send http://localhost:8080 orders mixed.csv                 # CSV with per-
 Each listener service type has its own command with only the relevant options:
 
 ```bash
-# SubPub — snapshot + live updates
-mkio subpub http://localhost:8080 last_trade
-mkio subpub http://localhost:8080 last_trade --filter "symbol == 'AAPL'"
-mkio subpub http://localhost:8080 last_trade --fields symbol,qty
+# SubPub — topic-based snapshot + live updates
+mkio subpub http://localhost:8080 last_trade --topic AAPL
+mkio subpub http://localhost:8080 last_trade --topic AAPL --fields symbol,price
 
 # Stream — ring buffer with cursor reconnect (ref defaults to now)
 mkio stream http://localhost:8080 audit_feed

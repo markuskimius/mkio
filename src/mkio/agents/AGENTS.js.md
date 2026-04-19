@@ -49,13 +49,21 @@ const result = await client.send("orders", {side: "Buy", symbol: "AAPL", qty: 10
 Subscribe with callbacks. No return value — messages arrive via callbacks.
 
 ```javascript
+// SubPub — topic required, returns single row with _mkio_exists
+client.subscribe("last_trade", {
+  topic: "AAPL",
+  onSnapshot: (rows) => {
+    console.log("Exists:", rows[0]._mkio_exists, rows[0]);
+  },
+  onUpdate: (op, row) => {
+    console.log("Updated:", row._mkio_exists, row);
+  },
+});
+
+// Query — with filter
 client.subscribe("all_orders", {
   filter: "status == 'pending'",
-  fields: ["symbol", "qty"],  // optional, restrict to these columns
-  ref: lastRef,  // stream only, required for streams
-  subid: "my-sub",  // optional, echoed on every response
-  snapshot: true,  // query only, set false to skip snapshot
-  updates: true,   // query only, set false for snapshot only
+  fields: ["symbol", "qty"],
   onSnapshot: (rows) => {
     console.log("Initial state:", rows.length, "rows");
   },
@@ -65,7 +73,8 @@ client.subscribe("all_orders", {
 });
 ```
 
-- `filter` — expression string (only for services with `filterable` fields)
+- `topic` — (subpub only, required) the key column value to subscribe to
+- `filter` — (query only) expression string, only for services with `filterable` fields
 - `fields` — list of field names to include in each row (omit for all fields)
 - `ref` — pass the last received ref to resume (stream only, required)
 - `subid` — optional string echoed on every response for this subscription (for multiplexing)
@@ -142,6 +151,7 @@ mkio.monitor()                             // log every frame to/from any servic
 mkio.monitor("orders")                     // filter to one service (additive across calls)
 mkio.monitor("off")                        // stop
 mkio.send("orders", {...}, {op: "new"})    // returns the same promise as client.send
+mkio.subscribe("last_trade", {topic:"AAPL"}) // subpub with topic
 mkio.subscribe("all_orders", {filter})     // returns MkioSubscription with .stop()
 ```
 
@@ -154,6 +164,6 @@ Output uses `console.groupCollapsed` with styled `→` (out) / `←` (in) header
 The client reconnects automatically with exponential backoff when the WebSocket drops. On reconnect:
 
 1. A new WebSocket connection is established
-2. All active subscriptions are re-sent with their stored state (ref, filter, fields, etc.)
+2. All active subscriptions are re-sent with their stored state (ref, topic, filter, fields, etc.)
 3. Stream services resume from the last ref; subpub and query always send a full snapshot
 4. `onConnect` callback fires, then subscription callbacks resume
