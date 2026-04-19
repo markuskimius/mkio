@@ -281,6 +281,7 @@ class MkioClient {
       updates: opts.updates !== false,
       fields: opts.fields || null,
       onSnapshot: opts.onSnapshot || (() => {}),
+      onDelta: opts.onDelta || (() => {}),
       onUpdate: opts.onUpdate || (() => {}),
       onNack: opts.onNack || null,
     };
@@ -349,7 +350,9 @@ class MkioClient {
     } else if (this._monitor) {
       services = this._monitor.services;
     }
-    this._monitor = { services, fn };
+    const filter =
+      (opts && typeof opts === "object" && opts.filter) || null;
+    this._monitor = { services, filter, fn };
     return this._monitor;
   }
 
@@ -380,6 +383,13 @@ class MkioClient {
       msg,
       ts: Date.now(),
     };
+    if (this._monitor.filter) {
+      try {
+        if (!this._monitor.filter(entry)) return;
+      } catch (_) {
+        // filter errors pass through
+      }
+    }
     try {
       this._monitor.fn(entry);
     } catch (e) {
@@ -428,6 +438,8 @@ class MkioClient {
 
       if (type === "snapshot") {
         sub.onSnapshot(data.rows);
+      } else if (type === "delta") {
+        sub.onDelta(data.changes);
       } else if (type === "update") {
         sub.onUpdate(data.op, data.row);
       }
@@ -470,21 +482,138 @@ class MkioClient {
 // ---------------------------------------------------------------------------
 
 const MKIO_HELP = [
-  'mkio.help()                               show this help',
-  'mkio.services()                           list services this tab has talked to',
-  'mkio.services("<name>")                   show detail for one service',
-  'mkio.services("*")                        list every service on the server',
-  'mkio.monitor()                            tap every service (this tab)',
-  'mkio.monitor("<service>")                 tap one service (call again to add more)',
-  'mkio.monitor("off")                       stop tapping',
-  'mkio.send("<service>", data, {op})        send a transaction',
-  'mkio.subscribe("<svc>", "<proto>", {topic})  stream live data (returns {stop})',
+  'mkio.help()                                          show this help',
+  'mkio.services()                                      list every service on the server',
+  'mkio.services("<name>")                              show detail for one service',
+  'mkio.monitor()                                       tap every service (this tab)',
+  'mkio.monitor("<service>")                            tap one service (call again to add more)',
+  'mkio.monitor({filter: fn})                           tap with client-side filter function',
+  'mkio.monitor("off")                                  stop tapping',
+  'mkio.send("<service>", data, {op, ref, msgid})       send a transaction',
+  'mkio.subpub("<svc>", "<topic>", {fields, subid})     subscribe to a subpub service',
+  'mkio.stream("<svc>", {ref, filter, fields, subid})   subscribe to a stream service',
+  'mkio.query("<svc>", {filter, fields, subid,          subscribe to a query service',
+  '                     snapshotOnly, updateOnly})',
+  'mkio.instances()                                     list live MkioClient instances',
 ].join("\n");
 
 function _mkioHttpBase(client) {
   // Derive http(s):// base from the client's ws(s):// URL.
   const u = client.url.replace(/^ws/, "http");
   return u.replace(/\/[^/]*$/, "");
+}
+
+function _formatServiceDetail(detail) {
+  const lines = [];
+  const desc = detail.description || "";
+  lines.push(`Service: ${detail.name} (${detail.protocol})`);
+  if (desc) lines.push(`  ${desc}`);
+  lines.push("");
+
+  if (detail.protocol === "transaction") {
+    const ops = detail.ops || {};
+    const opNames = Object.keys(ops);
+    if (opNames.length > 0) {
+      const nameW = Math.max(2, ...opNames.map((n) => n.length));
+      lines.push("  Operations:");
+      lines.push("");
+      for (const opName of opNames) {
+        const op = ops[opName];
+        const steps = op.steps || [];
+        const primary = steps[0] || {};
+        const fields = primary.fields || {};
+        const parts = [];
+        for (const [f, info] of Object.entries(fields)) {
+          if (info.key) parts.push(`${f}* (key)`);
+          else if (info.required) parts.push(`${f}*`);
+          else if (info.default) parts.push(`${f}=${info.default}`);
+          else parts.push(f);
+        }
+        const fieldStr = parts.length > 0 ? parts.join(", ") : "(no fields)";
+        const descStr = op.description ? `  — ${op.description}` : "";
+        lines.push(`    ${opName.padEnd(nameW)}  ${fieldStr}${descStr}`);
+      }
+      lines.push("");
+      for (const opName of opNames) {
+        const op = ops[opName];
+        const steps = op.steps || [];
+        if (!steps.length) continue;
+        const primary = steps[0];
+        const fields = primary.fields || {};
+        const auto = primary.auto || {};
+        if (!Object.keys(fields).length && !Object.keys(auto).length) continue;
+        lines.push(`  ${opName}:`);
+        if (Object.keys(fields).length) {
+          const colW = Math.max(...Object.keys(fields).map((f) => f.length));
+          for (const [f, info] of Object.entries(fields)) {
+            const typ = info.type || "";
+            const notes = [];
+            if (info.key) notes.push("required, key");
+            else if (info.required) notes.push("required");
+            if (info.default) notes.push(`default: ${info.default}`);
+            const noteStr = notes.length ? `  ${notes.join(", ")}` : "";
+            lines.push(`    ${f.padEnd(colW)}  ${typ.padEnd(10)}${noteStr}`);
+          }
+        }
+        if (Object.keys(auto).length) {
+          const autoParts = Object.entries(auto).map(([f, info]) => `${f} (${info.source || ""})`);
+          lines.push(`    auto: ${autoParts.join(", ")}`);
+        }
+        for (const step of steps.slice(1)) {
+          const bind = step.bind || {};
+          if (Object.keys(bind).length) {
+            const boundParts = Object.entries(bind).map(([k, v]) => `${k}=${v}`);
+            lines.push(`    + ${step.table}: ${boundParts.join(", ")}`);
+          }
+        }
+        if (op.example) lines.push(`    example: ${op.example}`);
+        lines.push("");
+      }
+    }
+    const recovery = detail.recovery;
+    if (recovery) {
+      lines.push("  Recovery:");
+      lines.push(`    ${recovery.description}`);
+      if (recovery.check_message) lines.push(`    Check: ${JSON.stringify(recovery.check_message)}`);
+      lines.push("");
+    }
+  } else {
+    if (detail.primary_table) lines.push(`  Table: ${detail.primary_table}`);
+    if (detail.topic) lines.push(`  Topic: ${detail.topic}`);
+    const filterable = detail.filterable || [];
+    if (filterable.length) lines.push(`  Filter by: ${filterable.join(", ")}`);
+    const schema = detail.schema || {};
+    if (Object.keys(schema).length) {
+      lines.push("");
+      lines.push("  Schema:");
+      const colW = Math.max(...Object.keys(schema).map((f) => f.length));
+      for (const [f, info] of Object.entries(schema)) {
+        const typ = info.type || "";
+        const note = info.pk ? "  (primary key)" : "";
+        lines.push(`    ${f.padEnd(colW)}  ${typ}${note}`);
+      }
+    }
+    const subscribe = detail.subscribe || {};
+    if (Object.keys(subscribe).length) {
+      lines.push("");
+      lines.push("  Subscribe protocol:");
+      if (subscribe.message) lines.push(`    Message: ${JSON.stringify(subscribe.message)}`);
+      if (subscribe.response_types) lines.push(`    Response types: ${subscribe.response_types.join(", ")}`);
+      if (subscribe.recovery) lines.push(`    Recovery: ${subscribe.recovery}`);
+      const logSize = subscribe.change_log_size || subscribe.buffer_size;
+      if (logSize) {
+        const label = subscribe.buffer_size ? "buffer_size" : "change_log_size";
+        lines.push(`    ${label}: ${logSize.toLocaleString()}`);
+      }
+    }
+    const example = detail.example || {};
+    if (Object.keys(example).length) {
+      lines.push("");
+      lines.push("  Example:");
+      for (const cmd of Object.values(example)) lines.push(`    ${cmd}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 function _mkioPickClient() {
@@ -504,22 +633,41 @@ function _mkioPickClient() {
 async function _mkioServices(arg) {
   const client = _mkioPickClient();
   if (!client) return undefined;
-  if (arg === undefined) {
-    const seen = Array.from(client._seenServices).sort();
-    const rows = seen.map((s) => ({
-      service: s,
-      monitored: client._monitor
-        ? !client._monitor.services || client._monitor.services.has(s)
-        : false,
-    }));
+  const base = _mkioHttpBase(client);
+  if (arg === undefined || arg === "*") {
+    const resp = await fetch(`${base}/api/services`);
+    const services = await resp.json();
+    if (!services || services.length === 0) {
+      // eslint-disable-next-line no-console
+      console.log("No services available.");
+      return undefined;
+    }
+    const nameW = Math.max(7, ...services.map((s) => s.name.length));
+    const protoW = Math.max(8, ...services.map((s) => s.protocol.length));
+    const lines = [];
+    lines.push(`${"SERVICE".padEnd(nameW)}  ${"PROTOCOL".padEnd(protoW)}  DETAILS`);
+    lines.push(`${"-".repeat(nameW)}  ${"-".repeat(protoW)}  ${"-".repeat(30)}`);
+    for (const svc of services) {
+      const details = [];
+      if (svc.primary_table) details.push(`table=${svc.primary_table}`);
+      if (svc.tables) details.push(`tables=${svc.tables.join(",")}`);
+      if (svc.watch_tables) details.push(`watch=${svc.watch_tables.join(",")}`);
+      lines.push(`${svc.name.padEnd(nameW)}  ${svc.protocol.padEnd(protoW)}  ${details.join(", ")}`);
+    }
     // eslint-disable-next-line no-console
-    console.table(rows);
+    console.log(lines.join("\n"));
     return undefined;
   }
-  const base = _mkioHttpBase(client);
-  const url = arg === "*" ? `${base}/api/services` : `${base}/api/services/${encodeURIComponent(arg)}`;
-  const resp = await fetch(url);
-  return await resp.json();
+  const resp = await fetch(`${base}/api/services/${encodeURIComponent(arg)}`);
+  if (resp.status === 404) {
+    // eslint-disable-next-line no-console
+    console.warn(`Unknown service: ${arg}`);
+    return undefined;
+  }
+  const detail = await resp.json();
+  // eslint-disable-next-line no-console
+  console.log(_formatServiceDetail(detail));
+  return undefined;
 }
 
 function _mkioMonitor(arg) {
@@ -557,15 +705,24 @@ function _mkioMonitor(arg) {
   return undefined;
 }
 
+let _mkioConsoleSeq = 0;
+function _mkioConsoleId() {
+  const hex = Array.from(crypto.getRandomValues(new Uint8Array(4)),
+    (b) => b.toString(16).padStart(2, "0")).join("");
+  return `_mkio_${(++_mkioConsoleSeq).toString(36)}_${hex}`;
+}
+
 function _mkioSend(service, data, opts) {
   const client = _mkioPickClient();
   if (!client) return null;
-  return client.send(service, data, opts || {});
+  const o = { ...(opts || {}) };
+  if (!o.msgid) o.msgid = _mkioConsoleId();
+  return client.send(service, data, o);
 }
 
 class MkioSubscription {
-  constructor(service, client) {
-    this.service = service;
+  constructor(key, client) {
+    this.service = key;
     Object.defineProperty(this, "_client", { value: client, enumerable: false });
   }
   stop() {
@@ -577,14 +734,21 @@ function _mkioSubscribe(service, protocol, opts) {
   const client = _mkioPickClient();
   if (!client) return undefined;
   const o = { ...(opts || {}) };
+  if (!o.subid) o.subid = _mkioConsoleId();
   if (!o.onSnapshot) {
     o.onSnapshot = (rows) => console.log(`[${makeLocalTs()}] \u2190 ${service} snapshot`, rows);
+  }
+  if (!o.onDelta) {
+    o.onDelta = (changes) => console.log(`[${makeLocalTs()}] \u2190 ${service} delta`, changes);
   }
   if (!o.onUpdate) {
     o.onUpdate = (op, row) => console.log(`[${makeLocalTs()}] \u2190 ${service} update ${op}`, row);
   }
+  if (!o.onNack) {
+    o.onNack = (message) => console.warn(`[${makeLocalTs()}] \u2190 ${service} nack: ${message}`);
+  }
   client.subscribe(service, protocol, o);
-  return new MkioSubscription(service, client);
+  return new MkioSubscription(o.subid, client);
 }
 
 const mkio = {
@@ -602,8 +766,35 @@ const mkio = {
   send(service, data, opts) {
     return _mkioSend(service, data, opts);
   },
-  subscribe(service, protocol, opts) {
-    return _mkioSubscribe(service, protocol, opts);
+  subpub(service, topic, opts) {
+    if (topic === undefined || topic === null) {
+      // eslint-disable-next-line no-console
+      console.warn("mkio.subpub: topic is required");
+      return undefined;
+    }
+    return _mkioSubscribe(service, "subpub", { ...opts, topic });
+  },
+  stream(service, opts) {
+    const o = { ...(opts || {}) };
+    if (!o.ref) o.ref = makeRef();
+    return _mkioSubscribe(service, "stream", o);
+  },
+  query(service, opts) {
+    const o = { ...(opts || {}) };
+    if (o.snapshotOnly && o.updateOnly) {
+      // eslint-disable-next-line no-console
+      console.warn("mkio.query: snapshotOnly and updateOnly are mutually exclusive");
+      return undefined;
+    }
+    if (o.snapshotOnly) {
+      o.updates = false;
+      delete o.snapshotOnly;
+    }
+    if (o.updateOnly) {
+      o.snapshot = false;
+      delete o.updateOnly;
+    }
+    return _mkioSubscribe(service, "query", o);
   },
   instances() {
     return MkioClient.instances();

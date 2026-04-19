@@ -248,15 +248,23 @@ Once `/mkio.js` is loaded, a `mkio` object is available in DevTools with methods
 
 ```js
 mkio.help()                                // show help
-mkio.services()                            // list services this tab has talked to
-mkio.services("orders")                    // detail for one service (via /api/services)
+mkio.services()                            // list every service on the server
+mkio.services("orders")                    // detail for one service
 mkio.monitor()                             // log every frame to/from any service
 mkio.monitor("orders")                     // filter to one service (call again to add more)
+mkio.monitor({filter: e => e.direction === "in"})  // filter with a function
 mkio.monitor("off")                        // stop
 mkio.send("orders", {side:"Buy",...}, {op:"new"})
-mkio.subscribe("last_trade", "subpub", {topic:"AAPL"})
-mkio.subscribe("all_orders", "query", {filter:"status == 'pending'"})
+mkio.subpub("last_trade", "AAPL")
+mkio.subpub("last_trade", "AAPL", {fields:["bid","ask"], subid:"p1"})
+mkio.stream("audit_feed")                 // ref auto-generated
+mkio.stream("audit_feed", {ref:"...", filter:"qty > 100"})
+mkio.query("all_orders", {filter:"status == 'pending'"})
+mkio.query("all_orders", {snapshotOnly: true})
+mkio.query("all_orders", {updateOnly: true, fields:["id","status"]})
 ```
+
+All subscribe methods return a `MkioSubscription` with `.stop()`. Nack responses are logged to the console by default. Console commands auto-generate `subid` (subscriptions) and `msgid` (sends) with a `_mkio_` prefix so they never intercept messages meant for the application.
 
 `mkio.monitor(...)` only taps **this tab's** traffic. For traffic across all connected clients use the CLI's server-side `mkio monitor` instead.
 

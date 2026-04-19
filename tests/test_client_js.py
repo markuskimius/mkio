@@ -102,7 +102,8 @@ def test_js_client_console_dispatcher():
     """The mkio.<verb> console object exists with CLI-matching methods."""
     src = JS_CLIENT_PATH.read_text()
     assert "const mkio = {" in src
-    for method in ("services(name)", "monitor(arg)", "send(service, data, opts)", "subscribe(service, protocol, opts)"):
+    for method in ("services(name)", "monitor(arg)", "send(service, data, opts)",
+                   "subpub(service, topic, opts)", "stream(service, opts)", "query(service, opts)"):
         assert method in src, f"missing mkio method {method}"
     assert "window.mkio" in src
     assert "MKIO_HELP" in src
@@ -235,8 +236,239 @@ console.log(JSON.stringify({entries, seen, afterOffIsNull, dispatcherMethods}));
 
     # Dispatcher exposes CLI-matching verbs as methods
     assert out["dispatcherMethods"] == [
-        "help", "instances", "monitor", "send", "services", "subscribe",
+        "help", "instances", "monitor", "query", "send", "services", "stream", "subpub",
     ]
+
+
+def test_js_client_has_delta_dispatch():
+    """Verify _dispatch routes delta messages to onDelta."""
+    src = JS_CLIENT_PATH.read_text()
+    assert 'type === "delta"' in src
+    assert "sub.onDelta(data.changes)" in src
+
+
+def test_js_client_subscribe_stores_ondelta():
+    """Verify subscribe includes onDelta in the sub object."""
+    src = JS_CLIENT_PATH.read_text()
+    assert "onDelta: opts.onDelta" in src
+
+
+def test_js_client_monitor_filter():
+    """Verify monitor supports a filter function."""
+    src = JS_CLIENT_PATH.read_text()
+    assert "this._monitor.filter" in src
+
+
+def test_js_client_subpub_requires_topic():
+    """Verify mkio.subpub validates that topic is provided."""
+    src = JS_CLIENT_PATH.read_text()
+    assert "mkio.subpub: topic is required" in src
+
+
+def test_js_client_query_mutual_exclusion():
+    """Verify mkio.query rejects snapshotOnly + updateOnly together."""
+    src = JS_CLIENT_PATH.read_text()
+    assert "snapshotOnly and updateOnly are mutually exclusive" in src
+
+
+def test_js_client_stream_auto_ref():
+    """Verify mkio.stream auto-generates a ref if not provided."""
+    src = JS_CLIENT_PATH.read_text()
+    assert "if (!o.ref) o.ref = makeRef()" in src
+
+
+def test_js_client_default_nack_handler():
+    """Verify _mkioSubscribe sets a default onNack formatter."""
+    src = JS_CLIENT_PATH.read_text()
+    assert "nack:" in src
+    assert "console.warn" in src
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_js_client_subpub_stream_query_runtime():
+    """Run subpub/stream/query console methods under Node and verify behavior."""
+    script = r"""
+global.WebSocket = class {
+  constructor(url) { this.url = url; this.readyState = 1; this.binaryType = null; }
+  send(data) { FakeWS.sent.push(JSON.parse(data)); }
+  close() {}
+};
+global.WebSocket.OPEN = 1;
+const FakeWS = global.WebSocket;
+FakeWS.sent = [];
+
+const { MkioClient, mkio } = require(PATH);
+const c = new MkioClient("ws://localhost:8080/ws");
+c._ws = new WebSocket("ws://localhost:8080/ws");
+
+const results = {};
+
+// subpub without topic should warn and return undefined
+const noTopic = mkio.subpub("prices");
+results.subpubNoTopic = noTopic === undefined;
+
+// subpub with topic
+FakeWS.sent = [];
+const sub1 = mkio.subpub("prices", "AAPL", { fields: ["bid", "ask"] });
+results.subpubSent = FakeWS.sent[0];
+results.subpubHasStop = typeof sub1.stop === "function";
+
+// stream auto-generates ref
+FakeWS.sent = [];
+mkio.stream("trades");
+results.streamSent = FakeWS.sent[0];
+results.streamHasRef = typeof FakeWS.sent[0].ref === "string" && FakeWS.sent[0].ref.length > 0;
+
+// stream with explicit ref
+FakeWS.sent = [];
+mkio.stream("trades", { ref: "custom-ref" });
+results.streamExplicitRef = FakeWS.sent[0].ref;
+
+// query basic
+FakeWS.sent = [];
+mkio.query("orders", { filter: "status == 'open'" });
+results.querySent = FakeWS.sent[0];
+
+// query snapshotOnly
+FakeWS.sent = [];
+mkio.query("orders", { snapshotOnly: true });
+results.querySnapshotOnly = FakeWS.sent[0];
+
+// query updateOnly
+FakeWS.sent = [];
+mkio.query("orders", { updateOnly: true });
+results.queryUpdateOnly = FakeWS.sent[0];
+
+// query mutual exclusion
+const bad = mkio.query("orders", { snapshotOnly: true, updateOnly: true });
+results.queryMutualExclusion = bad === undefined;
+
+// delta dispatch
+let deltaReceived = null;
+c._subscriptions.set("feed", {
+  service: "feed", protocol: "query",
+  onSnapshot: () => {}, onDelta: (changes) => { deltaReceived = changes; },
+  onUpdate: () => {}, onNack: null, ref: null,
+});
+c._dispatch({ type: "delta", service: "feed", changes: [{ op: "insert", row: { id: 1 } }] });
+results.deltaReceived = deltaReceived;
+
+// send auto-generates msgid
+FakeWS.sent = [];
+mkio.send("orders", { id: 1 }, { op: "new" });
+results.sendMsgid = FakeWS.sent[0].msgid;
+results.sendHasMsgid = typeof FakeWS.sent[0].msgid === "string" && FakeWS.sent[0].msgid.startsWith("_mkio_");
+
+// send preserves explicit msgid
+FakeWS.sent = [];
+mkio.send("orders", { id: 2 }, { op: "new", msgid: "user-123" });
+results.sendExplicitMsgid = FakeWS.sent[0].msgid;
+
+// nack default handler (just verify it doesn't throw)
+FakeWS.sent = [];
+const nackSub = mkio.query("nack_test");
+// Find the subscription by its generated subid (keyed by subid, not service name)
+const nackSubId = nackSub.service;  // MkioSubscription.service holds the key (subid)
+const nackSubObj = c._subscriptions.get(nackSubId);
+if (nackSubObj && nackSubObj.onNack) {
+  nackSubObj.onNack("test rejection", {});
+  results.nackHandlerExists = true;
+} else {
+  results.nackHandlerExists = false;
+}
+
+console.log(JSON.stringify(results));
+""".replace("PATH", json.dumps(str(JS_CLIENT_PATH)))
+
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, check=True
+    )
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+
+    # subpub without topic returns undefined
+    assert out["subpubNoTopic"] is True
+
+    # subpub sends correct message with auto-generated subid
+    assert out["subpubSent"]["protocol"] == "subpub"
+    assert out["subpubSent"]["topic"] == "AAPL"
+    assert out["subpubSent"]["fields"] == ["bid", "ask"]
+    assert out["subpubSent"]["subid"].startswith("_mkio_")
+    assert out["subpubHasStop"] is True
+
+    # stream auto-generates ref and subid
+    assert out["streamSent"]["protocol"] == "stream"
+    assert out["streamHasRef"] is True
+    assert out["streamSent"]["subid"].startswith("_mkio_")
+
+    # stream with explicit ref
+    assert out["streamExplicitRef"] == "custom-ref"
+
+    # query with filter and auto-generated subid
+    assert out["querySent"]["protocol"] == "query"
+    assert out["querySent"]["filter"] == "status == 'open'"
+    assert out["querySent"]["subid"].startswith("_mkio_")
+
+    # query snapshotOnly sets updates=false
+    assert out["querySnapshotOnly"].get("updates") is False
+    assert "snapshot" not in out["querySnapshotOnly"] or out["querySnapshotOnly"].get("snapshot") is not False
+
+    # query updateOnly sets snapshot=false
+    assert out["queryUpdateOnly"].get("snapshot") is False
+    assert "updates" not in out["queryUpdateOnly"] or out["queryUpdateOnly"].get("updates") is not False
+
+    # query mutual exclusion
+    assert out["queryMutualExclusion"] is True
+
+    # delta dispatch
+    assert out["deltaReceived"] == [{"op": "insert", "row": {"id": 1}}]
+
+    # send auto-generates msgid with _mkio_ prefix
+    assert out["sendHasMsgid"] is True
+
+    # send preserves explicit msgid
+    assert out["sendExplicitMsgid"] == "user-123"
+
+    # nack default handler exists
+    assert out["nackHandlerExists"] is True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_js_client_monitor_filter_runtime():
+    """Verify monitor filter function works at runtime."""
+    script = r"""
+global.WebSocket = class {
+  constructor(url) { this.url = url; this.readyState = 1; this.binaryType = null; }
+  send() {}
+  close() {}
+};
+global.WebSocket.OPEN = 1;
+
+const { MkioClient } = require(PATH);
+const c = new MkioClient("ws://localhost:8080/ws");
+c._ws = new WebSocket("ws://localhost:8080/ws");
+
+const entries = [];
+c.monitor({
+  filter: (e) => e.direction === "in",
+  fn: (e) => entries.push({ dir: e.direction, svc: e.service }),
+});
+
+// outbound should be filtered out
+c.send("orders", { x: 1 }, { ref: "r1" });
+// inbound should pass through
+c._dispatch({ type: "result", ref: "r1", ok: true, service: "orders" });
+
+console.log(JSON.stringify({ count: entries.length, entries }));
+""".replace("PATH", json.dumps(str(JS_CLIENT_PATH)))
+
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, check=True
+    )
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+
+    assert out["count"] == 1
+    assert out["entries"][0]["dir"] == "in"
+    assert out["entries"][0]["svc"] == "orders"
 
 
 def test_js_client_no_external_deps():
