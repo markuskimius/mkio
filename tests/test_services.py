@@ -120,7 +120,7 @@ async def test_transaction_missing_field(txn_svc):
     })
     msgs = ws.get_messages()
     assert msgs[0]["type"] == "error"
-    assert "Missing field" in msgs[0]["message"]
+    assert "Missing required field" in msgs[0]["message"]
 
 
 async def test_transaction_result_cache(txn_svc):

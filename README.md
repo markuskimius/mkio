@@ -368,12 +368,15 @@ mkio query http://localhost:8080 all_orders --filter "status == 'pending'"
 mkio query http://localhost:8080 all_orders --fields symbol,qty --snapshotOnly
 ```
 
-### Monitor a service
+### Monitor traffic
 
-Tap into a service's inbound and outbound message flow in real time:
+Tap into inbound and outbound message flow in real time. Monitor a single service or all services at once:
 
 ```bash
-mkio monitor http://localhost:8080 last_trade
+mkio monitor http://localhost:8080                 # Monitor all services
+mkio monitor http://localhost:8080 orders          # Monitor one service
+mkio monitor http://localhost:8080 --filter "direction == 'in'"    # Inbound only
+mkio monitor http://localhost:8080 --filter "service == 'orders'"  # Filter by service
 ```
 
 ```
@@ -384,7 +387,27 @@ mkio monitor http://localhost:8080 last_trade
 { "type": "snapshot", "rows": [...] }
 ```
 
+The `--filter` flag accepts any expression from the [expression language](#expression-language), evaluated against each monitor envelope (`direction`, `service`, `message`).
+
 The monitor protocol is a native framework feature — any mkio application supports it.
+
+## Config Validation
+
+mkio validates your TOML config at load time and fails fast with clear error messages:
+
+- **Table references** — `primary_table`, `watch_tables`, and op `table` fields must reference tables defined in `[tables]`
+- **Column references** — op `fields`, `key`, `defaults`, `bind` columns, `filterable`, and subpub `topic` are checked against table schemas
+- **Protocol validation** — service `protocol` must be a known type (`transaction`, `subpub`, `stream`, `query`)
+- **Required fields** — missing `protocol`, `primary_table`, `topic`, `ops`, or `key` (for update/delete/upsert) are caught immediately
+- **Bind references** — forward references and out-of-bounds op indices in `$N.field` binds are rejected
+- **Typo detection** — unknown config keys produce warnings with "did you mean?" suggestions
+
+Runtime error messages include context to help debugging:
+
+- Unknown service/op errors list available options
+- Missing transaction fields show the op name and list provided fields
+- Expression errors list available fields
+- Requests to unknown services return `nack` (not generic errors), with the service name echoed back
 
 ## Schema Migration
 

@@ -52,13 +52,20 @@ class TransactionService(Service):
         if op_name is not None:
             ops = self._named_ops.get(op_name)
             if ops is None:
-                raise ValueError(f"Unknown op: {op_name!r}")
+                available = ", ".join(sorted(self._named_ops.keys()))
+                raise ValueError(
+                    f"Unknown op: {op_name!r}. Available ops: {available}"
+                )
             return ops
         if self._default_ops is not None:
             return self._default_ops
         if len(self._named_ops) == 1:
             return next(iter(self._named_ops.values()))
-        raise ValueError("Multiple ops defined — specify 'op' field")
+        available = ", ".join(sorted(self._named_ops.keys()))
+        raise ValueError(
+            f"Multiple ops defined — specify 'op' field. "
+            f"Available ops: {available}"
+        )
 
     async def on_message(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
         ref = msg.get("ref")
@@ -93,7 +100,14 @@ class TransactionService(Service):
             await ws.send_bytes(resp)
             await self.notify_monitors("out", resp)
         except KeyError as e:
-            resp = make_error(ref, f"Missing field: {e}", msgid=msgid)
+            op_label = msg.get("op", "default")
+            data_keys = ", ".join(sorted(data.keys())) if data else "(empty)"
+            resp = make_error(
+                ref,
+                f"Missing required field {e} in op '{op_label}'. "
+                f"Provided fields: {data_keys}",
+                msgid=msgid,
+            )
             await ws.send_bytes(resp)
             await self.notify_monitors("out", resp)
         except Exception as e:

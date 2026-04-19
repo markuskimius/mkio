@@ -298,3 +298,83 @@ async def test_multiple_monitors(client):
     await mon1.close()
     await mon2.close()
     await tx_ws.close()
+
+
+async def test_monitor_all_services(client):
+    """Monitor without service receives messages from all services."""
+    mon_ws = await client.ws_connect("/ws")
+    ack = await ws_send_recv(mon_ws, {"type": "monitor"})
+    assert ack["type"] == "monitor_ack"
+    assert "service" not in ack
+
+    # Send a transaction to add_order
+    tx_ws = await client.ws_connect("/ws")
+    await tx_ws.send_bytes(dumps({
+        "service": "add_order",
+        "ref": "tx1",
+        "data": {"id": "1", "symbol": "AAPL", "qty": 100},
+    }))
+    await tx_ws.receive()
+
+    # Monitor should see inbound + outbound for add_order
+    messages = []
+    for _ in range(2):
+        msg = await asyncio.wait_for(mon_ws.receive(), timeout=2.0)
+        messages.append(loads(msg.data))
+
+    assert all(m["service"] == "add_order" for m in messages)
+    directions = {m["direction"] for m in messages}
+    assert "in" in directions
+    assert "out" in directions
+
+    # Now subscribe to last_trade — monitor should see those too
+    sub_ws = await client.ws_connect("/ws")
+    await sub_ws.send_bytes(dumps({
+        "service": "last_trade",
+        "type": "subscribe",
+        "protocol": "subpub",
+        "topic": "1",
+    }))
+    await sub_ws.receive()
+
+    # Monitor should see inbound subscribe + outbound snapshot for last_trade
+    messages = []
+    for _ in range(2):
+        msg = await asyncio.wait_for(mon_ws.receive(), timeout=2.0)
+        messages.append(loads(msg.data))
+
+    assert all(m["service"] == "last_trade" for m in messages)
+
+    await mon_ws.close()
+    await tx_ws.close()
+    await sub_ws.close()
+
+
+async def test_monitor_all_plus_specific(client):
+    """Wildcard monitor and service-specific monitor both receive messages."""
+    mon_all = await client.ws_connect("/ws")
+    mon_svc = await client.ws_connect("/ws")
+
+    await ws_send_recv(mon_all, {"type": "monitor"})
+    await ws_send_recv(mon_svc, {"type": "monitor", "service": "add_order"})
+
+    # Send a transaction
+    tx_ws = await client.ws_connect("/ws")
+    await tx_ws.send_bytes(dumps({
+        "service": "add_order",
+        "ref": "tx1",
+        "data": {"id": "1", "symbol": "AAPL", "qty": 100},
+    }))
+    await tx_ws.receive()
+
+    # Both monitors should receive messages
+    for mon in (mon_all, mon_svc):
+        messages = []
+        for _ in range(2):
+            msg = await asyncio.wait_for(mon.receive(), timeout=2.0)
+            messages.append(loads(msg.data))
+        assert len(messages) == 2
+
+    await mon_all.close()
+    await mon_svc.close()
+    await tx_ws.close()

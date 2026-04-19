@@ -438,7 +438,12 @@ async def _on_startup(app: web.Application) -> None:
             mod = importlib.import_module(module_path)
             cls = getattr(mod, cls_name)
         else:
-            raise ValueError(f"Unknown protocol: {svc_type!r} for service '{svc_name}'")
+            from mkio.config import _VALID_PROTOCOLS
+            available = ", ".join(sorted(_VALID_PROTOCOLS))
+            raise ValueError(
+                f"Unknown protocol: {svc_type!r} for service '{svc_name}'. "
+                f"Valid protocols: {available}"
+            )
 
         svc = cls(config=svc_config, db=db, change_bus=bus, writer=writer)
         svc.name = svc_name
@@ -476,20 +481,24 @@ async def _notify_monitors(
     data: dict[str, Any] | bytes,
 ) -> None:
     """Send a monitor envelope to all monitors watching a service."""
-    monitors: set[web.WebSocketResponse] = app["monitors"].get(service_name, set())
-    if not monitors:
+    all_monitors = app["monitors"]
+    targets: set[web.WebSocketResponse] = set()
+    targets.update(all_monitors.get(service_name, set()))
+    targets.update(all_monitors.get("*", set()))
+    if not targets:
         return
     # Build the monitor envelope
     payload = data if isinstance(data, dict) else loads(data)
     envelope = dumps({"direction": direction, "service": service_name, "message": payload})
     dead = []
-    for mon_ws in monitors:
+    for mon_ws in targets:
         try:
             await mon_ws.send_bytes(envelope)
         except (ConnectionError, RuntimeError):
             dead.append(mon_ws)
     for d in dead:
-        monitors.discard(d)
+        all_monitors.get(service_name, set()).discard(d)
+        all_monitors.get("*", set()).discard(d)
 
 
 async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
@@ -525,18 +534,22 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
             msgid = msg.get("msgid")
             msg_type = msg.get("type", "")
 
-            # Handle monitor requests — no service required for "list"
+            # Handle monitor requests — omit service to monitor all
             if msg_type == "monitor":
-                target = service_name
-                if not target:
-                    await ws.send_bytes(make_error(ref, "Missing 'service' field", msgid=msgid))
-                    continue
-                if target not in services:
-                    await ws.send_bytes(make_error(ref, f"Unknown service: {target}", msgid=msgid))
+                target = service_name or "*"
+                if target != "*" and target not in services:
+                    available = ", ".join(sorted(services.keys()))
+                    await ws.send_bytes(make_error(
+                        ref,
+                        f"Unknown service: {target!r}. Available services: {available}",
+                        msgid=msgid,
+                    ))
                     continue
                 monitors[target].add(ws)
                 monitoring.add(target)
-                ack = {"type": "monitor_ack", "service": target}
+                ack: dict[str, Any] = {"type": "monitor_ack"}
+                if target != "*":
+                    ack["service"] = target
                 if ref:
                     ack["ref"] = ref
                 await ws.send_bytes(dumps(ack))
@@ -548,7 +561,15 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             svc = services.get(service_name)
             if svc is None:
-                await ws.send_bytes(make_error(ref, f"Unknown service: {service_name}", msgid=msgid))
+                available = ", ".join(sorted(services.keys()))
+                subid = msg.get("subid")
+                await ws.send_bytes(make_nack(
+                    service_name,
+                    f"Unknown service: {service_name!r}. Available services: {available}",
+                    ref=ref,
+                    msgid=msgid,
+                    subid=subid,
+                ))
                 continue
 
             # Notify monitors of inbound message
@@ -558,23 +579,27 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                 req_protocol = msg.get("protocol")
                 subid = msg.get("subid")
                 if req_protocol is None:
-                    await ws.send_bytes(make_nack(
+                    resp = make_nack(
                         service_name,
                         "Missing 'protocol' field in subscribe message",
                         ref=ref,
                         msgid=msgid,
                         subid=subid,
-                    ))
+                    )
+                    await ws.send_bytes(resp)
+                    await _notify_monitors(request.app, service_name, "out", resp)
                     continue
                 actual = svc.config.get("protocol", "")
                 if req_protocol != actual:
-                    await ws.send_bytes(make_nack(
+                    resp = make_nack(
                         service_name,
                         f"Protocol mismatch: service '{service_name}' is {actual!r}, not {req_protocol!r}",
                         ref=ref,
                         msgid=msgid,
                         subid=subid,
-                    ))
+                    )
+                    await ws.send_bytes(resp)
+                    await _notify_monitors(request.app, service_name, "out", resp)
                     continue
                 await svc.on_subscribe(ws, msg)
                 subscribed[service_name] = svc

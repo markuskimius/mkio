@@ -483,3 +483,111 @@ async def test_subscribe_with_filter_stream(client):
     update = received[1]
     assert update["type"] == "update"
     assert update["row"]["event"] == "order_placed"
+
+
+# ---- CLI argument validation tests -------------------------------------------
+
+
+def test_unknown_command(capsys):
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "sned"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "Unknown command" in result.stdout
+    assert "send" in result.stdout  # did-you-mean suggestion
+
+
+def test_serve_extra_args(capsys):
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "serve", "a.toml", "b.toml"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "at most 1 argument" in result.stdout
+
+
+def test_monitor_extra_args():
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "monitor", "url", "svc", "extra"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "unexpected argument" in result.stdout
+
+
+def test_services_extra_args():
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "services", "url", "svc", "extra"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "1–2 arguments" in result.stdout
+
+
+def test_send_extra_data_args():
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "send", "url", "svc", "data1", "data2"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "expected 1 data argument" in result.stdout
+
+
+def test_subpub_extra_positional():
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "subpub", "url", "svc", "topic", "extra"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "unexpected argument" in result.stdout
+
+
+def test_stream_unknown_flag():
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "stream", "url", "svc", "--bogus"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "Unknown option" in result.stdout
+
+
+def test_query_mutually_exclusive_flags():
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "query", "url", "svc", "--snapshotOnly", "--updateOnly"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "mutually exclusive" in result.stdout
+
+
+def test_load_messages_invalid_json(capsys):
+    from mkio.__main__ import _load_messages
+    with pytest.raises(SystemExit):
+        _load_messages("{invalid json}")
+    captured = capsys.readouterr()
+    assert "invalid inline JSON" in captured.out
+
+
+def test_load_messages_missing_file(capsys):
+    from mkio.__main__ import _load_messages
+    with pytest.raises(SystemExit):
+        _load_messages("/nonexistent/file.json")
+    captured = capsys.readouterr()
+    assert "file not found" in captured.out
+
+
+def test_load_messages_missing_csv(capsys):
+    from mkio.__main__ import _load_messages
+    with pytest.raises(SystemExit):
+        _load_messages("/nonexistent/file.csv")
+    captured = capsys.readouterr()
+    assert "file not found" in captured.out

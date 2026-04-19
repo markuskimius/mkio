@@ -160,7 +160,8 @@ async def test_unknown_service_error(client):
         "ref": "ref1",
         "data": {},
     })
-    assert result["type"] == "error"
+    assert result["type"] == "nack"
+    assert result["service"] == "nonexistent"
     assert "Unknown service" in result["message"]
     await ws.close()
 

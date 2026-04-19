@@ -14,11 +14,17 @@ from mkio._json import loads
 from mkio._ref import local_ts
 
 
+_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query")
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         _usage()
 
     cmd = sys.argv[1]
+    if cmd.startswith("-"):
+        print(f"Error: expected a command, got {cmd!r}")
+        _usage()
     if cmd == "serve":
         _cmd_serve()
     elif cmd == "services":
@@ -34,6 +40,10 @@ def main() -> None:
     elif cmd == "query":
         _cmd_query()
     else:
+        import difflib
+        close = difflib.get_close_matches(cmd, _VALID_COMMANDS, n=1, cutoff=0.5)
+        hint = f" Did you mean {close[0]!r}?" if close else ""
+        print(f"Unknown command: {cmd!r}.{hint}")
         _usage()
 
 
@@ -41,7 +51,8 @@ def _usage() -> None:
     print("Usage:")
     print("  mkio serve [mkio.toml]           Start a server (default: mkio.toml)")
     print("  mkio services <url> [service]    List services, or show detail for one")
-    print("  mkio monitor <url> <service>     Monitor a service's messages")
+    print("  mkio monitor <url> [service] [--filter <expr>]")
+    print("                                   Monitor messages (all services or one)")
     print("  mkio send <url> <service> [--op <name>] <data>")
     print("                                   Send transaction(s) from JSON/CSV/inline")
     print("  mkio subpub <url> <service> <topic> [--subid <id>] [--fields <f1,f2,...>]")
@@ -54,7 +65,14 @@ def _usage() -> None:
 
 
 def _cmd_serve() -> None:
-    config_path = sys.argv[2] if len(sys.argv) >= 3 else "mkio.toml"
+    usage = "mkio serve [config.toml]"
+    args = sys.argv[2:]
+    _check_unknown_flags(args, set(), usage)
+    if len(args) > 1:
+        print(f"Error: 'serve' takes at most 1 argument (config path), got {len(args)}")
+        print(f"Usage: {usage}")
+        sys.exit(1)
+    config_path = args[0] if args else "mkio.toml"
     from pathlib import Path
     if not Path(config_path).exists():
         print(f"Config file not found: {config_path}")
@@ -64,13 +82,20 @@ def _cmd_serve() -> None:
 
 
 def _cmd_services() -> None:
-    if len(sys.argv) < 3:
-        print("Usage: mkio services <url> [service]")
+    usage = "mkio services <url> [service]"
+    args = sys.argv[2:]
+    _check_unknown_flags(args, set(), usage)
+    if len(args) < 1:
+        print(f"Usage: {usage}")
         print("  e.g. mkio services http://localhost:8080")
         print("  e.g. mkio services http://localhost:8080 orders")
         sys.exit(1)
-    url = sys.argv[2].rstrip("/")
-    service_name = sys.argv[3] if len(sys.argv) >= 4 else None
+    if len(args) > 2:
+        print(f"Error: 'services' takes 1–2 arguments (url [service]), got {len(args)}")
+        print(f"Usage: {usage}")
+        sys.exit(1)
+    url = args[0].rstrip("/")
+    service_name = args[1] if len(args) >= 2 else None
     if service_name:
         asyncio.run(_fetch_service_detail(url, service_name))
     else:
@@ -300,22 +325,43 @@ def _print_listener_detail(detail: dict[str, Any]) -> None:
 
 
 def _cmd_monitor() -> None:
-    if len(sys.argv) < 4:
-        print("Usage: mkio monitor <url> <service>")
-        print("  e.g. mkio monitor ws://localhost:8080 last_trade")
+    usage = "mkio monitor <url> [service] [--filter <expr>]"
+    args = sys.argv[2:]
+    if len(args) < 1:
+        print(f"Usage: {usage}")
+        print("  e.g. mkio monitor ws://localhost:8080")
+        print("  e.g. mkio monitor ws://localhost:8080 orders")
+        print("  e.g. mkio monitor ws://localhost:8080 --filter \"direction == 'in'\"")
         sys.exit(1)
-    _check_unknown_flags(sys.argv[2:], set(), "mkio monitor <url> <service>")
-    url = sys.argv[2].rstrip("/")
-    service = sys.argv[3]
+    _check_unknown_flags(args, {"--filter"}, usage)
+    filter_expr = _extract_flag(args, "--filter")
+    _check_extra_positional(args[2:] if len(args) > 2 else [], usage)
+    url = args[0].rstrip("/")
+    service = args[1] if len(args) >= 2 else None
     ws_url = _normalize_ws_url(url)
 
+    filter_fn = None
+    if filter_expr:
+        from mkio._expr import compile_filter
+        try:
+            filter_fn = compile_filter(filter_expr)
+        except Exception as e:
+            print(f"Error: invalid filter expression: {e}")
+            sys.exit(1)
+
     try:
-        asyncio.run(_monitor_service(ws_url, service))
+        asyncio.run(_monitor_service(ws_url, service, filter_fn))
     except KeyboardInterrupt:
         print("\nMonitor stopped.")
+    except Exception as e:
+        _connection_error(ws_url, e)
 
 
-async def _monitor_service(ws_url: str, service: str) -> None:
+async def _monitor_service(
+    ws_url: str,
+    service: str | None,
+    filter_fn: Any = None,
+) -> None:
     import aiohttp
 
     try:
@@ -323,10 +369,10 @@ async def _monitor_service(ws_url: str, service: str) -> None:
             async with session.ws_connect(ws_url) as ws:
                 # Send monitor request
                 from mkio._json import dumps
-                await ws.send_bytes(dumps({
-                    "type": "monitor",
-                    "service": service,
-                }))
+                monitor_msg: dict[str, Any] = {"type": "monitor"}
+                if service:
+                    monitor_msg["service"] = service
+                await ws.send_bytes(dumps(monitor_msg))
 
                 # Wait for ack
                 ack_msg = await ws.receive()
@@ -335,14 +381,23 @@ async def _monitor_service(ws_url: str, service: str) -> None:
                     print(f"Error: {ack.get('message', 'Unknown error')}")
                     sys.exit(1)
 
-                print(f"Monitoring service: {service}")
+                label = f"service: {service}" if service else "all services"
+                print(f"Monitoring {label}")
                 print(f"Connected to: {ws_url}")
+                if filter_fn:
+                    print(f"Filter active")
                 print("---")
 
                 # Stream messages
                 async for msg in ws:
                     if msg.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
                         data = loads(msg.data)
+                        if filter_fn:
+                            try:
+                                if not filter_fn(data):
+                                    continue
+                            except Exception:
+                                pass
                         _print_monitor_message(data)
                     elif msg.type == aiohttp.WSMsgType.ERROR:
                         print(f"WebSocket error: {ws.exception()}")
@@ -384,9 +439,10 @@ def _print_monitor_message(data: dict[str, Any]) -> None:
 # ---- send command -----------------------------------------------------------
 
 def _cmd_send() -> None:
+    usage = "mkio send <url> <service> [--op <name>] <data>"
     args = sys.argv[2:]
     if len(args) < 3:
-        print("Usage: mkio send <url> <service> [--op <name>] <data>")
+        print(f"Usage: {usage}")
         print("  <data> can be inline JSON, a .json file, or a .csv file")
         sys.exit(1)
 
@@ -394,7 +450,7 @@ def _cmd_send() -> None:
     service = args[1]
     rest = args[2:]
 
-    _check_unknown_flags(rest, {"--op"}, "mkio send <url> <service> [--op <name>] <data>")
+    _check_unknown_flags(rest, {"--op"}, usage)
 
     op_name = None
     if "--op" in rest:
@@ -407,6 +463,12 @@ def _cmd_send() -> None:
 
     if not rest:
         print("Error: no data argument provided")
+        print(f"Usage: {usage}")
+        sys.exit(1)
+
+    if len(rest) > 1:
+        print(f"Error: expected 1 data argument, got {len(rest)}: {rest}")
+        print(f"Usage: {usage}")
         sys.exit(1)
 
     data_arg = rest[0]
@@ -435,19 +497,38 @@ def _load_messages(data_arg: str) -> list[dict[str, Any]]:
     ``data.`` prefixes remain backwards-compatible.
     """
     if data_arg.endswith(".json"):
-        with open(data_arg) as f:
-            parsed = json.load(f)
+        from pathlib import Path
+        if not Path(data_arg).exists():
+            print(f"Error: file not found: {data_arg}")
+            sys.exit(1)
+        try:
+            with open(data_arg) as f:
+                parsed = json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"Error: invalid JSON in {data_arg}: {e}")
+            sys.exit(1)
         items = parsed if isinstance(parsed, list) else [parsed]
         return [_structure_json_msg(m) for m in items]
     elif data_arg.endswith(".csv"):
+        from pathlib import Path
+        if not Path(data_arg).exists():
+            print(f"Error: file not found: {data_arg}")
+            sys.exit(1)
         with open(data_arg) as f:
             reader = csv.DictReader(f)
             rows = []
             for raw_row in reader:
                 rows.append(_structure_csv_row(raw_row))
+            if not rows:
+                print(f"Warning: CSV file {data_arg} has no data rows")
             return rows
     else:
-        parsed = json.loads(data_arg)
+        try:
+            parsed = json.loads(data_arg)
+        except json.JSONDecodeError as e:
+            print(f"Error: invalid inline JSON: {e}")
+            print("  Data must be inline JSON, a .json file, or a .csv file")
+            sys.exit(1)
         items = parsed if isinstance(parsed, list) else [parsed]
         return [_structure_json_msg(m) for m in items]
 
@@ -559,6 +640,7 @@ def _cmd_subpub() -> None:
     _check_unknown_flags(rest, {"--fields", "--subid"}, usage)
     fields = _extract_fields(rest)
     subid = _extract_flag(rest, "--subid")
+    _check_extra_positional(rest, usage)
     ws_url = _normalize_ws_url(url)
 
     try:
@@ -585,6 +667,7 @@ def _cmd_stream() -> None:
         from mkio._ref import next_ref
         ref = next_ref()
     subid = _extract_flag(rest, "--subid")
+    _check_extra_positional(rest, usage)
     ws_url = _normalize_ws_url(url)
 
     try:
@@ -608,6 +691,7 @@ def _cmd_query() -> None:
     fields = _extract_fields(rest)
     subid = _extract_flag(rest, "--subid")
     snapshot, updates = _parse_mode_flags(rest)
+    _check_extra_positional(rest, usage)
     ws_url = _normalize_ws_url(url)
 
     try:
@@ -716,12 +800,38 @@ def _check_unknown_flags(args: list[str], known: set[str], usage: str) -> None:
     """Error and exit if args contain any unrecognised --flags."""
     for arg in args:
         if arg.startswith("--") and arg not in known:
-            print(f"Unknown option: {arg}")
+            if known:
+                import difflib
+                close = difflib.get_close_matches(arg, known, n=1, cutoff=0.5)
+                hint = f" Did you mean {close[0]!r}?" if close else ""
+                valid = ", ".join(sorted(known))
+                print(f"Unknown option: {arg}.{hint}")
+                print(f"Valid options: {valid}")
+            else:
+                print(f"Unknown option: {arg} (this command takes no options)")
             print(f"Usage: {usage}")
             sys.exit(1)
 
 
+def _check_extra_positional(args: list[str], usage: str) -> None:
+    """Error and exit if there are leftover positional args after flag extraction."""
+    extra = [a for a in args if not a.startswith("--")]
+    if extra:
+        print(f"Error: unexpected argument(s): {' '.join(extra)}")
+        print(f"Usage: {usage}")
+        sys.exit(1)
+
+
 # ---- helpers ----------------------------------------------------------------
+
+def _connection_error(ws_url: str, exc: Exception) -> None:
+    """Print a helpful connection error and exit."""
+    base_url = ws_url.rsplit("/ws", 1)[0]
+    print(f"Error: could not connect to {base_url}")
+    print(f"  {type(exc).__name__}: {exc}")
+    print("  Is the mkio server running?")
+    sys.exit(1)
+
 
 def _normalize_ws_url(url: str) -> str:
     """Normalize a URL to ws:// and append /ws path."""

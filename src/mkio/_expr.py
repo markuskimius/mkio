@@ -357,7 +357,10 @@ def evaluate(node: Node, row: dict[str, Any]) -> Any:
         try:
             return row[node.name]
         except KeyError:
-            raise ExprError(f"Unknown field: {node.name}")
+            available = ", ".join(sorted(row.keys()))
+            raise ExprError(
+                f"Unknown field: {node.name!r}. Available fields: {available}"
+            )
 
     if isinstance(node, UnaryOp):
         if node.op == "NOT":

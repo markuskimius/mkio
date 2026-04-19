@@ -7,11 +7,24 @@ from typing import Any
 from mkio._json import dumps, loads
 
 
+_VALID_MSG_TYPES = frozenset({
+    "subscribe", "unsubscribe", "monitor", "check", "transaction", "",
+})
+
+
 def parse_message(data: bytes | str) -> dict[str, Any]:
     """Parse and validate a WebSocket message envelope."""
     msg = loads(data)
     if not isinstance(msg, dict):
-        raise ValueError("Message must be a JSON object")
+        raise ValueError(
+            f"Message must be a JSON object, got {type(msg).__name__}"
+        )
+    msg_type = msg.get("type", "")
+    if msg_type and msg_type not in _VALID_MSG_TYPES:
+        raise ValueError(
+            f"Unknown message type: {msg_type!r}. "
+            f"Valid types: subscribe, unsubscribe, monitor, check"
+        )
     return msg
 
 

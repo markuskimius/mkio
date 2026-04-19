@@ -133,3 +133,245 @@ def test_publish_compiled():
     assert callable(svc["_compiled_formatter"])
     result = svc["_compiled_formatter"]({"qty": 5})
     assert result == {"double_qty": 10}
+
+
+# ---- Validation tests --------------------------------------------------------
+
+
+def test_missing_protocol():
+    with pytest.raises(ValueError, match="missing required 'protocol'"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+            "services": {"svc": {"primary_table": "t"}},
+        })
+
+
+def test_invalid_protocol():
+    with pytest.raises(ValueError, match="unknown protocol 'streem'"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+            "services": {"svc": {"protocol": "streem", "primary_table": "t"}},
+        })
+
+
+def test_missing_primary_table():
+    with pytest.raises(ValueError, match="missing required 'primary_table'"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+            "services": {"svc": {"protocol": "subpub", "topic": "id"}},
+        })
+
+
+def test_missing_topic():
+    with pytest.raises(ValueError, match="missing required 'topic'"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+            "services": {"svc": {"protocol": "subpub", "primary_table": "t"}},
+        })
+
+
+def test_missing_ops():
+    with pytest.raises(ValueError, match="missing 'ops'"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+            "services": {"svc": {"protocol": "transaction"}},
+        })
+
+
+def test_nonexistent_primary_table():
+    with pytest.raises(ValueError, match="primary_table 'bogus'.*not found"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+            "services": {
+                "svc": {"protocol": "subpub", "primary_table": "bogus", "topic": "id"},
+            },
+        })
+
+
+def test_nonexistent_watch_table():
+    with pytest.raises(ValueError, match="watch_tables entry 'bogus'.*not found"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+            "services": {
+                "svc": {
+                    "protocol": "query",
+                    "primary_table": "t",
+                    "watch_tables": ["t", "bogus"],
+                },
+            },
+        })
+
+
+def test_nonexistent_op_table():
+    with pytest.raises(ValueError, match="op references table 'bogus'.*not found"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+            "services": {
+                "svc": {
+                    "protocol": "transaction",
+                    "ops": [{"table": "bogus", "op_type": "insert", "fields": ["id"]}],
+                },
+            },
+        })
+
+
+def test_invalid_op_type():
+    with pytest.raises(ValueError, match="unknown op_type 'inset'"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+            "services": {
+                "svc": {
+                    "protocol": "transaction",
+                    "ops": [{"table": "t", "op_type": "inset", "fields": ["id"]}],
+                },
+            },
+        })
+
+
+def test_nonexistent_field_in_op():
+    with pytest.raises(ValueError, match="field 'bogus' not found in table 't'"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+            "services": {
+                "svc": {
+                    "protocol": "transaction",
+                    "ops": [{"table": "t", "op_type": "insert", "fields": ["bogus"]}],
+                },
+            },
+        })
+
+
+def test_nonexistent_key_field_in_op():
+    with pytest.raises(ValueError, match="key field 'bogus' not found"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY", "name": "TEXT"}}},
+            "services": {
+                "svc": {
+                    "protocol": "transaction",
+                    "ops": [{"table": "t", "op_type": "update", "key": ["bogus"], "fields": ["name"]}],
+                },
+            },
+        })
+
+
+def test_topic_field_not_in_table():
+    with pytest.raises(ValueError, match="topic field 'bogus'.*not found in table"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+            "services": {
+                "svc": {"protocol": "subpub", "primary_table": "t", "topic": "bogus"},
+            },
+        })
+
+
+def test_topic_field_skipped_with_sql():
+    config = load_config({
+        "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+        "services": {
+            "svc": {
+                "protocol": "subpub",
+                "primary_table": "t",
+                "topic": "computed",
+                "sql": "SELECT id as computed FROM t",
+            },
+        },
+    })
+    assert config["services"]["svc"]["topic"] == "computed"
+
+
+def test_bind_ref_forward_reference():
+    with pytest.raises(ValueError, match="bind reference.*refers to op index 1.*only reference earlier"):
+        load_config({
+            "tables": {
+                "a": {"columns": {"id": "INTEGER PRIMARY KEY", "val": "TEXT"}},
+                "b": {"columns": {"id": "INTEGER PRIMARY KEY", "a_id": "INTEGER"}},
+            },
+            "services": {
+                "svc": {
+                    "protocol": "transaction",
+                    "ops": [
+                        {"table": "a", "op_type": "insert", "fields": ["val"], "bind": {"id": "$1.id"}},
+                        {"table": "b", "op_type": "insert", "fields": ["a_id"]},
+                    ],
+                },
+            },
+        })
+
+
+def test_bind_ref_out_of_bounds():
+    with pytest.raises(ValueError, match="bind reference.*refers to op index 5.*only 1 ops"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "INTEGER PRIMARY KEY", "ref_id": "INTEGER"}}},
+            "services": {
+                "svc": {
+                    "protocol": "transaction",
+                    "ops": [
+                        {"table": "t", "op_type": "insert", "fields": ["id"], "bind": {"ref_id": "$5.id"}},
+                    ],
+                },
+            },
+        })
+
+
+def test_update_without_key():
+    with pytest.raises(ValueError, match="op_type 'update' requires a 'key'"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY", "name": "TEXT"}}},
+            "services": {
+                "svc": {
+                    "protocol": "transaction",
+                    "ops": [{"table": "t", "op_type": "update", "fields": ["name"]}],
+                },
+            },
+        })
+
+
+def test_unknown_config_key_warns(caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="mkio.config"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+            "services": {
+                "svc": {
+                    "protocol": "subpub",
+                    "primary_table": "t",
+                    "topic": "id",
+                    "filerable": ["id"],
+                },
+            },
+        })
+    assert any("filerable" in r.message for r in caplog.records)
+
+
+def test_unknown_top_level_key_warns(caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="mkio.config"):
+        load_config({"tbles": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}}})
+    assert any("tbles" in r.message for r in caplog.records)
+
+
+def test_defaults_column_not_in_table():
+    with pytest.raises(ValueError, match="defaults column 'bogus'.*not found"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+            "services": {
+                "svc": {
+                    "protocol": "transaction",
+                    "ops": [{"table": "t", "op_type": "insert", "fields": ["id"], "defaults": {"bogus": "x"}}],
+                },
+            },
+        })
+
+
+def test_filterable_shows_available_columns():
+    with pytest.raises(ValueError, match="Available columns:.*id"):
+        load_config({
+            "tables": {"orders": {"columns": {"id": "TEXT PRIMARY KEY", "qty": "INTEGER"}}},
+            "services": {
+                "live": {
+                    "protocol": "query",
+                    "primary_table": "orders",
+                    "filterable": ["bogus"],
+                }
+            },
+        })
