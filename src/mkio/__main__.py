@@ -44,11 +44,11 @@ def _usage() -> None:
     print("  mkio monitor <url> <service>     Monitor a service's messages")
     print("  mkio send <url> <service> [--op <name>] <data>")
     print("                                   Send transaction(s) from JSON/CSV/inline")
-    print("  mkio subpub <url> <service> --topic <key> [--fields <f1,f2,...>] [--subid <id>]")
+    print("  mkio subpub <url> <service> --topic <key> [--subid <id>] [--fields <f1,f2,...>]")
     print("                                   Subscribe to a subpub service")
-    print("  mkio stream <url> <service> [--filter <expr>] [--fields <f1,f2,...>] [--subid <id>] [--ref <ref>]")
+    print("  mkio stream <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--ref <ref>]")
     print("                                   Subscribe to a stream service")
-    print("  mkio query <url> <service> [--filter <expr>] [--fields <f1,f2,...>] [--subid <id>] [--snapshotOnly] [--updateOnly]")
+    print("  mkio query <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--snapshotOnly] [--updateOnly]")
     print("                                   Subscribe to a query service")
     sys.exit(1)
 
@@ -547,7 +547,7 @@ async def _send_messages(
 
 def _cmd_subpub() -> None:
     args = sys.argv[2:]
-    usage = "mkio subpub <url> <service> --topic <key> [--fields <f1,f2,...>] [--subid <id>]"
+    usage = "mkio subpub <url> <service> --topic <key> [--subid <id>] [--fields <f1,f2,...>]"
     if len(args) < 2:
         print(f"Usage: {usage}")
         sys.exit(1)
@@ -572,7 +572,7 @@ def _cmd_subpub() -> None:
 
 def _cmd_stream() -> None:
     args = sys.argv[2:]
-    usage = "mkio stream <url> <service> [--filter <expr>] [--fields <f1,f2,...>] [--subid <id>] [--ref <ref>]"
+    usage = "mkio stream <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--ref <ref>]"
     if len(args) < 2:
         print(f"Usage: {usage}")
         sys.exit(1)
@@ -598,7 +598,7 @@ def _cmd_stream() -> None:
 
 def _cmd_query() -> None:
     args = sys.argv[2:]
-    usage = "mkio query <url> <service> [--filter <expr>] [--fields <f1,f2,...>] [--subid <id>] [--snapshotOnly] [--updateOnly]"
+    usage = "mkio query <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--snapshotOnly] [--updateOnly]"
     if len(args) < 2:
         print(f"Usage: {usage}")
         sys.exit(1)
