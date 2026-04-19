@@ -21,6 +21,7 @@ class StreamSubscriber:
     ws: WebSocketResponse
     filter_fn: Callable[[dict[str, Any]], bool] | None = None
     formatter: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    subid: str | None = None
 
 
 class StreamService(Service):
@@ -83,12 +84,13 @@ class StreamService(Service):
     async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
         client_ref = msg.get("ref")
         filter_expr = msg.get("filter")
+        subid = msg.get("subid")
 
         filter_fn = None
         if filter_expr and self._filterable:
             filter_fn = compile_filter(filter_expr)
 
-        sub = StreamSubscriber(ws=ws, filter_fn=filter_fn, formatter=self._formatter)
+        sub = StreamSubscriber(ws=ws, filter_fn=filter_fn, formatter=self._formatter, subid=subid)
 
         rows_to_send: list[dict[str, Any]] = []
 
@@ -119,7 +121,7 @@ class StreamService(Service):
                 rows_to_send.append(out_row)
 
         latest_ref = self._buffer[-1][0] if self._buffer else ""
-        resp = make_snapshot(latest_ref, self.name, rows_to_send)
+        resp = make_snapshot(latest_ref, self.name, rows_to_send, subid=sub.subid)
         await ws.send_bytes(resp)
         await self.notify_monitors("out", resp)
         self._subscribers.append(sub)
@@ -154,7 +156,7 @@ class StreamService(Service):
                 if sub.filter_fn and not sub.filter_fn(out_row):
                     continue
                 try:
-                    msg_bytes = make_update(self.name, ref=event.ref, op=event.op, row=out_row)
+                    msg_bytes = make_update(self.name, ref=event.ref, op=event.op, row=out_row, subid=sub.subid)
                     await sub.ws.send_bytes(msg_bytes)
                     if not notified_monitor:
                         await self.notify_monitors("out", msg_bytes)

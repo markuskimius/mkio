@@ -43,7 +43,7 @@ result = await client.send("orders", {"side": "Buy", "symbol": "AAPL", "qty": 10
 - `msgid="..."` — optional correlation ID, echoed on result/error
 - Returns the full result dict: `{"type": "result", "ok": True, "ref": "...", "rows": [...]}`
 
-### subscribe(service, filter=None, ref=None) -> AsyncIterator[dict]
+### subscribe(service, filter=None, ref=None, subid=None) -> AsyncIterator[dict]
 
 Subscribe and yield messages (snapshot, delta, update).
 
@@ -57,6 +57,7 @@ async for msg in client.subscribe("all_orders", filter="status == 'pending'"):
 
 - `filter` — expression string (only for services with `filterable` fields)
 - `ref` — pass the last received `ref` to resume from that point (delta recovery)
+- `subid` — optional string echoed on every response for this subscription (for multiplexing)
 - The client tracks `ref` internally — on auto-reconnect, it re-subscribes with the last seen ref
 
 ### check(service, ref) -> dict

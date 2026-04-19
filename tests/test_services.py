@@ -809,3 +809,178 @@ async def test_mkio_ref_stored_in_db(txn_svc, db):
     # Verify _mkio_ref is in the database
     rows = await db.read("SELECT * FROM orders WHERE id = '1'")
     assert rows[0].get("_mkio_ref", "") != ""
+
+
+# ---- Subscription ID (subid) ------------------------------------------------
+
+async def test_subpub_subid_on_snapshot(subpub_svc):
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "subid": "my-sub-1"})
+    msgs = ws.get_messages()
+    assert msgs[0]["type"] == "snapshot"
+    assert msgs[0]["subid"] == "my-sub-1"
+
+
+async def test_subpub_subid_on_delta(subpub_svc, bus):
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
+    snapshot_ref = ws.get_messages()[0]["ref"]
+
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "3", "symbol": "GOOG", "qty": 200, "status": "new"},
+        "20260404 00:00:00.100000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    ws2 = MockWebSocket()
+    await subpub_svc.on_subscribe(ws2, {
+        "type": "subscribe",
+        "ref": snapshot_ref,
+        "subid": "delta-sub",
+    })
+    msgs = ws2.get_messages()
+    assert msgs[0]["type"] in ("delta", "snapshot")
+    assert msgs[0]["subid"] == "delta-sub"
+
+
+async def test_subpub_subid_on_live_update(subpub_svc, bus):
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "subid": "live-sub"})
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "5", "symbol": "AMZN", "qty": 10, "status": "pending"},
+        "20260404 00:00:00.200000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "update"
+    assert msgs[0]["subid"] == "live-sub"
+
+
+async def test_subpub_no_subid_when_omitted(subpub_svc):
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
+    msgs = ws.get_messages()
+    assert "subid" not in msgs[0]
+
+
+async def test_stream_subid_on_snapshot(stream_svc):
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "subid": "stream-1"})
+    msgs = ws.get_messages()
+    assert msgs[0]["type"] == "snapshot"
+    assert msgs[0]["subid"] == "stream-1"
+
+
+async def test_stream_subid_on_live_update(stream_svc, bus):
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "subid": "stream-live"})
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "audit_log", "insert",
+        {"id": 10, "event": "subid_test", "order_id": "42"},
+        "20260404 00:00:10.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "update"
+    assert msgs[0]["subid"] == "stream-live"
+
+
+async def test_stream_no_subid_when_omitted(stream_svc):
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe"})
+    msgs = ws.get_messages()
+    assert "subid" not in msgs[0]
+
+
+async def test_query_subid_on_snapshot(query_svc):
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe", "subid": "query-1"})
+    msgs = ws.get_messages()
+    assert msgs[0]["type"] == "snapshot"
+    assert msgs[0]["subid"] == "query-1"
+
+
+async def test_query_subid_on_delta(query_svc, bus):
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
+    snapshot_ref = ws.get_messages()[0]["ref"]
+
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "10", "symbol": "NFLX", "qty": 5, "status": "new"},
+        "20260404 00:00:08.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    ws2 = MockWebSocket()
+    await query_svc.on_subscribe(ws2, {
+        "type": "subscribe",
+        "ref": snapshot_ref,
+        "subid": "query-delta",
+    })
+    msgs = ws2.get_messages()
+    assert msgs[0]["type"] in ("delta", "snapshot")
+    assert msgs[0]["subid"] == "query-delta"
+
+
+async def test_query_subid_on_live_update(query_svc, bus):
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe", "subid": "query-live"})
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "11", "symbol": "META", "qty": 25, "status": "pending"},
+        "20260404 00:00:09.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "update"
+    assert msgs[0]["subid"] == "query-live"
+
+
+async def test_query_no_subid_when_omitted(query_svc):
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
+    msgs = ws.get_messages()
+    assert "subid" not in msgs[0]
+
+
+async def test_subpub_multiple_subscribers_different_subids(subpub_svc, bus):
+    """Two subscribers with different subids each get their own subid on updates."""
+    ws1 = MockWebSocket()
+    ws2 = MockWebSocket()
+    await subpub_svc.on_subscribe(ws1, {"type": "subscribe", "subid": "sub-A"})
+    await subpub_svc.on_subscribe(ws2, {"type": "subscribe", "subid": "sub-B"})
+    ws1.clear()
+    ws2.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "20", "symbol": "NVDA", "qty": 15, "status": "pending"},
+        "20260404 00:00:00.300000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs1 = ws1.get_messages()
+    msgs2 = ws2.get_messages()
+    assert msgs1[0]["subid"] == "sub-A"
+    assert msgs2[0]["subid"] == "sub-B"

@@ -46,6 +46,7 @@ src/mkio/
 - **`_mkio_ref` column** is automatically added to all tables by the framework. The writer stamps each row with the transaction's `ref` on INSERT/UPDATE/UPSERT. If the client supplies a `ref`, it is used directly; otherwise the server generates one. On startup, services seed their change logs from the DB using this column, enabling delta reconnection across server restarts. Migration system excludes `_mkio_ref` from schema diffs.
 - **Op-level `defaults`** in transaction op specs provide static values the client doesn't send (e.g., `defaults = { status = "accepted" }`). Stored in `CompiledOp.defaults`, used by `_extract_params` as fallback when the field isn't in client data.
 - **`msgid` echo** — Transaction messages may include an optional `"msgid"` string. The server echoes it back on both result and error responses, letting clients correlate async responses. Not stored in the DB or propagated to subscribers. Supported in CLI CSV/JSON via `_ENVELOPE_KEYS`.
+- **`subid` echo** — Subscribe messages may include an optional `"subid"` string. The server echoes it on every outbound message (snapshot, delta, update) for that subscription, letting clients correlate responses when multiplexing subscriptions on a single WebSocket. Stored on the subscriber dataclass, passed through `make_snapshot`/`make_delta`/`make_update` via keyword arg.
 
 ## Conventions
 

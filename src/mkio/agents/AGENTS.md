@@ -114,6 +114,7 @@ Connect to `ws://<host>:<port>/ws` (general) or `ws://<host>:<port>/ws/<service>
 
 - `filter` — expression string (only valid if the service descriptor lists `filterable` fields)
 - `ref` — ref from the last received message; the server sends only changes since that point (delta recovery)
+- `subid` — optional string echoed on every response (snapshot, delta, update) for this subscription, useful for correlating when multiplexing subscriptions on one WebSocket
 
 ### Subscription messages
 

@@ -260,6 +260,7 @@ class MkioClient {
    * @param {Object} opts
    * @param {string} [opts.filter]
    * @param {string} [opts.ref] - Ref from last received message for recovery
+   * @param {string} [opts.subid] - Subscription ID echoed on all responses
    * @param {Function} [opts.onSnapshot] - (rows) => void
    * @param {Function} [opts.onDelta] - (changes) => void
    * @param {Function} [opts.onUpdate] - (op, row) => void
@@ -269,6 +270,7 @@ class MkioClient {
       service,
       filter: opts.filter || null,
       ref: opts.ref || null,
+      subid: opts.subid || null,
       onSnapshot: opts.onSnapshot || (() => {}),
       onDelta: opts.onDelta || (() => {}),
       onUpdate: opts.onUpdate || (() => {}),
@@ -278,6 +280,7 @@ class MkioClient {
     const msg = { service, type: "subscribe" };
     if (sub.filter) msg.filter = sub.filter;
     if (sub.ref) msg.ref = sub.ref;
+    if (sub.subid) msg.subid = sub.subid;
 
     this._sendRaw(msg);
   }
@@ -407,6 +410,7 @@ class MkioClient {
       const msg = { service, type: "subscribe" };
       if (sub.filter) msg.filter = sub.filter;
       if (sub.ref) msg.ref = sub.ref;
+      if (sub.subid) msg.subid = sub.subid;
       this._sendRaw(msg);
     }
   }

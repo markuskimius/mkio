@@ -44,26 +44,36 @@ def make_snapshot(
     ref: str,
     service: str,
     rows: list[dict[str, Any]],
+    *,
+    subid: str | None = None,
 ) -> bytes:
-    return dumps({
+    envelope: dict[str, Any] = {
         "type": "snapshot",
         "service": service,
         "ref": ref,
         "rows": rows,
-    })
+    }
+    if subid is not None:
+        envelope["subid"] = subid
+    return dumps(envelope)
 
 
 def make_delta(
     ref: str,
     service: str,
     changes: list[dict[str, Any]],
+    *,
+    subid: str | None = None,
 ) -> bytes:
-    return dumps({
+    envelope: dict[str, Any] = {
         "type": "delta",
         "service": service,
         "ref": ref,
         "changes": changes,
-    })
+    }
+    if subid is not None:
+        envelope["subid"] = subid
+    return dumps(envelope)
 
 
 def make_update(
@@ -71,11 +81,16 @@ def make_update(
     ref: str,
     op: str,
     row: dict[str, Any],
+    *,
+    subid: str | None = None,
 ) -> bytes:
-    return dumps({
+    envelope: dict[str, Any] = {
         "type": "update",
         "service": service,
         "ref": ref,
         "op": op,
         "row": row,
-    })
+    }
+    if subid is not None:
+        envelope["subid"] = subid
+    return dumps(envelope)

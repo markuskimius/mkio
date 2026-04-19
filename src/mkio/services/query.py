@@ -21,6 +21,7 @@ class QuerySubscriber:
     ws: WebSocketResponse
     filter_fn: Callable[[dict[str, Any]], bool] | None = None
     formatter: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    subid: str | None = None
 
 
 class QueryService(Service):
@@ -80,12 +81,13 @@ class QueryService(Service):
     async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
         client_ref = msg.get("ref")
         filter_expr = msg.get("filter")
+        subid = msg.get("subid")
 
         filter_fn = None
         if filter_expr and self._filterable:
             filter_fn = compile_filter(filter_expr)
 
-        sub = QuerySubscriber(ws=ws, filter_fn=filter_fn, formatter=self._formatter)
+        sub = QuerySubscriber(ws=ws, filter_fn=filter_fn, formatter=self._formatter, subid=subid)
 
         # Check for delta reconnection
         if client_ref and self._change_log:
@@ -99,7 +101,7 @@ class QueryService(Service):
                             continue
                         changes.append({"op": op, "row": out_row})
                 latest_ref = self._change_log[-1][0] if self._change_log else client_ref
-                resp = make_delta(latest_ref, self.name, changes)
+                resp = make_delta(latest_ref, self.name, changes, subid=sub.subid)
                 await ws.send_bytes(resp)
                 await self.notify_monitors("out", resp)
                 self._subscribers.append(sub)
@@ -115,7 +117,7 @@ class QueryService(Service):
             out_rows.append(out_row)
 
         latest_ref = self._change_log[-1][0] if self._change_log else ""
-        resp = make_snapshot(latest_ref, self.name, out_rows)
+        resp = make_snapshot(latest_ref, self.name, out_rows, subid=sub.subid)
         await ws.send_bytes(resp)
         await self.notify_monitors("out", resp)
         self._subscribers.append(sub)
@@ -147,7 +149,7 @@ class QueryService(Service):
                 if sub.filter_fn and not sub.filter_fn(out_row):
                     continue
                 try:
-                    msg_bytes = make_update(self.name, ref=event.ref, op=event.op, row=out_row)
+                    msg_bytes = make_update(self.name, ref=event.ref, op=event.op, row=out_row, subid=sub.subid)
                     await sub.ws.send_bytes(msg_bytes)
                     if not notified_monitor:
                         await self.notify_monitors("out", msg_bytes)

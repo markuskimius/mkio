@@ -160,6 +160,9 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 // Subscribe
 {"service": "all_orders", "type": "subscribe", "filter": "status == 'pending'"}
 
+// Subscribe with subid (echoed on every snapshot, delta, and update for this subscription)
+{"service": "all_orders", "type": "subscribe", "subid": "my-sub-1"}
+
 // Reconnect with ref (resumes from last seen position)
 {"service": "audit_feed", "type": "subscribe", "ref": "20260404 15:30:45.123456000000"}
 ```

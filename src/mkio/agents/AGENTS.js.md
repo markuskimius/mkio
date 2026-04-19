@@ -52,6 +52,7 @@ Subscribe with callbacks. No return value — messages arrive via callbacks.
 client.subscribe("all_orders", {
   filter: "status == 'pending'",
   ref: lastRef,  // optional, for delta recovery
+  subid: "my-sub",  // optional, echoed on every response
   onSnapshot: (rows) => {
     console.log("Initial state:", rows.length, "rows");
   },
@@ -66,6 +67,7 @@ client.subscribe("all_orders", {
 
 - `filter` — expression string (only for services with `filterable` fields)
 - `ref` — pass the last received ref to resume (delta recovery)
+- `subid` — optional string echoed on every response for this subscription (for multiplexing)
 - The client tracks `ref` internally — on auto-reconnect, it re-subscribes with the last seen ref
 
 ### unsubscribe(service)

@@ -96,16 +96,19 @@ class MkioClient:
         service: str,
         filter: str | None = None,
         ref: str | None = None,
+        subid: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to a service. Yields messages (snapshot, delta, update).
 
         Pass ``ref`` from a previous message to resume from that point.
+        Pass ``subid`` to tag all messages from this subscription.
         """
         sub = _Subscription(
             service=service,
             filter=filter,
             ref=ref,
             queue=asyncio.Queue(),
+            subid=subid,
         )
         self._subscriptions[service] = sub
 
@@ -114,6 +117,8 @@ class MkioClient:
             msg["filter"] = filter
         if ref or sub.ref:
             msg["ref"] = ref or sub.ref
+        if sub.subid:
+            msg["subid"] = sub.subid
 
         assert self._ws is not None
         await self._ws.send_bytes(dumps(msg))
@@ -212,6 +217,8 @@ class MkioClient:
                         msg["filter"] = sub.filter
                     if sub.ref:
                         msg["ref"] = sub.ref
+                    if sub.subid:
+                        msg["subid"] = sub.subid
                     await self._ws.send_bytes(dumps(msg))
 
                 # Restart receive loop
@@ -229,8 +236,10 @@ class _Subscription:
         filter: str | None,
         ref: str | None,
         queue: asyncio.Queue[dict[str, Any]],
+        subid: str | None = None,
     ) -> None:
         self.service = service
         self.filter = filter
         self.ref = ref
         self.queue = queue
+        self.subid = subid
