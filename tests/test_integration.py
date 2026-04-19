@@ -40,7 +40,6 @@ TEST_CONFIG = {
                 "event": "TEXT",
                 "order_id": "TEXT",
             },
-            "append_only": True,
         },
     },
     "services": {

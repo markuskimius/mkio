@@ -34,7 +34,6 @@ TEST_TABLES = {
             "event": "TEXT",
             "order_id": "TEXT",
         },
-        "append_only": True,
     },
 }
 

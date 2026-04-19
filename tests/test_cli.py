@@ -41,7 +41,6 @@ TEST_CONFIG = {
                 "order_id": "INTEGER",
                 "status": "TEXT",
             },
-            "append_only": True,
         },
     },
     "services": {

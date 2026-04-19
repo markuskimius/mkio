@@ -11,7 +11,6 @@ columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", side = "TEXT NOT NULL", sy
 
 [tables.audit_log]
 columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", event = "TEXT", order_id = "INTEGER", status = "TEXT" }
-append_only = true
 
 # --- Transaction service (all order operations at one endpoint) ---
 
