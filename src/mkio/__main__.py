@@ -1,4 +1,4 @@
-"""CLI entry point: mkio serve | services | monitor | send | subscribe"""
+"""CLI entry point: mkio serve | services | monitor | send | subpub | stream | query"""
 
 from __future__ import annotations
 
@@ -27,8 +27,12 @@ def main() -> None:
         _cmd_monitor()
     elif cmd == "send":
         _cmd_send()
-    elif cmd == "subscribe":
-        _cmd_subscribe()
+    elif cmd == "subpub":
+        _cmd_subpub()
+    elif cmd == "stream":
+        _cmd_stream()
+    elif cmd == "query":
+        _cmd_query()
     else:
         _usage()
 
@@ -40,8 +44,12 @@ def _usage() -> None:
     print("  mkio monitor <url> <service>     Monitor a service's messages")
     print("  mkio send <url> <service> [--op <name>] <data>")
     print("                                   Send transaction(s) from JSON/CSV/inline")
-    print("  mkio subscribe <url> <service> [--filter <expr>] [--ref <ver>]")
-    print("                                   Subscribe and stream live messages")
+    print("  mkio subpub <url> <service> [--filter <expr>] [--fields <f1,f2,...>] [--subid <id>]")
+    print("                                   Subscribe to a subpub service")
+    print("  mkio stream <url> <service> [--filter <expr>] [--fields <f1,f2,...>] [--subid <id>] [--ref <ref>]")
+    print("                                   Subscribe to a stream service")
+    print("  mkio query <url> <service> [--filter <expr>] [--fields <f1,f2,...>] [--subid <id>] [--snapshotOnly] [--updateOnly]")
+    print("                                   Subscribe to a query service")
     sys.exit(1)
 
 
@@ -535,43 +543,111 @@ async def _send_messages(
                 print(f"[{i}/{total}] error: {e}")
 
 
-# ---- subscribe command ------------------------------------------------------
+# ---- subscribe commands (subpub, stream, query) -----------------------------
 
-def _cmd_subscribe() -> None:
+def _cmd_subpub() -> None:
     args = sys.argv[2:]
+    usage = "mkio subpub <url> <service> [--filter <expr>] [--fields <f1,f2,...>] [--subid <id>]"
     if len(args) < 2:
-        print("Usage: mkio subscribe <url> <service> [--filter <expr>] [--ref <ver>]")
+        print(f"Usage: {usage}")
         sys.exit(1)
 
     url = args[0].rstrip("/")
     service = args[1]
     rest = args[2:]
-
-    _check_unknown_flags(rest, {"--filter", "--ref"}, "mkio subscribe <url> <service> [--filter <expr>] [--ref <ver>]")
-
-    filter_expr = None
-    if "--filter" in rest:
-        idx = rest.index("--filter")
-        if idx + 1 >= len(rest):
-            print("Error: --filter requires a value")
-            sys.exit(1)
-        filter_expr = rest[idx + 1]
-        rest = rest[:idx] + rest[idx + 2:]
-
-    ref = None
-    if "--ref" in rest:
-        idx = rest.index("--ref")
-        if idx + 1 >= len(rest):
-            print("Error: --ref requires a value")
-            sys.exit(1)
-        ref = rest[idx + 1]
-
+    _check_unknown_flags(rest, {"--filter", "--fields", "--subid"}, usage)
+    filter_expr = _extract_flag(rest, "--filter")
+    fields = _extract_fields(rest)
+    subid = _extract_flag(rest, "--subid")
     ws_url = _normalize_ws_url(url)
 
     try:
-        asyncio.run(_subscribe_service(ws_url, service, filter_expr, ref))
+        asyncio.run(_subscribe_service(ws_url, service, filter_expr, None, subid, fields=fields))
     except KeyboardInterrupt:
         print("\nSubscription stopped.")
+
+
+def _cmd_stream() -> None:
+    args = sys.argv[2:]
+    usage = "mkio stream <url> <service> [--filter <expr>] [--fields <f1,f2,...>] [--subid <id>] [--ref <ref>]"
+    if len(args) < 2:
+        print(f"Usage: {usage}")
+        sys.exit(1)
+
+    url = args[0].rstrip("/")
+    service = args[1]
+    rest = args[2:]
+    _check_unknown_flags(rest, {"--filter", "--fields", "--ref", "--subid"}, usage)
+    filter_expr = _extract_flag(rest, "--filter")
+    fields = _extract_fields(rest)
+    ref = _extract_flag(rest, "--ref")
+    if ref is None:
+        from mkio._ref import next_ref
+        ref = next_ref()
+    subid = _extract_flag(rest, "--subid")
+    ws_url = _normalize_ws_url(url)
+
+    try:
+        asyncio.run(_subscribe_service(ws_url, service, filter_expr, ref, subid, fields=fields))
+    except KeyboardInterrupt:
+        print("\nSubscription stopped.")
+
+
+def _cmd_query() -> None:
+    args = sys.argv[2:]
+    usage = "mkio query <url> <service> [--filter <expr>] [--fields <f1,f2,...>] [--subid <id>] [--snapshotOnly] [--updateOnly]"
+    if len(args) < 2:
+        print(f"Usage: {usage}")
+        sys.exit(1)
+
+    url = args[0].rstrip("/")
+    service = args[1]
+    rest = args[2:]
+    _check_unknown_flags(rest, {"--filter", "--fields", "--subid", "--snapshotOnly", "--updateOnly"}, usage)
+    filter_expr = _extract_flag(rest, "--filter")
+    fields = _extract_fields(rest)
+    subid = _extract_flag(rest, "--subid")
+    snapshot, updates = _parse_mode_flags(rest)
+    ws_url = _normalize_ws_url(url)
+
+    try:
+        asyncio.run(_subscribe_service(ws_url, service, filter_expr, None, subid, snapshot=snapshot, updates=updates, fields=fields))
+    except KeyboardInterrupt:
+        print("\nSubscription stopped.")
+
+
+def _parse_mode_flags(args: list[str]) -> tuple[bool, bool]:
+    snapshot_only = "--snapshotOnly" in args
+    update_only = "--updateOnly" in args
+    if snapshot_only and update_only:
+        print("Error: --snapshotOnly and --updateOnly are mutually exclusive")
+        sys.exit(1)
+    if snapshot_only:
+        args.remove("--snapshotOnly")
+        return True, False
+    if update_only:
+        args.remove("--updateOnly")
+        return False, True
+    return True, True
+
+
+def _extract_fields(args: list[str]) -> list[str] | None:
+    raw = _extract_flag(args, "--fields")
+    if raw is None:
+        return None
+    return [f.strip() for f in raw.split(",") if f.strip()]
+
+
+def _extract_flag(args: list[str], flag: str) -> str | None:
+    if flag not in args:
+        return None
+    idx = args.index(flag)
+    if idx + 1 >= len(args):
+        print(f"Error: {flag} requires a value")
+        sys.exit(1)
+    value = args[idx + 1]
+    del args[idx:idx + 2]
+    return value
 
 
 async def _subscribe_service(
@@ -579,11 +655,15 @@ async def _subscribe_service(
     service: str,
     filter_expr: str | None,
     ref: str | None = None,
+    subid: str | None = None,
+    snapshot: bool = True,
+    updates: bool = True,
+    fields: list[str] | None = None,
 ) -> None:
     from mkio.client import MkioClient
 
     async with MkioClient(ws_url, reconnect=True) as client:
-        async for msg in client.subscribe(service, filter=filter_expr, ref=ref):
+        async for msg in client.subscribe(service, filter=filter_expr, ref=ref, subid=subid, snapshot=snapshot, updates=updates, fields=fields):
             _print_subscribe_message(msg)
 
 

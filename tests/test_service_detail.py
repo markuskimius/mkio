@@ -192,10 +192,9 @@ async def test_detail_subpub(client):
     sub = data["subscribe"]
     assert sub["message"]["service"] == "last_trade"
     assert sub["message"]["type"] == "subscribe"
-    assert "recovery" in sub
-    assert "ref" in sub["recovery"].lower()
-    assert sub["response_types"] == ["snapshot", "delta", "update"]
-    assert sub["change_log_size"] == 100
+    assert "recovery" not in sub
+    assert sub["response_types"] == ["snapshot", "update"]
+    assert "change_log_size" not in sub
 
     # Filter fields
     assert sub["filter_fields"] == ["status", "symbol"]
@@ -203,6 +202,7 @@ async def test_detail_subpub(client):
     # Examples
     assert "subscribe" in data["example"]
     assert "subscribe_filter" in data["example"]
+    assert "subscribe_recover" not in data["example"]
 
 
 async def test_detail_stream(client):
@@ -239,9 +239,9 @@ async def test_detail_query(client):
 
     # Query subscribe protocol
     sub = data["subscribe"]
-    assert sub["response_types"] == ["snapshot", "delta", "update"]
-    assert sub["change_log_size"] == 100
-    assert "recovery" in sub
+    assert sub["response_types"] == ["snapshot", "update"]
+    assert "change_log_size" not in sub
+    assert "recovery" not in sub
 
 
 # ---- Error cases ------------------------------------------------------------
@@ -293,5 +293,5 @@ async def test_detail_example_generation(client):
     # Listener should have subscribe example
     resp = await client.get("/api/services/last_trade")
     data = await resp.json()
-    assert "mkio subscribe" in data["example"]["subscribe"]
+    assert "mkio subpub" in data["example"]["subscribe"]
     assert "--filter" in data["example"]["subscribe_filter"]

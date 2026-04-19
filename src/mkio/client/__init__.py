@@ -97,11 +97,17 @@ class MkioClient:
         filter: str | None = None,
         ref: str | None = None,
         subid: str | None = None,
+        snapshot: bool = True,
+        updates: bool = True,
+        fields: list[str] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Subscribe to a service. Yields messages (snapshot, delta, update).
+        """Subscribe to a service. Yields messages (snapshot, update).
 
-        Pass ``ref`` from a previous message to resume from that point.
+        Pass ``ref`` from a previous message to resume from that point (stream only).
         Pass ``subid`` to tag all messages from this subscription.
+        Set ``snapshot=False`` to skip the initial snapshot.
+        Set ``updates=False`` to receive only the snapshot then stop.
+        Pass ``fields`` to receive only the specified columns in each row.
         """
         sub = _Subscription(
             service=service,
@@ -109,6 +115,9 @@ class MkioClient:
             ref=ref,
             queue=asyncio.Queue(),
             subid=subid,
+            snapshot=snapshot,
+            updates=updates,
+            fields=fields,
         )
         self._subscriptions[service] = sub
 
@@ -119,6 +128,12 @@ class MkioClient:
             msg["ref"] = ref or sub.ref
         if sub.subid:
             msg["subid"] = sub.subid
+        if not snapshot:
+            msg["snapshot"] = False
+        if not updates:
+            msg["updates"] = False
+        if fields:
+            msg["fields"] = fields
 
         assert self._ws is not None
         await self._ws.send_bytes(dumps(msg))
@@ -127,6 +142,8 @@ class MkioClient:
             while True:
                 item = await sub.queue.get()
                 yield item
+                if not updates and item.get("type") == "snapshot":
+                    return
         except asyncio.CancelledError:
             pass
 
@@ -207,7 +224,7 @@ class MkioClient:
                 self._session = aiohttp.ClientSession()
                 self._ws = await self._session.ws_connect(self.url)
 
-                # Re-subscribe with stored refs for recovery
+                # Re-subscribe with stored state
                 for service, sub in self._subscriptions.items():
                     msg: dict[str, Any] = {
                         "service": service,
@@ -219,6 +236,12 @@ class MkioClient:
                         msg["ref"] = sub.ref
                     if sub.subid:
                         msg["subid"] = sub.subid
+                    if not sub.snapshot:
+                        msg["snapshot"] = False
+                    if not sub.updates:
+                        msg["updates"] = False
+                    if sub.fields:
+                        msg["fields"] = sub.fields
                     await self._ws.send_bytes(dumps(msg))
 
                 # Restart receive loop
@@ -237,9 +260,15 @@ class _Subscription:
         ref: str | None,
         queue: asyncio.Queue[dict[str, Any]],
         subid: str | None = None,
+        snapshot: bool = True,
+        updates: bool = True,
+        fields: list[str] | None = None,
     ) -> None:
         self.service = service
         self.filter = filter
         self.ref = ref
         self.queue = queue
         self.subid = subid
+        self.snapshot = snapshot
+        self.updates = updates
+        self.fields = fields

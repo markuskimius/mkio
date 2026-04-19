@@ -259,10 +259,12 @@ class MkioClient {
    * @param {string} service
    * @param {Object} opts
    * @param {string} [opts.filter]
-   * @param {string} [opts.ref] - Ref from last received message for recovery
+   * @param {string} [opts.ref] - Ref from last received message for recovery (stream only)
    * @param {string} [opts.subid] - Subscription ID echoed on all responses
+   * @param {boolean} [opts.snapshot=true] - Whether to receive the initial snapshot
+   * @param {boolean} [opts.updates=true] - Whether to receive live updates
+   * @param {string[]} [opts.fields] - Restrict rows to these fields only
    * @param {Function} [opts.onSnapshot] - (rows) => void
-   * @param {Function} [opts.onDelta] - (changes) => void
    * @param {Function} [opts.onUpdate] - (op, row) => void
    */
   subscribe(service, opts = {}) {
@@ -271,27 +273,36 @@ class MkioClient {
       filter: opts.filter || null,
       ref: opts.ref || null,
       subid: opts.subid || null,
+      snapshot: opts.snapshot !== false,
+      updates: opts.updates !== false,
+      fields: opts.fields || null,
       onSnapshot: opts.onSnapshot || (() => {}),
-      onDelta: opts.onDelta || (() => {}),
       onUpdate: opts.onUpdate || (() => {}),
     };
-    this._subscriptions.set(service, sub);
+    const key = sub.subid || service;
+    this._subscriptions.set(key, sub);
 
     const msg = { service, type: "subscribe" };
     if (sub.filter) msg.filter = sub.filter;
     if (sub.ref) msg.ref = sub.ref;
     if (sub.subid) msg.subid = sub.subid;
+    if (!sub.snapshot) msg.snapshot = false;
+    if (!sub.updates) msg.updates = false;
+    if (sub.fields) msg.fields = sub.fields;
 
     this._sendRaw(msg);
   }
 
   /**
    * Unsubscribe from a service.
-   * @param {string} service
+   * @param {string} serviceOrSubid - Service name or subid used when subscribing
    */
-  unsubscribe(service) {
-    this._subscriptions.delete(service);
+  unsubscribe(serviceOrSubid) {
+    const sub = this._subscriptions.get(serviceOrSubid);
+    this._subscriptions.delete(serviceOrSubid);
+    const service = sub ? sub.service : serviceOrSubid;
     const msg = { service, type: "unsubscribe", ref: makeRef() };
+    if (sub && sub.subid) msg.subid = sub.subid;
     if (this._ws && this._ws.readyState === WebSocket.OPEN) {
       this._sendRaw(msg);
     }
@@ -390,15 +401,14 @@ class MkioClient {
       return;
     }
 
-    // Route to subscription
-    if (service && this._subscriptions.has(service)) {
-      const sub = this._subscriptions.get(service);
+    // Route to subscription (prefer subid, fall back to service name)
+    const subKey = data.subid || service;
+    if (subKey && this._subscriptions.has(subKey)) {
+      const sub = this._subscriptions.get(subKey);
       if (data.ref) sub.ref = data.ref;
 
       if (type === "snapshot") {
         sub.onSnapshot(data.rows);
-      } else if (type === "delta") {
-        sub.onDelta(data.changes);
       } else if (type === "update") {
         sub.onUpdate(data.op, data.row);
       }
@@ -406,11 +416,14 @@ class MkioClient {
   }
 
   _resubscribe() {
-    for (const [service, sub] of this._subscriptions) {
-      const msg = { service, type: "subscribe" };
+    for (const [, sub] of this._subscriptions) {
+      const msg = { service: sub.service, type: "subscribe" };
       if (sub.filter) msg.filter = sub.filter;
       if (sub.ref) msg.ref = sub.ref;
       if (sub.subid) msg.subid = sub.subid;
+      if (!sub.snapshot) msg.snapshot = false;
+      if (!sub.updates) msg.updates = false;
+      if (sub.fields) msg.fields = sub.fields;
       this._sendRaw(msg);
     }
   }
@@ -546,9 +559,6 @@ function _mkioSubscribe(service, opts) {
   const o = { ...(opts || {}) };
   if (!o.onSnapshot) {
     o.onSnapshot = (rows) => console.log(`[${makeLocalTs()}] \u2190 ${service} snapshot`, rows);
-  }
-  if (!o.onDelta) {
-    o.onDelta = (changes) => console.log(`[${makeLocalTs()}] \u2190 ${service} delta`, changes);
   }
   if (!o.onUpdate) {
     o.onUpdate = (op, row) => console.log(`[${makeLocalTs()}] \u2190 ${service} update ${op}`, row);

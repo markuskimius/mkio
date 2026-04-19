@@ -1,19 +1,18 @@
-"""Query service: snapshot from SQLite + change feed with version-based reconnection."""
+"""Query service: snapshot from SQLite + change feed."""
 
 from __future__ import annotations
 
 import asyncio
-from collections import deque
+import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from aiohttp.web import WebSocketResponse
 
 from mkio._expr import compile_filter
-from mkio._ref import compare_refs
 from mkio.change_bus import ChangeEvent
 from mkio.services.base import Service
-from mkio.ws_protocol import make_snapshot, make_delta, make_update
+from mkio.ws_protocol import make_snapshot, make_update
 
 
 @dataclass
@@ -22,10 +21,11 @@ class QuerySubscriber:
     filter_fn: Callable[[dict[str, Any]], bool] | None = None
     formatter: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     subid: str | None = None
+    fields: list[str] | None = None
 
 
 class QueryService(Service):
-    """Snapshot + change feed with version-based delta reconnection.
+    """Snapshot from SQLite + change feed.
 
     Config:
         primary_table: str
@@ -33,7 +33,6 @@ class QueryService(Service):
         sql: str (optional, defaults to SELECT * FROM primary_table)
         filterable: list[str] (optional)
         publish: dict (optional)
-        change_log_size: int (default 10000)
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -42,26 +41,23 @@ class QueryService(Service):
         self._sql = self.config.get("sql", f"SELECT * FROM {self._table}")
         self._filterable = set(self.config.get("filterable", []))
         self._formatter = self.config.get("_compiled_formatter")
-        self._change_log_size = self.config.get("change_log_size", 10000)
 
-        self._change_log: deque[tuple[str, str, dict[str, Any]]] = deque(
-            maxlen=self._change_log_size
-        )  # (version, op, row)
         self._subscribers: list[QuerySubscriber] = []
         self._bus_queue: asyncio.Queue[ChangeEvent] | None = None
         self._listener_task: asyncio.Task[None] | None = None
+        self._pk_cols: list[str] = []
 
     async def start(self) -> None:
-        # Seed change log from DB for cross-restart delta reconnection
-        recent = await self.db.read(
-            f"SELECT * FROM (SELECT * FROM {self._table} WHERE _mkio_ref != '' "
-            f"ORDER BY _mkio_ref DESC LIMIT ?) ORDER BY _mkio_ref ASC",
-            (self._change_log_size,),
-        )
-        for row in recent:
-            ref = row.get("_mkio_ref", "")
-            if ref:
-                self._change_log.append((ref, "upsert", row))
+        tables = self.config.get("watch_tables", [self._table])
+        ordered = [self._table] + [t for t in tables if t != self._table]
+        seen: set[str] = set()
+        self._pk_cols = []
+        for table in ordered:
+            info = await self.db.read(f"PRAGMA table_info({table})")
+            for r in sorted(info, key=lambda r: r["pk"]):
+                if r["pk"] > 0 and r["name"] not in seen:
+                    self._pk_cols.append(r["name"])
+                    seen.add(r["name"])
 
         watch = self.config.get("watch_tables", [self._table])
         self._bus_queue = self.bus.subscribe(watch)
@@ -79,48 +75,58 @@ class QueryService(Service):
             self.bus.unsubscribe(watch, self._bus_queue)
 
     async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
-        client_ref = msg.get("ref")
         filter_expr = msg.get("filter")
         subid = msg.get("subid")
+        want_snapshot = msg.get("snapshot", True)
+        want_updates = msg.get("updates", True)
+        fields = msg.get("fields")
 
         filter_fn = None
         if filter_expr and self._filterable:
             filter_fn = compile_filter(filter_expr)
 
-        sub = QuerySubscriber(ws=ws, filter_fn=filter_fn, formatter=self._formatter, subid=subid)
+        sub = QuerySubscriber(ws=ws, filter_fn=filter_fn, formatter=self._formatter, subid=subid, fields=fields)
 
-        # Check for delta reconnection
-        if client_ref and self._change_log:
-            oldest_ref = self._change_log[0][0]
-            if compare_refs(client_ref, oldest_ref) >= 0:
-                changes = []
-                for ver, op, row in self._change_log:
-                    if compare_refs(ver, client_ref) > 0:
-                        out_row = sub.formatter(row) if sub.formatter else row
-                        if sub.filter_fn and not sub.filter_fn(out_row):
-                            continue
-                        changes.append({"op": op, "row": out_row})
-                latest_ref = self._change_log[-1][0] if self._change_log else client_ref
-                resp = make_delta(latest_ref, self.name, changes, subid=sub.subid)
-                await ws.send_bytes(resp)
-                await self.notify_monitors("out", resp)
-                self._subscribers.append(sub)
-                return
+        if want_snapshot:
+            rows = await self.db.read(self._sql)
+            out_rows = []
+            for row in rows:
+                out_row = sub.formatter(row) if sub.formatter else row
+                if sub.filter_fn and not sub.filter_fn(out_row):
+                    continue
+                out_rows.append(self._project(self._tag_row(row, out_row), fields))
 
-        # Full snapshot from SQLite
-        rows = await self.db.read(self._sql)
-        out_rows = []
-        for row in rows:
-            out_row = sub.formatter(row) if sub.formatter else row
-            if sub.filter_fn and not sub.filter_fn(out_row):
-                continue
-            out_rows.append(out_row)
+            resp = make_snapshot(None, self.name, out_rows, subid=sub.subid)
+            await ws.send_bytes(resp)
+            await self.notify_monitors("out", resp)
 
-        latest_ref = self._change_log[-1][0] if self._change_log else ""
-        resp = make_snapshot(latest_ref, self.name, out_rows, subid=sub.subid)
-        await ws.send_bytes(resp)
-        await self.notify_monitors("out", resp)
-        self._subscribers.append(sub)
+        if want_updates:
+            self._subscribers.append(sub)
+
+    def _row_id(self, row: dict[str, Any]) -> str | None:
+        if not self._pk_cols:
+            return None
+        try:
+            vals = [row[col] for col in self._pk_cols]
+        except (KeyError, TypeError):
+            return None
+        if len(vals) == 1:
+            return str(vals[0])
+        return json.dumps(vals, separators=(",", ":"))
+
+    def _tag_row(self, raw_row: dict[str, Any], out_row: dict[str, Any]) -> dict[str, Any]:
+        tagged = dict(out_row)
+        tagged.pop("_mkio_ref", None)
+        rid = self._row_id(raw_row)
+        if rid is not None:
+            tagged["_mkio_row"] = rid
+        return tagged
+
+    @staticmethod
+    def _project(row: dict[str, Any], fields: list[str] | None) -> dict[str, Any]:
+        if not fields:
+            return row
+        return {k: v for k, v in row.items() if k in fields or k.startswith("_mkio_")}
 
     async def on_unsubscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
         self._subscribers = [s for s in self._subscribers if s.ws is not ws]
@@ -139,8 +145,6 @@ class QueryService(Service):
                 # would require a full re-query which is expensive
                 continue
 
-            self._change_log.append((event.ref, event.op, row))
-
             # Fan out
             dead: list[QuerySubscriber] = []
             notified_monitor = False
@@ -149,7 +153,8 @@ class QueryService(Service):
                 if sub.filter_fn and not sub.filter_fn(out_row):
                     continue
                 try:
-                    msg_bytes = make_update(self.name, ref=event.ref, op=event.op, row=out_row, subid=sub.subid)
+                    tagged = self._project(self._tag_row(row, out_row), sub.fields)
+                    msg_bytes = make_update(self.name, ref=None, op=event.op, row=tagged, subid=sub.subid)
                     await sub.ws.send_bytes(msg_bytes)
                     if not notified_monitor:
                         await self.notify_monitors("out", msg_bytes)

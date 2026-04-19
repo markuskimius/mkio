@@ -51,13 +51,13 @@ Subscribe with callbacks. No return value — messages arrive via callbacks.
 ```javascript
 client.subscribe("all_orders", {
   filter: "status == 'pending'",
-  ref: lastRef,  // optional, for delta recovery
+  fields: ["symbol", "qty"],  // optional, restrict to these columns
+  ref: lastRef,  // stream only, required for streams
   subid: "my-sub",  // optional, echoed on every response
+  snapshot: true,  // query only, set false to skip snapshot
+  updates: true,   // query only, set false for snapshot only
   onSnapshot: (rows) => {
     console.log("Initial state:", rows.length, "rows");
-  },
-  onDelta: (changes) => {
-    changes.forEach(c => console.log(c.op, c.row));
   },
   onUpdate: (op, row) => {
     console.log("Live:", op, row);
@@ -66,8 +66,10 @@ client.subscribe("all_orders", {
 ```
 
 - `filter` — expression string (only for services with `filterable` fields)
-- `ref` — pass the last received ref to resume (delta recovery)
+- `fields` — list of field names to include in each row (omit for all fields)
+- `ref` — pass the last received ref to resume (stream only, required)
 - `subid` — optional string echoed on every response for this subscription (for multiplexing)
+- `snapshot` / `updates` — query only booleans (subpub always sends both)
 - The client tracks `ref` internally — on auto-reconnect, it re-subscribes with the last seen ref
 
 ### unsubscribe(service)
@@ -119,7 +121,6 @@ async function main() {
   // 5. Subscribe with live updates
   client.subscribe("all_orders", {
     onSnapshot: (rows) => renderTable(rows),
-    onDelta: (changes) => applyChanges(changes),
     onUpdate: (op, row) => updateRow(op, row),
   });
 }
@@ -153,6 +154,6 @@ Output uses `console.groupCollapsed` with styled `→` (out) / `←` (in) header
 The client reconnects automatically with exponential backoff when the WebSocket drops. On reconnect:
 
 1. A new WebSocket connection is established
-2. All active subscriptions are re-sent with the last received `ref`
-3. The server responds with a delta (changes since that ref) or a full snapshot if the ref is too old
+2. All active subscriptions are re-sent with their stored state (ref, filter, fields, etc.)
+3. Stream services resume from the last ref; subpub and query always send a full snapshot
 4. `onConnect` callback fires, then subscription callbacks resume

@@ -13,7 +13,7 @@ from mkio._expr import compile_filter
 from mkio._ref import compare_refs
 from mkio.change_bus import ChangeEvent
 from mkio.services.base import Service
-from mkio.ws_protocol import make_snapshot, make_update
+from mkio.ws_protocol import make_error, make_snapshot, make_update
 
 
 @dataclass
@@ -22,6 +22,7 @@ class StreamSubscriber:
     filter_fn: Callable[[dict[str, Any]], bool] | None = None
     formatter: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     subid: str | None = None
+    fields: list[str] | None = None
 
 
 class StreamService(Service):
@@ -86,45 +87,49 @@ class StreamService(Service):
         filter_expr = msg.get("filter")
         subid = msg.get("subid")
 
+        if not client_ref:
+            resp = make_error(None, "Stream subscribe requires a ref")
+            await ws.send_bytes(resp)
+            await self.notify_monitors("out", resp)
+            return
+
+        fields = msg.get("fields")
+
         filter_fn = None
         if filter_expr and self._filterable:
             filter_fn = compile_filter(filter_expr)
 
-        sub = StreamSubscriber(ws=ws, filter_fn=filter_fn, formatter=self._formatter, subid=subid)
+        sub = StreamSubscriber(ws=ws, filter_fn=filter_fn, formatter=self._formatter, subid=subid, fields=fields)
 
         rows_to_send: list[dict[str, Any]] = []
 
-        if client_ref and self._buffer:
-            # Find position in ring buffer
+        if self._buffer:
             buffer_start_ver = self._buffer[0][0]
             if compare_refs(client_ref, buffer_start_ver) >= 0:
-                # Replay from buffer
                 for ver, row in self._buffer:
                     if compare_refs(ver, client_ref) > 0:
                         out_row = sub.formatter(row) if sub.formatter else row
                         if sub.filter_fn and not sub.filter_fn(out_row):
                             continue
-                        rows_to_send.append(out_row)
+                        rows_to_send.append(self._project(out_row, fields))
             else:
-                # Ref older than buffer — send full buffer instead
                 for ver, row in self._buffer:
                     out_row = sub.formatter(row) if sub.formatter else row
                     if sub.filter_fn and not sub.filter_fn(out_row):
                         continue
-                    rows_to_send.append(out_row)
-        elif not client_ref:
-            # No ref — send entire buffer
-            for ver, row in self._buffer:
-                out_row = sub.formatter(row) if sub.formatter else row
-                if sub.filter_fn and not sub.filter_fn(out_row):
-                    continue
-                rows_to_send.append(out_row)
+                    rows_to_send.append(self._project(out_row, fields))
 
         latest_ref = self._buffer[-1][0] if self._buffer else ""
         resp = make_snapshot(latest_ref, self.name, rows_to_send, subid=sub.subid)
         await ws.send_bytes(resp)
         await self.notify_monitors("out", resp)
         self._subscribers.append(sub)
+
+    @staticmethod
+    def _project(row: dict[str, Any], fields: list[str] | None) -> dict[str, Any]:
+        if not fields:
+            return row
+        return {k: v for k, v in row.items() if k in fields}
 
     async def on_unsubscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
         self._subscribers = [s for s in self._subscribers if s.ws is not ws]
@@ -156,7 +161,7 @@ class StreamService(Service):
                 if sub.filter_fn and not sub.filter_fn(out_row):
                     continue
                 try:
-                    msg_bytes = make_update(self.name, ref=event.ref, op=event.op, row=out_row, subid=sub.subid)
+                    msg_bytes = make_update(self.name, ref=event.ref, op=event.op, row=self._project(out_row, sub.fields), subid=sub.subid)
                     await sub.ws.send_bytes(msg_bytes)
                     if not notified_monitor:
                         await self.notify_monitors("out", msg_bytes)

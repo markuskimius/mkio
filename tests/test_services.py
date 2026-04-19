@@ -188,13 +188,15 @@ async def test_subpub_fresh_snapshot(subpub_svc):
     msgs = ws.get_messages()
     assert len(msgs) == 1
     assert msgs[0]["type"] == "snapshot"
+    assert "ref" not in msgs[0]
     assert len(msgs[0]["rows"]) == 2
+    for row in msgs[0]["rows"]:
+        assert "_mkio_ref" not in row
 
 
 async def test_subpub_with_filter(subpub_svc):
     ws = MockWebSocket()
     await subpub_svc.on_subscribe(ws, {
-        "ref": "ref1",
         "type": "subscribe",
         "filter": "status == 'pending'",
     })
@@ -221,33 +223,20 @@ async def test_subpub_live_update(subpub_svc, bus):
     msgs = ws.get_messages()
     assert len(msgs) == 1
     assert msgs[0]["type"] == "update"
+    assert "ref" not in msgs[0]
     assert msgs[0]["op"] == "insert"
     assert msgs[0]["row"]["symbol"] == "GOOG"
+    assert "_mkio_ref" not in msgs[0]["row"]
 
 
-async def test_subpub_delta_reconnect(subpub_svc, bus):
-    """Subscribe, get snapshot, push changes, then reconnect with ref — should get delta."""
+async def test_subpub_always_snapshot_and_updates(subpub_svc, bus):
+    """SubPub always sends snapshot and subscribes for updates."""
     ws = MockWebSocket()
     await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
-    snapshot_ref = ws.get_messages()[0]["ref"]
-
-    # Push a change
-    event = ChangeBus.make_event(
-        "orders", "insert", {"id": "3", "symbol": "GOOG", "qty": 200, "status": "new"}, "20260404 00:00:00.100000000000"
-    )
-    bus.publish([event])
-    await asyncio.sleep(0.1)
-
-    # Reconnect with ref
-    ws2 = MockWebSocket()
-    await subpub_svc.on_subscribe(ws2, {
-        "type": "subscribe",
-        "ref": snapshot_ref,
-    })
-    msgs = ws2.get_messages()
-    # Should get delta since we have changes after snapshot ref
-    # (ref might be "" if no changes were in log before, so this could be snapshot)
-    assert msgs[0]["type"] in ("delta", "snapshot")
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "snapshot"
+    assert len(subpub_svc._subscribers) == 1
 
 
 async def test_subpub_unsubscribe(subpub_svc):
@@ -375,9 +364,18 @@ async def stream_svc(db, bus, writer):
     await svc.stop()
 
 
-async def test_stream_fresh_subscribe(stream_svc):
+async def test_stream_requires_ref(stream_svc):
+    """Subscribe without ref should be rejected."""
     ws = MockWebSocket()
     await stream_svc.on_subscribe(ws, {"type": "subscribe"})
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "error"
+
+
+async def test_stream_fresh_subscribe(stream_svc):
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "ref": "00000000 00:00:00.000000000000"})
     msgs = ws.get_messages()
     assert len(msgs) == 1
     assert msgs[0]["type"] == "snapshot"
@@ -386,7 +384,7 @@ async def test_stream_fresh_subscribe(stream_svc):
 
 async def test_stream_live_push(stream_svc, bus):
     ws = MockWebSocket()
-    await stream_svc.on_subscribe(ws, {"type": "subscribe"})
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "ref": "00000000 00:00:00.000000000000"})
     ws.clear()
 
     # Simulate insert event
@@ -407,7 +405,7 @@ async def test_stream_live_push(stream_svc, bus):
 async def test_stream_reconnect_with_ref(stream_svc, bus):
     """Subscribe, get snapshot, push new events, reconnect with ref — should resume."""
     ws = MockWebSocket()
-    await stream_svc.on_subscribe(ws, {"type": "subscribe"})
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "ref": "00000000 00:00:00.000000000000"})
     snapshot_msg = ws.get_messages()[0]
     snapshot_ref = snapshot_msg["ref"]
     initial_count = len(snapshot_msg["rows"])
@@ -438,7 +436,7 @@ async def test_stream_reconnect_with_ref(stream_svc, bus):
 async def test_stream_ignores_non_insert(stream_svc, bus):
     """Stream only processes insert events (append-only)."""
     ws = MockWebSocket()
-    await stream_svc.on_subscribe(ws, {"type": "subscribe"})
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "ref": "00000000 00:00:00.000000000000"})
     ws.clear()
 
     # Send an update event — should be ignored
@@ -485,8 +483,10 @@ async def test_query_fresh_snapshot(query_svc):
     msgs = ws.get_messages()
     assert len(msgs) == 1
     assert msgs[0]["type"] == "snapshot"
+    assert "ref" not in msgs[0]
     assert len(msgs[0]["rows"]) == 1
     assert msgs[0]["rows"][0]["symbol"] == "AAPL"
+    assert "_mkio_ref" not in msgs[0]["rows"][0]
 
 
 async def test_query_live_update(query_svc, bus):
@@ -505,31 +505,25 @@ async def test_query_live_update(query_svc, bus):
     msgs = ws.get_messages()
     assert len(msgs) == 1
     assert msgs[0]["type"] == "update"
+    assert "ref" not in msgs[0]
     assert msgs[0]["row"]["symbol"] == "MSFT"
+    assert "_mkio_ref" not in msgs[0]["row"]
 
 
-async def test_query_delta_reconnect(query_svc, bus):
+async def test_query_snapshot_only(query_svc, bus):
+    """snapshot=False skips the snapshot, updates=False skips adding to subscribers."""
     ws = MockWebSocket()
-    await query_svc.on_subscribe(ws, {"type": "subscribe"})
-    snapshot_ref = ws.get_messages()[0]["ref"]
+    await query_svc.on_subscribe(ws, {"type": "subscribe", "updates": False})
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "snapshot"
+    assert len(query_svc._subscribers) == 0
 
-    # Push changes
-    event = ChangeBus.make_event(
-        "orders", "insert",
-        {"id": "2", "symbol": "TSLA", "qty": 30, "status": "new"},
-        "20260404 00:00:05.000000000000",
-    )
-    bus.publish([event])
-    await asyncio.sleep(0.1)
-
-    # Reconnect with ref
     ws2 = MockWebSocket()
-    await query_svc.on_subscribe(ws2, {
-        "type": "subscribe",
-        "ref": "20260404 00:00:04.000000000000",  # Before the new event
-    })
-    msgs = ws2.get_messages()
-    assert msgs[0]["type"] in ("delta", "snapshot")
+    await query_svc.on_subscribe(ws2, {"type": "subscribe", "snapshot": False})
+    msgs2 = ws2.get_messages()
+    assert len(msgs2) == 0
+    assert len(query_svc._subscribers) == 1
 
 
 async def test_query_with_filter(query_svc, bus):
@@ -585,9 +579,8 @@ async def test_dead_subscriber_removed(subpub_svc, bus):
 
 # ---- Cross-restart recovery ------------------------------------------------
 
-async def test_subpub_cross_restart_delta(db, bus, writer):
-    """After inserting via transaction, stopping the service, and creating a new
-    instance from the same DB, a client should get a delta (not full snapshot)."""
+async def test_subpub_cross_restart_snapshot(db, bus, writer):
+    """After restart, reconnecting always gets a full snapshot."""
     txn_config = {
         "type": "transaction",
         "ops": [
@@ -604,26 +597,16 @@ async def test_subpub_cross_restart_delta(db, bus, writer):
         "watch_tables": ["orders"],
         "key": "id",
         "filterable": ["status", "symbol"],
-        "change_log_size": 100,
     }
     svc1 = SubPubService(config=subpub_config, db=db, change_bus=bus, writer=writer)
     svc1.name = "last_trade"
     await svc1.start()
 
-    # Insert a row via transaction (stamps _mkio_ref in DB)
     ws = MockWebSocket()
     await txn_svc.on_message(ws, {
         "ref": "r1",
         "data": {"id": "1", "symbol": "AAPL", "qty": 100},
     })
-
-    # Subscribe and get snapshot ref
-    ws2 = MockWebSocket()
-    await svc1.on_subscribe(ws2, {"type": "subscribe"})
-    snapshot_ref = ws2.get_messages()[0]["ref"]
-    assert snapshot_ref != ""
-
-    # Insert another row
     ws3 = MockWebSocket()
     await txn_svc.on_message(ws3, {
         "ref": "r2",
@@ -631,30 +614,22 @@ async def test_subpub_cross_restart_delta(db, bus, writer):
     })
     await asyncio.sleep(0.1)
 
-    # Stop the service (simulating restart)
     await svc1.stop()
 
-    # Create a NEW service instance from the same DB (simulating restart)
     bus2 = ChangeBus()
     svc2 = SubPubService(config=subpub_config, db=db, change_bus=bus2, writer=writer)
     svc2.name = "last_trade"
     await svc2.start()
 
-    # Reconnect with the snapshot ref from before "restart"
     ws4 = MockWebSocket()
-    await svc2.on_subscribe(ws4, {
-        "type": "subscribe",
-        "ref": snapshot_ref,
-    })
+    await svc2.on_subscribe(ws4, {"type": "subscribe"})
     msgs = ws4.get_messages()
-    assert msgs[0]["type"] == "delta"
-    # Delta should contain only the row inserted after the snapshot ref
-    assert len(msgs[0]["changes"]) >= 1
-    found = any(c["row"]["symbol"] == "GOOG" for c in msgs[0]["changes"])
-    assert found, "Delta should include the GOOG row inserted after snapshot ref"
-    # _mkio_ref should be visible in client data
-    for c in msgs[0]["changes"]:
-        assert "_mkio_ref" in c["row"]
+    assert msgs[0]["type"] == "snapshot"
+    assert len(msgs[0]["rows"]) == 2
+    symbols = {r["symbol"] for r in msgs[0]["rows"]}
+    assert symbols == {"AAPL", "GOOG"}
+    for row in msgs[0]["rows"]:
+        assert "_mkio_ref" not in row
 
     await svc2.stop()
     await txn_svc.stop()
@@ -693,7 +668,7 @@ async def test_stream_cross_restart_recovery(db, bus, writer):
 
     # Subscribe and get snapshot ref
     ws2 = MockWebSocket()
-    await svc1.on_subscribe(ws2, {"type": "subscribe"})
+    await svc1.on_subscribe(ws2, {"type": "subscribe", "ref": "00000000 00:00:00.000000000000"})
     snapshot_msg = ws2.get_messages()[0]
     snapshot_ref = snapshot_msg["ref"]
     initial_count = len(snapshot_msg["rows"])
@@ -731,8 +706,8 @@ async def test_stream_cross_restart_recovery(db, bus, writer):
     await txn_svc.stop()
 
 
-async def test_query_cross_restart_delta(db, bus, writer):
-    """Query service should support delta reconnection after restart."""
+async def test_query_cross_restart_snapshot(db, bus, writer):
+    """Query service always sends full snapshot after restart."""
     txn_config = {
         "type": "transaction",
         "ops": [
@@ -748,26 +723,16 @@ async def test_query_cross_restart_delta(db, bus, writer):
         "primary_table": "orders",
         "watch_tables": ["orders"],
         "filterable": ["status"],
-        "change_log_size": 100,
     }
     svc1 = QueryService(config=query_config, db=db, change_bus=bus, writer=writer)
     svc1.name = "all_orders"
     await svc1.start()
 
-    # Insert a row
     ws = MockWebSocket()
     await txn_svc.on_message(ws, {
         "ref": "r1",
         "data": {"id": "1", "symbol": "AAPL", "qty": 100},
     })
-    await asyncio.sleep(0.1)
-
-    # Subscribe and get ref
-    ws2 = MockWebSocket()
-    await svc1.on_subscribe(ws2, {"type": "subscribe"})
-    snapshot_ref = ws2.get_messages()[0]["ref"]
-
-    # Insert another row
     ws3 = MockWebSocket()
     await txn_svc.on_message(ws3, {
         "ref": "r2",
@@ -775,24 +740,19 @@ async def test_query_cross_restart_delta(db, bus, writer):
     })
     await asyncio.sleep(0.1)
 
-    # Restart
     await svc1.stop()
     bus2 = ChangeBus()
     svc2 = QueryService(config=query_config, db=db, change_bus=bus2, writer=writer)
     svc2.name = "all_orders"
     await svc2.start()
 
-    # Reconnect with ref
     ws4 = MockWebSocket()
-    await svc2.on_subscribe(ws4, {
-        "type": "subscribe",
-        "ref": snapshot_ref,
-    })
+    await svc2.on_subscribe(ws4, {"type": "subscribe"})
     msgs = ws4.get_messages()
-    assert msgs[0]["type"] == "delta"
-    assert len(msgs[0]["changes"]) >= 1
-    found = any(c["row"]["symbol"] == "MSFT" for c in msgs[0]["changes"])
-    assert found
+    assert msgs[0]["type"] == "snapshot"
+    assert len(msgs[0]["rows"]) == 2
+    symbols = {r["symbol"] for r in msgs[0]["rows"]}
+    assert symbols == {"AAPL", "MSFT"}
 
     await svc2.stop()
     await txn_svc.stop()
@@ -821,28 +781,19 @@ async def test_subpub_subid_on_snapshot(subpub_svc):
     assert msgs[0]["subid"] == "my-sub-1"
 
 
-async def test_subpub_subid_on_delta(subpub_svc, bus):
+async def test_subpub_subid_on_snapshot_and_updates(subpub_svc, bus):
+    """subid echoed on snapshot."""
     ws = MockWebSocket()
-    await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
-    snapshot_ref = ws.get_messages()[0]["ref"]
-
-    event = ChangeBus.make_event(
-        "orders", "insert",
-        {"id": "3", "symbol": "GOOG", "qty": 200, "status": "new"},
-        "20260404 00:00:00.100000000000",
-    )
-    bus.publish([event])
-    await asyncio.sleep(0.1)
-
-    ws2 = MockWebSocket()
-    await subpub_svc.on_subscribe(ws2, {
+    await subpub_svc.on_subscribe(ws, {
         "type": "subscribe",
-        "ref": snapshot_ref,
-        "subid": "delta-sub",
+        "subid": "both-sub",
     })
-    msgs = ws2.get_messages()
-    assert msgs[0]["type"] in ("delta", "snapshot")
-    assert msgs[0]["subid"] == "delta-sub"
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "snapshot"
+    assert msgs[0]["subid"] == "both-sub"
+    assert len(subpub_svc._subscribers) == 1
+    assert subpub_svc._subscribers[0].subid == "both-sub"
 
 
 async def test_subpub_subid_on_live_update(subpub_svc, bus):
@@ -873,7 +824,7 @@ async def test_subpub_no_subid_when_omitted(subpub_svc):
 
 async def test_stream_subid_on_snapshot(stream_svc):
     ws = MockWebSocket()
-    await stream_svc.on_subscribe(ws, {"type": "subscribe", "subid": "stream-1"})
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "ref": "00000000 00:00:00.000000000000", "subid": "stream-1"})
     msgs = ws.get_messages()
     assert msgs[0]["type"] == "snapshot"
     assert msgs[0]["subid"] == "stream-1"
@@ -881,7 +832,7 @@ async def test_stream_subid_on_snapshot(stream_svc):
 
 async def test_stream_subid_on_live_update(stream_svc, bus):
     ws = MockWebSocket()
-    await stream_svc.on_subscribe(ws, {"type": "subscribe", "subid": "stream-live"})
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "ref": "00000000 00:00:00.000000000000", "subid": "stream-live"})
     ws.clear()
 
     event = ChangeBus.make_event(
@@ -900,7 +851,7 @@ async def test_stream_subid_on_live_update(stream_svc, bus):
 
 async def test_stream_no_subid_when_omitted(stream_svc):
     ws = MockWebSocket()
-    await stream_svc.on_subscribe(ws, {"type": "subscribe"})
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "ref": "00000000 00:00:00.000000000000"})
     msgs = ws.get_messages()
     assert "subid" not in msgs[0]
 
@@ -913,28 +864,18 @@ async def test_query_subid_on_snapshot(query_svc):
     assert msgs[0]["subid"] == "query-1"
 
 
-async def test_query_subid_on_delta(query_svc, bus):
+async def test_query_subid_on_updates_only(query_svc, bus):
+    """subid echoed when subscribing with snapshot=False (updates only)."""
     ws = MockWebSocket()
-    await query_svc.on_subscribe(ws, {"type": "subscribe"})
-    snapshot_ref = ws.get_messages()[0]["ref"]
-
-    event = ChangeBus.make_event(
-        "orders", "insert",
-        {"id": "10", "symbol": "NFLX", "qty": 5, "status": "new"},
-        "20260404 00:00:08.000000000000",
-    )
-    bus.publish([event])
-    await asyncio.sleep(0.1)
-
-    ws2 = MockWebSocket()
-    await query_svc.on_subscribe(ws2, {
+    await query_svc.on_subscribe(ws, {
         "type": "subscribe",
-        "ref": snapshot_ref,
-        "subid": "query-delta",
+        "snapshot": False,
+        "subid": "query-updates",
     })
-    msgs = ws2.get_messages()
-    assert msgs[0]["type"] in ("delta", "snapshot")
-    assert msgs[0]["subid"] == "query-delta"
+    msgs = ws.get_messages()
+    assert len(msgs) == 0
+    assert len(query_svc._subscribers) == 1
+    assert query_svc._subscribers[0].subid == "query-updates"
 
 
 async def test_query_subid_on_live_update(query_svc, bus):
@@ -984,3 +925,251 @@ async def test_subpub_multiple_subscribers_different_subids(subpub_svc, bus):
     msgs2 = ws2.get_messages()
     assert msgs1[0]["subid"] == "sub-A"
     assert msgs2[0]["subid"] == "sub-B"
+
+
+# ---- Query _mkio_row --------------------------------------------------------
+
+async def test_query_mkio_row_on_snapshot(query_svc):
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
+    msgs = ws.get_messages()
+    assert msgs[0]["type"] == "snapshot"
+    for row in msgs[0]["rows"]:
+        assert "_mkio_row" in row
+        assert row["_mkio_row"] == row["id"]
+
+
+async def test_query_mkio_row_on_live_update(query_svc, bus):
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "77", "symbol": "AMD", "qty": 10, "status": "new"},
+        "20260404 00:01:00.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["row"]["_mkio_row"] == "77"
+
+
+async def test_query_mkio_row_on_update(query_svc, bus):
+    """Live updates include _mkio_row and exclude _mkio_ref."""
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "78", "symbol": "INTC", "qty": 5, "status": "new"},
+        "20260404 00:01:01.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "update"
+    assert "_mkio_row" in msgs[0]["row"]
+    assert "_mkio_ref" not in msgs[0]["row"]
+    assert msgs[0]["row"]["_mkio_row"] == msgs[0]["row"]["id"]
+
+
+async def test_query_mkio_row_composite_pk(db, bus, writer):
+    """Composite PK produces a JSON array _mkio_row."""
+    await db.write_conn.execute(
+        "CREATE TABLE IF NOT EXISTS positions ("
+        "exchange TEXT NOT NULL, symbol TEXT NOT NULL, qty INTEGER, "
+        "PRIMARY KEY (exchange, symbol))"
+    )
+    await db.write_conn.execute(
+        "ALTER TABLE positions ADD COLUMN _mkio_ref TEXT DEFAULT ''"
+    )
+    await db.write_conn.execute(
+        "INSERT INTO positions (exchange, symbol, qty) VALUES (?, ?, ?)",
+        ("NYSE", "AAPL", 100),
+    )
+    await db.write_conn.commit()
+
+    config = {
+        "type": "query",
+        "primary_table": "positions",
+        "watch_tables": ["positions"],
+        "change_log_size": 100,
+    }
+    svc = QueryService(config=config, db=db, change_bus=bus, writer=writer)
+    svc.name = "positions"
+    await svc.start()
+
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe"})
+    msgs = ws.get_messages()
+    assert msgs[0]["type"] == "snapshot"
+    row = msgs[0]["rows"][0]
+    assert row["_mkio_row"] == '["NYSE","AAPL"]'
+
+    await svc.stop()
+
+
+async def test_query_mkio_row_join_includes_secondary_pk(db, bus, writer):
+    """JOIN query includes PK columns from both tables in _mkio_row."""
+    await db.write_conn.execute(
+        "CREATE TABLE IF NOT EXISTS products ("
+        "product_id TEXT PRIMARY KEY, name TEXT, _mkio_ref TEXT DEFAULT '')"
+    )
+    await db.write_conn.execute(
+        "CREATE TABLE IF NOT EXISTS reviews ("
+        "review_id INTEGER PRIMARY KEY, product_id TEXT, rating INTEGER, "
+        "_mkio_ref TEXT DEFAULT '')"
+    )
+    await db.write_conn.execute(
+        "INSERT INTO products (product_id, name) VALUES ('P1', 'Widget')"
+    )
+    await db.write_conn.execute(
+        "INSERT INTO reviews (review_id, product_id, rating) VALUES (10, 'P1', 5)"
+    )
+    await db.write_conn.execute(
+        "INSERT INTO reviews (review_id, product_id, rating) VALUES (11, 'P1', 3)"
+    )
+    await db.write_conn.commit()
+
+    config = {
+        "type": "query",
+        "primary_table": "products",
+        "watch_tables": ["products", "reviews"],
+        "sql": (
+            "SELECT products.product_id, products.name, "
+            "reviews.review_id, reviews.rating "
+            "FROM products JOIN reviews ON products.product_id = reviews.product_id"
+        ),
+        "change_log_size": 100,
+    }
+    svc = QueryService(config=config, db=db, change_bus=bus, writer=writer)
+    svc.name = "product_reviews"
+    await svc.start()
+
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe"})
+    msgs = ws.get_messages()
+    assert msgs[0]["type"] == "snapshot"
+    rows = msgs[0]["rows"]
+    assert len(rows) == 2
+
+    row_ids = {r["_mkio_row"] for r in rows}
+    assert len(row_ids) == 2
+    assert '["P1",10]' in row_ids
+    assert '["P1",11]' in row_ids
+
+    await svc.stop()
+
+
+# ---- Field projection -------------------------------------------------------
+
+async def test_subpub_fields_snapshot(subpub_svc):
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {
+        "type": "subscribe",
+        "fields": ["symbol", "qty"],
+    })
+    msgs = ws.get_messages()
+    assert msgs[0]["type"] == "snapshot"
+    for row in msgs[0]["rows"]:
+        assert set(row.keys()) == {"symbol", "qty"}
+
+
+async def test_subpub_fields_update(subpub_svc, bus):
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {
+        "type": "subscribe",
+        "fields": ["symbol", "status"],
+    })
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "99", "symbol": "NVDA", "qty": 10, "status": "new", "price": 800},
+        "20260404 00:00:00.500000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert set(msgs[0]["row"].keys()) == {"symbol", "status"}
+
+
+async def test_query_fields_snapshot(query_svc):
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {
+        "type": "subscribe",
+        "fields": ["symbol"],
+    })
+    msgs = ws.get_messages()
+    assert msgs[0]["type"] == "snapshot"
+    for row in msgs[0]["rows"]:
+        assert "symbol" in row
+        assert "_mkio_row" in row
+        assert "qty" not in row
+
+
+async def test_query_fields_update(query_svc, bus):
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {
+        "type": "subscribe",
+        "fields": ["symbol"],
+    })
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "88", "symbol": "AMD", "qty": 5, "status": "new"},
+        "20260404 00:02:00.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    row = msgs[0]["row"]
+    assert "symbol" in row
+    assert "_mkio_row" in row
+    assert "qty" not in row
+
+
+async def test_stream_fields_snapshot(stream_svc):
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {
+        "type": "subscribe",
+        "ref": "00000000 00:00:00.000000000000",
+        "fields": ["event"],
+    })
+    msgs = ws.get_messages()
+    assert msgs[0]["type"] == "snapshot"
+    for row in msgs[0]["rows"]:
+        assert set(row.keys()) == {"event"}
+
+
+async def test_stream_fields_update(stream_svc, bus):
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {
+        "type": "subscribe",
+        "ref": "00000000 00:00:00.000000000000",
+        "fields": ["event"],
+    })
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "audit_log", "insert",
+        {"id": 99, "event": "field_test", "order_id": "42"},
+        "20260404 00:03:00.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert set(msgs[0]["row"].keys()) == {"event"}

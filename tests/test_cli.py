@@ -366,6 +366,7 @@ async def test_subscribe_subpub(client):
 async def test_subscribe_stream(client):
     """Subscribe to stream service, receive snapshot and live update."""
     from mkio.client import MkioClient
+    from mkio._ref import next_ref
 
     # Insert initial data (creates audit_log entry via bind)
     await _insert_order(client, "Buy", "AAPL", 100, 150.0)
@@ -374,7 +375,7 @@ async def test_subscribe_stream(client):
     received: list[dict] = []
 
     async with MkioClient(ws_url, reconnect=False) as mk:
-        async for msg in mk.subscribe("audit_feed"):
+        async for msg in mk.subscribe("audit_feed", ref="00000000 00:00:00.000000000000"):
             received.append(msg)
             if msg.get("type") == "snapshot":
                 # Insert another to trigger update
@@ -482,7 +483,7 @@ async def test_subscribe_with_filter_stream(client):
     received: list[dict] = []
 
     async with MkioClient(ws_url, reconnect=False) as mk:
-        async for msg in mk.subscribe("audit_feed", filter="event == 'order_placed'"):
+        async for msg in mk.subscribe("audit_feed", ref="00000000 00:00:00.000000000000", filter="event == 'order_placed'"):
             received.append(msg)
             if msg.get("type") == "snapshot":
                 # Insert another order (generates order_placed event)

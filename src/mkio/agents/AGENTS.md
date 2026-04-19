@@ -71,9 +71,7 @@ python -m mkio.skill_helpers.discover <url> <service>    # full descriptor as JS
   },
   "subscribe": {
     "message": {"service": "all_orders", "type": "subscribe", "filter": "<expr>"},
-    "response_types": ["snapshot", "delta", "update"],
-    "recovery": "Send ref from last received message to get a delta of missed changes.",
-    "change_log_size": 10000
+    "response_types": ["snapshot", "update"]
   }
 }
 ```
@@ -109,20 +107,24 @@ Connect to `ws://<host>:<port>/ws` (general) or `ws://<host>:<port>/ws/<service>
 ### Subscribing
 
 ```json
-{"service": "all_orders", "type": "subscribe", "filter": "status == 'pending'", "ref": "<last seen ref for recovery>"}
+{"service": "all_orders", "type": "subscribe", "filter": "status == 'pending'"}
 ```
 
 - `filter` — expression string (only valid if the service descriptor lists `filterable` fields)
-- `ref` — ref from the last received message; the server sends only changes since that point (delta recovery)
-- `subid` — optional string echoed on every response (snapshot, delta, update) for this subscription, useful for correlating when multiplexing subscriptions on one WebSocket
+- `fields` — optional list of field names to include in each row (e.g., `["symbol", "qty"]`). Omit to receive all fields. Filtering still operates on the full row before projection.
+- `ref` — (stream only, required) ref from the last received message for cursor-based reconnection
+- `subid` — optional string echoed on every response (snapshot, update) for this subscription, useful for correlating when multiplexing subscriptions on one WebSocket
+- `snapshot` — (query only) boolean, default true. Set to false to skip the initial snapshot.
+- `updates` — (query only) boolean, default true. Set to false to receive only the snapshot.
 
 ### Subscription messages
 
 | Type | Shape | When |
 |------|-------|------|
-| `snapshot` | `{"type": "snapshot", "rows": [...], "ref": "..."}` | Initial state on subscribe |
-| `delta` | `{"type": "delta", "changes": [{"op": "insert", "row": {...}}, ...], "ref": "..."}` | Catch-up after ref-based reconnect |
-| `update` | `{"type": "update", "op": "insert\|update\|delete", "row": {...}, "ref": "..."}` | Live change |
+| `snapshot` | `{"type": "snapshot", "rows": [...]}` | Initial state on subscribe |
+| `update` | `{"type": "update", "op": "insert\|update\|delete", "row": {...}}` | Live change |
+
+Stream service messages include `ref` for cursor-based reconnection. **Query service rows** include a `_mkio_row` field — a collision-free string identifying the row by its primary key(s) across all watched tables. Single PK: `"42"`. Multiple PKs: `["P1",10]`.
 
 ### Check (post-disconnect recovery)
 
@@ -137,8 +139,8 @@ Returns the original result if committed, or an error if not found.
 Format: `YYYYMMDD HH:mm:ss.mmmuuunnnppp` (UTC, lexicographically sortable).
 
 - Every transaction result includes a `ref`
-- Every subscription message includes a `ref`
-- Save the last `ref` you receive. Pass it back on reconnect to resume from that point.
+- Stream service messages include `ref` for cursor-based reconnection
+- Save the last `ref` you receive from a stream. Pass it back on reconnect to resume from that point.
 - The same ref is stamped into the `_mkio_ref` column in the database
 
 ## Service Types

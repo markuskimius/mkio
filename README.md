@@ -72,7 +72,8 @@ serve({...})  # or pass a dict
 - **Expression language** — safe, extensible filter and formatter expressions (`qty > 100 AND status == 'pending'`)
 - **Schema migration** — automatic detection of safe/destructive changes with interactive confirmation
 - **Write batching** — hundreds of writes committed in a single SQLite transaction for high throughput
-- **Reconnection recovery** — ref-based delta sync across all service types, persisted across server restarts via `_mkio_ref` column
+- **Reconnection recovery** — stream services use ref-based cursor reconnection persisted across server restarts via `_mkio_ref` column; subpub and query always replay a full snapshot
+- **Field projection** — subscribers can request specific fields per subscription, reducing payload size
 - **Client libraries** — Python and JavaScript clients with auto-reconnect and ref tracking
 - **Graceful shutdown** — drains pending writes, checkpoints WAL, clean close
 - **Service monitoring** — tap into any service's inbound/outbound message flow via CLI or WebSocket
@@ -160,10 +161,13 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 // Subscribe
 {"service": "all_orders", "type": "subscribe", "filter": "status == 'pending'"}
 
-// Subscribe with subid (echoed on every snapshot, delta, and update for this subscription)
+// Subscribe with subid (echoed on every snapshot and update for this subscription)
 {"service": "all_orders", "type": "subscribe", "subid": "my-sub-1"}
 
-// Reconnect with ref (resumes from last seen position)
+// Subscribe with field projection (receive only specified columns)
+{"service": "all_orders", "type": "subscribe", "fields": ["symbol", "qty"]}
+
+// Stream reconnect with ref (required for streams)
 {"service": "audit_feed", "type": "subscribe", "ref": "20260404 15:30:45.123456000000"}
 ```
 
@@ -179,7 +183,6 @@ async with MkioClient("ws://localhost:8080/ws") as client:
 
     async for msg in client.subscribe("all_orders", filter="status == 'pending'"):
         print(msg)
-        # msg["ref"] tracks position for recovery on reconnect
 ```
 
 ### JavaScript
@@ -317,10 +320,23 @@ mkio send http://localhost:8080 orders mixed.csv                 # CSV with per-
 
 ### Subscribe to live data
 
+Each listener service type has its own command with only the relevant options:
+
 ```bash
-mkio subscribe http://localhost:8080 all_orders
-mkio subscribe http://localhost:8080 all_orders --filter "status == 'pending'"
-mkio subscribe http://localhost:8080 all_orders --ref "20260404 15:30:45.123456000000"  # Resume from ref
+# SubPub — snapshot + live updates
+mkio subpub http://localhost:8080 last_trade
+mkio subpub http://localhost:8080 last_trade --filter "symbol == 'AAPL'"
+mkio subpub http://localhost:8080 last_trade --fields symbol,qty
+
+# Stream — ring buffer with cursor reconnect (ref defaults to now)
+mkio stream http://localhost:8080 audit_feed
+mkio stream http://localhost:8080 audit_feed --ref "20260404 15:30:45.123456000000"
+mkio stream http://localhost:8080 audit_feed --fields event,order_id
+
+# Query — snapshot + live updates
+mkio query http://localhost:8080 all_orders
+mkio query http://localhost:8080 all_orders --filter "status == 'pending'"
+mkio query http://localhost:8080 all_orders --fields symbol,qty --snapshotOnly
 ```
 
 ### Monitor a service

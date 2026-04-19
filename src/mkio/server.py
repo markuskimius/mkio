@@ -310,13 +310,7 @@ def _build_listener_detail(
         },
     }
     if svc_type == "subpub":
-        subscribe["recovery"] = (
-            "Send ref from last received message to get a delta of missed changes. "
-            "If ref is too old (beyond change log), a full snapshot is sent instead."
-        )
-        subscribe["response_types"] = ["snapshot", "delta", "update"]
-        log_size = config.get("change_log_size", 10000)
-        subscribe["change_log_size"] = log_size
+        subscribe["response_types"] = ["snapshot", "update"]
     elif svc_type == "stream":
         subscribe["recovery"] = (
             "Send ref from last received message to resume from that point in the buffer. "
@@ -325,13 +319,7 @@ def _build_listener_detail(
         subscribe["response_types"] = ["snapshot", "update"]
         subscribe["buffer_size"] = config.get("buffer_size", 10000)
     elif svc_type == "query":
-        subscribe["recovery"] = (
-            "Send ref from last received message to get a delta of missed changes. "
-            "If ref is too old (beyond change log), a full snapshot from the database is sent."
-        )
-        subscribe["response_types"] = ["snapshot", "delta", "update"]
-        log_size = config.get("change_log_size", 10000)
-        subscribe["change_log_size"] = log_size
+        subscribe["response_types"] = ["snapshot", "update"]
 
     if filterable:
         subscribe["message"]["filter"] = "<expr>"
@@ -340,16 +328,18 @@ def _build_listener_detail(
     detail["subscribe"] = subscribe
 
     # Examples
+    cli_cmd = svc_type if svc_type in ("subpub", "stream", "query") else "subpub"
     example: dict[str, str] = {}
-    example["subscribe"] = f"mkio subscribe <url> {name}"
+    example["subscribe"] = f"mkio {cli_cmd} <url> {name}"
     if filterable:
         f = filterable[0]
         example["subscribe_filter"] = (
-            f"mkio subscribe <url> {name} --filter \"{f} == '...'\""
+            f"mkio {cli_cmd} <url> {name} --filter \"{f} == '...'\""
         )
-    example["subscribe_recover"] = (
-        f"mkio subscribe <url> {name} --ref \"<ref from last message>\""
-    )
+    if svc_type == "stream":
+        example["subscribe_recover"] = (
+            f"mkio {cli_cmd} <url> {name} --ref \"<ref from last message>\""
+        )
     detail["example"] = example
 
     return detail

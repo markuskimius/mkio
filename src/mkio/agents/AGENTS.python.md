@@ -43,12 +43,12 @@ result = await client.send("orders", {"side": "Buy", "symbol": "AAPL", "qty": 10
 - `msgid="..."` — optional correlation ID, echoed on result/error
 - Returns the full result dict: `{"type": "result", "ok": True, "ref": "...", "rows": [...]}`
 
-### subscribe(service, filter=None, ref=None, subid=None) -> AsyncIterator[dict]
+### subscribe(service, filter=None, ref=None, subid=None, snapshot=True, updates=True, fields=None) -> AsyncIterator[dict]
 
-Subscribe and yield messages (snapshot, delta, update).
+Subscribe and yield messages (snapshot, update).
 
 ```python
-async for msg in client.subscribe("all_orders", filter="status == 'pending'"):
+async for msg in client.subscribe("all_orders", filter="status == 'pending'", fields=["symbol", "qty"]):
     if msg["type"] == "snapshot":
         rows = msg["rows"]
     elif msg["type"] == "update":
@@ -56,8 +56,11 @@ async for msg in client.subscribe("all_orders", filter="status == 'pending'"):
 ```
 
 - `filter` — expression string (only for services with `filterable` fields)
-- `ref` — pass the last received `ref` to resume from that point (delta recovery)
+- `fields` — list of field names to include in each row (omit for all fields)
+- `ref` — pass the last received `ref` to resume from that point (stream only, required for streams)
 - `subid` — optional string echoed on every response for this subscription (for multiplexing)
+- `snapshot` — set to False to skip the initial snapshot (query only; subpub always sends both)
+- `updates` — set to False to receive only the snapshot then stop (query only)
 - The client tracks `ref` internally — on auto-reconnect, it re-subscribes with the last seen ref
 
 ### check(service, ref) -> dict
@@ -114,7 +117,7 @@ asyncio.run(main())
 The client reconnects automatically with exponential backoff when the WebSocket drops. On reconnect:
 
 1. A new WebSocket connection is established
-2. All active subscriptions are re-sent with the last received `ref`
-3. The server responds with a delta (changes since that ref) or a full snapshot if the ref is too old
+2. All active subscriptions are re-sent with their stored state (ref, filter, fields, etc.)
+3. Stream services resume from the last ref; subpub and query always send a full snapshot
 
 No application code needed — just iterate the async generator and it resumes.

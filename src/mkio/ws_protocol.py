@@ -41,7 +41,7 @@ def make_error(ref: str | None, message: str, *, msgid: str | None = None) -> by
 
 
 def make_snapshot(
-    ref: str,
+    ref: str | None,
     service: str,
     rows: list[dict[str, Any]],
     *,
@@ -50,16 +50,17 @@ def make_snapshot(
     envelope: dict[str, Any] = {
         "type": "snapshot",
         "service": service,
-        "ref": ref,
         "rows": rows,
     }
+    if ref is not None:
+        envelope["ref"] = ref
     if subid is not None:
         envelope["subid"] = subid
     return dumps(envelope)
 
 
 def make_delta(
-    ref: str,
+    ref: str | None,
     service: str,
     changes: list[dict[str, Any]],
     *,
@@ -68,9 +69,10 @@ def make_delta(
     envelope: dict[str, Any] = {
         "type": "delta",
         "service": service,
-        "ref": ref,
         "changes": changes,
     }
+    if ref is not None:
+        envelope["ref"] = ref
     if subid is not None:
         envelope["subid"] = subid
     return dumps(envelope)
@@ -78,7 +80,7 @@ def make_delta(
 
 def make_update(
     service: str,
-    ref: str,
+    ref: str | None,
     op: str,
     row: dict[str, Any],
     *,
@@ -87,10 +89,11 @@ def make_update(
     envelope: dict[str, Any] = {
         "type": "update",
         "service": service,
-        "ref": ref,
         "op": op,
         "row": row,
     }
+    if ref is not None:
+        envelope["ref"] = ref
     if subid is not None:
         envelope["subid"] = subid
     return dumps(envelope)
