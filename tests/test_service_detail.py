@@ -41,7 +41,7 @@ TEST_CONFIG = {
     },
     "services": {
         "orders": {
-            "type": "transaction",
+            "protocol": "transaction",
             "ops": {
                 "place": [
                     {"table": "orders", "op_type": "insert", "fields": ["side", "symbol", "qty", "price"]},
@@ -54,18 +54,18 @@ TEST_CONFIG = {
             },
         },
         "last_trade": {
-            "type": "subpub",
+            "protocol": "subpub",
             "primary_table": "orders",
-            "key": "id",
+            "topic": "id",
             "change_log_size": 100,
         },
         "audit_feed": {
-            "type": "stream",
+            "protocol": "stream",
             "primary_table": "audit_log",
             "buffer_size": 100,
         },
         "all_orders": {
-            "type": "query",
+            "protocol": "query",
             "primary_table": "orders",
             "filterable": ["status", "symbol"],
             "change_log_size": 100,
@@ -99,7 +99,7 @@ async def test_detail_transaction(client):
     data = await resp.json()
 
     assert data["name"] == "orders"
-    assert data["type"] == "transaction"
+    assert data["protocol"] == "transaction"
     assert "place" in data["ops"]
     assert "update_status" in data["ops"]
 
@@ -170,9 +170,9 @@ async def test_detail_subpub(client):
     data = await resp.json()
 
     assert data["name"] == "last_trade"
-    assert data["type"] == "subpub"
+    assert data["protocol"] == "subpub"
     assert data["primary_table"] == "orders"
-    assert data["key"] == "id"
+    assert data["topic"] == "id"
 
     # Schema from orders table
     schema = data["schema"]
@@ -189,8 +189,8 @@ async def test_detail_subpub(client):
     sub = data["subscribe"]
     assert sub["message"]["service"] == "last_trade"
     assert sub["message"]["type"] == "subscribe"
-    assert sub["message"]["topic"] == "<key_value>"
-    assert sub["topic_key"] == "id"
+    assert sub["message"]["topic"] == "<topic_value>"
+    assert sub["topic"] == "id"
     assert "recovery" not in sub
     assert sub["response_types"] == ["snapshot", "update"]
     assert "filter_fields" not in sub
@@ -208,7 +208,7 @@ async def test_detail_stream(client):
     data = await resp.json()
 
     assert data["name"] == "audit_feed"
-    assert data["type"] == "stream"
+    assert data["protocol"] == "stream"
     assert data["primary_table"] == "audit_log"
 
     # Stream subscribe protocol
@@ -230,7 +230,7 @@ async def test_detail_query(client):
     data = await resp.json()
 
     assert data["name"] == "all_orders"
-    assert data["type"] == "query"
+    assert data["protocol"] == "query"
     assert data["filterable"] == ["status", "symbol"]
     assert "schema" in data
 

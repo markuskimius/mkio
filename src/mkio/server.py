@@ -99,7 +99,7 @@ async def _api_services(request: web.Request) -> web.Response:
     for name, svc in services.items():
         info: dict[str, Any] = {
             "name": name,
-            "type": svc.config.get("type", "unknown"),
+            "protocol": svc.config.get("protocol", "unknown"),
         }
         # Include useful metadata per service type
         if "primary_table" in svc.config:
@@ -141,8 +141,8 @@ def _build_service_detail(
     name: str, config: dict[str, Any], tables: dict[str, dict]
 ) -> dict[str, Any]:
     """Build detailed service info from config and table schemas."""
-    svc_type = config.get("type", "unknown")
-    detail: dict[str, Any] = {"name": name, "type": svc_type}
+    svc_type = config.get("protocol", "unknown")
+    detail: dict[str, Any] = {"name": name, "protocol": svc_type}
 
     desc = config.get("description")
     if desc:
@@ -281,11 +281,11 @@ def _build_listener_detail(
     if primary_table:
         detail["primary_table"] = primary_table
 
-    key = config.get("key")
-    if key:
-        detail["key"] = key
+    topic_field = config.get("topic")
+    if topic_field:
+        detail["topic"] = topic_field
 
-    svc_type = config.get("type")
+    svc_type = config.get("protocol")
     filterable = config.get("filterable", [])
     if filterable and svc_type != "subpub":
         detail["filterable"] = filterable
@@ -310,9 +310,9 @@ def _build_listener_detail(
         },
     }
     if svc_type == "subpub":
-        subscribe["message"]["topic"] = "<key_value>"
+        subscribe["message"]["topic"] = "<topic_value>"
         subscribe["response_types"] = ["snapshot", "update"]
-        subscribe["topic_key"] = config.get("key", "")
+        subscribe["topic"] = config.get("topic", "")
     elif svc_type == "stream":
         subscribe["recovery"] = (
             "Send ref from last received message to resume from that point in the buffer. "
@@ -334,8 +334,8 @@ def _build_listener_detail(
     cli_cmd = svc_type if svc_type in ("subpub", "stream", "query") else "subpub"
     example: dict[str, str] = {}
     if svc_type == "subpub":
-        key = config.get("key", "id")
-        example["subscribe"] = f"mkio {cli_cmd} <url> {name} --topic <{key}>"
+        topic_field = config.get("topic", "id")
+        example["subscribe"] = f"mkio {cli_cmd} <url> {name} --topic <{topic_field}>"
     else:
         example["subscribe"] = f"mkio {cli_cmd} <url> {name}"
     if filterable and svc_type != "subpub":
@@ -426,7 +426,7 @@ async def _on_startup(app: web.Application) -> None:
     # Services
     services: dict[str, Service] = {}
     for svc_name, svc_config in cfg.get("services", {}).items():
-        svc_type = svc_config.get("type", "")
+        svc_type = svc_config.get("protocol", "")
 
         if svc_type in SERVICE_TYPES:
             cls = SERVICE_TYPES[svc_type]
@@ -437,7 +437,7 @@ async def _on_startup(app: web.Application) -> None:
             mod = importlib.import_module(module_path)
             cls = getattr(mod, cls_name)
         else:
-            raise ValueError(f"Unknown service type: {svc_type!r} for service '{svc_name}'")
+            raise ValueError(f"Unknown protocol: {svc_type!r} for service '{svc_name}'")
 
         svc = cls(config=svc_config, db=db, change_bus=bus, writer=writer)
         svc.name = svc_name

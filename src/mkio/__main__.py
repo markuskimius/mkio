@@ -97,12 +97,12 @@ async def _fetch_services(url: str) -> None:
 
     # Print table
     name_w = max(len(s["name"]) for s in services)
-    type_w = max(len(s["type"]) for s in services)
+    proto_w = max(len(s["protocol"]) for s in services)
     name_w = max(name_w, 7)  # "SERVICE"
-    type_w = max(type_w, 4)  # "TYPE"
+    proto_w = max(proto_w, 8)  # "PROTOCOL"
 
-    print(f"{'SERVICE':<{name_w}}  {'TYPE':<{type_w}}  DETAILS")
-    print(f"{'-' * name_w}  {'-' * type_w}  {'-' * 30}")
+    print(f"{'SERVICE':<{name_w}}  {'PROTOCOL':<{proto_w}}  DETAILS")
+    print(f"{'-' * name_w}  {'-' * proto_w}  {'-' * 30}")
     for svc in services:
         details = []
         if "primary_table" in svc:
@@ -111,7 +111,7 @@ async def _fetch_services(url: str) -> None:
             details.append(f"tables={','.join(svc['tables'])}")
         if "watch_tables" in svc:
             details.append(f"watch={','.join(svc['watch_tables'])}")
-        print(f"{svc['name']:<{name_w}}  {svc['type']:<{type_w}}  {', '.join(details)}")
+        print(f"{svc['name']:<{name_w}}  {svc['protocol']:<{proto_w}}  {', '.join(details)}")
 
 
 async def _fetch_service_detail(url: str, service_name: str) -> None:
@@ -137,15 +137,15 @@ async def _fetch_service_detail(url: str, service_name: str) -> None:
 def _print_service_detail(detail: dict[str, Any]) -> None:
     """Pretty-print service detail."""
     name = detail["name"]
-    svc_type = detail["type"]
+    protocol = detail["protocol"]
     desc = detail.get("description", "")
 
-    print(f"Service: {name} ({svc_type})")
+    print(f"Service: {name} ({protocol})")
     if desc:
         print(f"  {desc}")
     print()
 
-    if svc_type == "transaction":
+    if protocol == "transaction":
         _print_transaction_detail(detail)
     else:
         _print_listener_detail(detail)
@@ -254,9 +254,9 @@ def _print_listener_detail(detail: dict[str, Any]) -> None:
     if primary:
         print(f"  Table: {primary}")
 
-    key = detail.get("key")
-    if key:
-        print(f"  Key: {key}")
+    topic = detail.get("topic")
+    if topic:
+        print(f"  Topic: {topic}")
 
     filterable = detail.get("filterable", [])
     if filterable:

@@ -45,7 +45,7 @@ TEST_CONFIG = {
     },
     "services": {
         "orders": {
-            "type": "transaction",
+            "protocol": "transaction",
             "ops": {
                 "place": [
                     {"table": "orders", "op_type": "insert", "fields": ["side", "symbol", "qty", "price"]},
@@ -58,18 +58,18 @@ TEST_CONFIG = {
             },
         },
         "last_trade": {
-            "type": "subpub",
+            "protocol": "subpub",
             "primary_table": "orders",
-            "key": "id",
+            "topic": "id",
             "change_log_size": 100,
         },
         "audit_feed": {
-            "type": "stream",
+            "protocol": "stream",
             "primary_table": "audit_log",
             "buffer_size": 100,
         },
         "all_orders": {
-            "type": "query",
+            "protocol": "query",
             "primary_table": "orders",
             "filterable": ["status", "symbol"],
             "change_log_size": 100,

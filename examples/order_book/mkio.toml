@@ -15,7 +15,7 @@ columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", event = "TEXT", order_id =
 # --- Transaction service (all order operations at one endpoint) ---
 
 [services.orders]
-type = "transaction"
+protocol = "transaction"
 
 [services.orders.ops]
 new = [
@@ -42,9 +42,9 @@ cancel = [
 # --- Live data services ---
 
 [services.last_trade]
-type = "subpub"
+protocol = "subpub"
 primary_table = "orders"
-key = "symbol"
+topic = "symbol"
 where = "status == 'filled'"
 change_log_size = 10000
 
@@ -57,11 +57,11 @@ symbol = "symbol"
 price = "IF(side == 'Buy', price, -price)"
 time = "_mkio_ref"
 
-# SubPub with computed key — subscribe by "AAPL:Buy" or "MSFT:Sell"
+# SubPub with computed topic — subscribe by "AAPL:Buy" or "MSFT:Sell"
 [services.last_trade_by_side]
-type = "subpub"
+protocol = "subpub"
 primary_table = "orders"
-key = "topic_key"
+topic = "topic_key"
 sql = "SELECT *, symbol || ':' || side AS topic_key FROM orders"
 where = "status == 'filled'"
 
@@ -72,12 +72,12 @@ price = "price"
 qty = "qty"
 
 [services.audit_feed]
-type = "stream"
+protocol = "stream"
 primary_table = "audit_log"
 buffer_size = 10000
 
 [services.all_orders]
-type = "query"
+protocol = "query"
 primary_table = "orders"
 filterable = ["status", "symbol"]
 change_log_size = 10000

@@ -33,16 +33,16 @@ TEST_CONFIG = {
     },
     "services": {
         "add_order": {
-            "type": "transaction",
+            "protocol": "transaction",
             "ops": [
                 {"table": "orders", "op_type": "insert", "fields": ["id", "symbol", "qty"]},
             ],
         },
         "last_trade": {
-            "type": "subpub",
+            "protocol": "subpub",
             "primary_table": "orders",
             "watch_tables": ["orders"],
-            "key": "id",
+            "topic": "id",
             "change_log_size": 100,
         },
     },
@@ -96,11 +96,11 @@ async def test_api_services_list(client):
 
     # Check metadata
     txn = next(s for s in data if s["name"] == "add_order")
-    assert txn["type"] == "transaction"
+    assert txn["protocol"] == "transaction"
     assert "tables" in txn
 
     subpub = next(s for s in data if s["name"] == "last_trade")
-    assert subpub["type"] == "subpub"
+    assert subpub["protocol"] == "subpub"
     assert subpub["primary_table"] == "orders"
 
 

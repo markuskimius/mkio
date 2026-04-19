@@ -44,38 +44,38 @@ TEST_CONFIG = {
     },
     "services": {
         "add_order": {
-            "type": "transaction",
+            "protocol": "transaction",
             "ops": [
                 {"table": "orders", "op_type": "insert", "fields": ["id", "symbol", "qty"]},
             ],
         },
         "update_order": {
-            "type": "transaction",
+            "protocol": "transaction",
             "ops": [
                 {"table": "orders", "op_type": "update", "fields": ["qty"], "key": ["id"]},
             ],
         },
         "delete_order": {
-            "type": "transaction",
+            "protocol": "transaction",
             "ops": [
                 {"table": "orders", "op_type": "delete", "key": ["id"]},
             ],
         },
         "last_trade": {
-            "type": "subpub",
+            "protocol": "subpub",
             "primary_table": "orders",
             "watch_tables": ["orders"],
-            "key": "id",
+            "topic": "id",
             "change_log_size": 100,
         },
         "audit_feed": {
-            "type": "stream",
+            "protocol": "stream",
             "primary_table": "audit_log",
             "watch_tables": ["audit_log"],
             "buffer_size": 100,
         },
         "all_orders": {
-            "type": "query",
+            "protocol": "query",
             "primary_table": "orders",
             "watch_tables": ["orders"],
             "filterable": ["status"],

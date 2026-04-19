@@ -15,7 +15,7 @@ host = "127.0.0.1"
 columns = { id = "TEXT PRIMARY KEY", name = "TEXT" }
 
 [services.add_item]
-type = "transaction"
+protocol = "transaction"
 table = "items"
 op_type = "insert"
 fields = ["id", "name"]
@@ -56,7 +56,7 @@ def test_single_table_transaction_normalization():
         "tables": {"orders": {"columns": {"id": "TEXT PRIMARY KEY", "qty": "INTEGER"}}},
         "services": {
             "add_order": {
-                "type": "transaction",
+                "protocol": "transaction",
                 "table": "orders",
                 "op_type": "insert",
                 "fields": ["id", "qty"],
@@ -76,9 +76,9 @@ def test_watch_tables_normalization():
         "tables": {"orders": {"columns": {"id": "TEXT PRIMARY KEY"}}},
         "services": {
             "live": {
-                "type": "subpub",
+                "protocol": "subpub",
                 "primary_table": "orders",
-                "key": "id",
+                "topic": "id",
             }
         },
     })
@@ -92,7 +92,7 @@ def test_filterable_validation_strict():
             "tables": {"orders": {"columns": {"id": "TEXT PRIMARY KEY"}}},
             "services": {
                 "live": {
-                    "type": "query",
+                    "protocol": "query",
                     "primary_table": "orders",
                     "filterable": ["bogus"],
                 }
@@ -106,7 +106,7 @@ def test_filterable_validation_skipped_for_sql():
         "tables": {"orders": {"columns": {"id": "TEXT PRIMARY KEY"}}},
         "services": {
             "live": {
-                "type": "query",
+                "protocol": "query",
                 "primary_table": "orders",
                 "sql": "SELECT id, id || '-alias' as computed FROM orders",
                 "filterable": ["computed"],
@@ -121,9 +121,9 @@ def test_publish_compiled():
         "tables": {"orders": {"columns": {"id": "TEXT PRIMARY KEY", "qty": "INTEGER"}}},
         "services": {
             "live": {
-                "type": "subpub",
+                "protocol": "subpub",
                 "primary_table": "orders",
-                "key": "id",
+                "topic": "id",
                 "publish": {"double_qty": "qty * 2"},
             }
         },

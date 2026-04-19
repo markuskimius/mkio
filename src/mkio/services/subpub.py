@@ -29,7 +29,7 @@ class SubPubService(Service):
     Config:
         primary_table: str
         watch_tables: list[str]
-        key: str (primary key field for cache indexing and topic matching)
+        topic: str (column name used for topic matching)
         sql: str (optional, defaults to SELECT * FROM primary_table)
         where: str (optional, expression filter applied to rows before caching)
         publish: dict (optional, expression formatter)
@@ -38,7 +38,7 @@ class SubPubService(Service):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._table = self.config["primary_table"]
-        self._key_field = self.config["key"]
+        self._topic_field = self.config["topic"]
         self._sql = self.config.get("sql", f"SELECT * FROM {self._table}")
         self._formatter = self.config.get("_compiled_formatter")
         self._where = self.config.get("_compiled_where")
@@ -58,7 +58,7 @@ class SubPubService(Service):
         for row in rows:
             if self._where and not self._where(row):
                 continue
-            self._cache[str(row[self._key_field])] = row
+            self._cache[str(row[self._topic_field])] = row
 
         # Build the not-found template: all output fields set to null,
         # then overlaid with configured defaults.
@@ -120,7 +120,7 @@ class SubPubService(Service):
             out["_mkio_exists"] = True
         else:
             out = dict(self._not_found_template)
-            out[self._key_field] = sub.topic
+            out[self._topic_field] = sub.topic
             out = self._project(out, sub.fields)
             out["_mkio_exists"] = False
         return out
@@ -148,10 +148,10 @@ class SubPubService(Service):
 
             if event.table == self._table:
                 if not self._needs_requery:
-                    key_val = str(event.row.get(self._key_field))
-                    notify = self._update_cache(event, key_val)
+                    topic_val = str(event.row.get(self._topic_field))
+                    notify = self._update_cache(event, topic_val)
                     if notify is not None:
-                        await self._notify_topic(key_val, exists=notify)
+                        await self._notify_topic(topic_val, exists=notify)
                 else:
                     old_cache = dict(self._cache)
                     await self._requery_all()
@@ -167,7 +167,7 @@ class SubPubService(Service):
                     if old_cache.get(topic) != self._cache.get(topic):
                         await self._notify_topic(topic, exists=topic in self._cache)
 
-    def _update_cache(self, event: ChangeEvent, key_val: Any) -> bool | None:
+    def _update_cache(self, event: ChangeEvent, topic_val: Any) -> bool | None:
         """Update cache for a primary-table change without JOINs.
 
         Returns True (row exists), False (row removed), or None (no change).
@@ -175,15 +175,15 @@ class SubPubService(Service):
         passes_where = not self._where or self._where(event.row)
         if event.op in ("insert", "update", "upsert"):
             if passes_where:
-                self._cache[key_val] = event.row
+                self._cache[topic_val] = event.row
                 return True
-            if key_val in self._cache:
-                self._cache.pop(key_val)
+            if topic_val in self._cache:
+                self._cache.pop(topic_val)
                 return False
             return None
         if event.op == "delete":
-            if key_val in self._cache:
-                self._cache.pop(key_val)
+            if topic_val in self._cache:
+                self._cache.pop(topic_val)
                 return False
             return None
         return None
@@ -217,4 +217,4 @@ class SubPubService(Service):
         for row in rows:
             if self._where and not self._where(row):
                 continue
-            self._cache[str(row[self._key_field])] = row
+            self._cache[str(row[self._topic_field])] = row

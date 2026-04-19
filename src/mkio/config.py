@@ -53,7 +53,7 @@ def _normalize_service(
     name: str, svc: dict[str, Any], config: dict[str, Any]
 ) -> None:
     """Normalize a single service config."""
-    svc_type = svc.get("type", "")
+    svc_type = svc.get("protocol", "")
 
     # Transaction shorthand: single-table -> ops list
     if svc_type == "transaction":

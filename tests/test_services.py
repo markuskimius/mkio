@@ -83,7 +83,7 @@ async def writer(db, bus):
 @pytest_asyncio.fixture
 async def txn_svc(db, bus, writer):
     config = {
-        "type": "transaction",
+        "protocol": "transaction",
         "ops": [
             {"table": "orders", "op_type": "insert", "fields": ["id", "symbol", "qty"]},
         ],
@@ -167,10 +167,10 @@ async def subpub_svc(db, bus, writer):
     await db.write_conn.commit()
 
     config = {
-        "type": "subpub",
+        "protocol": "subpub",
         "primary_table": "orders",
         "watch_tables": ["orders"],
-        "key": "id",
+        "topic": "id",
         "change_log_size": 100,
     }
     svc = SubPubService(config=config, db=db, change_bus=bus, writer=writer)
@@ -330,10 +330,10 @@ async def subpub_where_svc(db, bus, writer):
     from mkio._expr import compile_filter
 
     config = {
-        "type": "subpub",
+        "protocol": "subpub",
         "primary_table": "orders",
         "watch_tables": ["orders"],
-        "key": "id",
+        "topic": "id",
         "where": "status == 'filled'",
         "_compiled_where": compile_filter("status == 'filled'"),
         "change_log_size": 100,
@@ -426,10 +426,10 @@ async def subpub_defaults_svc(db, bus, writer):
     await db.write_conn.commit()
 
     config = {
-        "type": "subpub",
+        "protocol": "subpub",
         "primary_table": "orders",
         "watch_tables": ["orders"],
-        "key": "id",
+        "topic": "id",
         "defaults": {"qty": "0", "status": "'unknown'"},
         "change_log_size": 100,
     }
@@ -499,10 +499,10 @@ async def subpub_computed_key_svc(db, bus, writer):
     await db.write_conn.commit()
 
     config = {
-        "type": "subpub",
+        "protocol": "subpub",
         "primary_table": "orders",
         "watch_tables": ["orders"],
-        "key": "topic_key",
+        "topic": "topic_key",
         "sql": "SELECT *, id || ':' || symbol AS topic_key FROM orders",
         "change_log_size": 100,
     }
@@ -572,7 +572,7 @@ async def stream_svc(db, bus, writer):
     await db.write_conn.commit()
 
     config = {
-        "type": "stream",
+        "protocol": "stream",
         "primary_table": "audit_log",
         "watch_tables": ["audit_log"],
         "buffer_size": 100,
@@ -684,7 +684,7 @@ async def query_svc(db, bus, writer):
     await db.write_conn.commit()
 
     config = {
-        "type": "query",
+        "protocol": "query",
         "primary_table": "orders",
         "watch_tables": ["orders"],
         "filterable": ["status"],
@@ -802,7 +802,7 @@ async def test_dead_subscriber_removed(subpub_svc, bus):
 async def test_subpub_cross_restart_snapshot(db, bus, writer):
     """After restart, reconnecting always gets a full snapshot."""
     txn_config = {
-        "type": "transaction",
+        "protocol": "transaction",
         "ops": [
             {"table": "orders", "op_type": "insert", "fields": ["id", "symbol", "qty"]},
         ],
@@ -812,10 +812,10 @@ async def test_subpub_cross_restart_snapshot(db, bus, writer):
     await txn_svc.start()
 
     subpub_config = {
-        "type": "subpub",
+        "protocol": "subpub",
         "primary_table": "orders",
         "watch_tables": ["orders"],
-        "key": "id",
+        "topic": "id",
     }
     svc1 = SubPubService(config=subpub_config, db=db, change_bus=bus, writer=writer)
     svc1.name = "last_trade"
@@ -856,7 +856,7 @@ async def test_subpub_cross_restart_snapshot(db, bus, writer):
 async def test_stream_cross_restart_recovery(db, bus, writer):
     """Stream buffer should have consistent refs across restart."""
     txn_config = {
-        "type": "transaction",
+        "protocol": "transaction",
         "ops": [
             {"table": "audit_log", "op_type": "insert", "fields": ["event", "order_id"]},
         ],
@@ -866,7 +866,7 @@ async def test_stream_cross_restart_recovery(db, bus, writer):
     await txn_svc.start()
 
     stream_config = {
-        "type": "stream",
+        "protocol": "stream",
         "primary_table": "audit_log",
         "watch_tables": ["audit_log"],
         "buffer_size": 100,
@@ -927,7 +927,7 @@ async def test_stream_cross_restart_recovery(db, bus, writer):
 async def test_query_cross_restart_snapshot(db, bus, writer):
     """Query service always sends full snapshot after restart."""
     txn_config = {
-        "type": "transaction",
+        "protocol": "transaction",
         "ops": [
             {"table": "orders", "op_type": "insert", "fields": ["id", "symbol", "qty"]},
         ],
@@ -937,7 +937,7 @@ async def test_query_cross_restart_snapshot(db, bus, writer):
     await txn_svc.start()
 
     query_config = {
-        "type": "query",
+        "protocol": "query",
         "primary_table": "orders",
         "watch_tables": ["orders"],
         "filterable": ["status"],
@@ -1215,7 +1215,7 @@ async def test_query_mkio_row_composite_pk(db, bus, writer):
     await db.write_conn.commit()
 
     config = {
-        "type": "query",
+        "protocol": "query",
         "primary_table": "positions",
         "watch_tables": ["positions"],
         "change_log_size": 100,
@@ -1257,7 +1257,7 @@ async def test_query_mkio_row_join_includes_secondary_pk(db, bus, writer):
     await db.write_conn.commit()
 
     config = {
-        "type": "query",
+        "protocol": "query",
         "primary_table": "products",
         "watch_tables": ["products", "reviews"],
         "sql": (

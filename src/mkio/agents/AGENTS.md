@@ -26,7 +26,7 @@ python -m mkio.skill_helpers.discover <url> <service>    # full descriptor as JS
 ```json
 {
   "name": "orders",
-  "type": "transaction",
+  "protocol": "transaction",
   "ops": {
     "new": {
       "steps": [
@@ -60,7 +60,7 @@ python -m mkio.skill_helpers.discover <url> <service>    # full descriptor as JS
 ```json
 {
   "name": "all_orders",
-  "type": "query",
+  "protocol": "query",
   "primary_table": "orders",
   "filterable": ["status", "symbol"],
   "schema": {
@@ -81,9 +81,9 @@ python -m mkio.skill_helpers.discover <url> <service>    # full descriptor as JS
 ```json
 {
   "name": "last_trade",
-  "type": "subpub",
+  "protocol": "subpub",
   "primary_table": "orders",
-  "topic_key": "symbol",
+  "topic": "symbol",
   "subscribe": {
     "message": {"service": "last_trade", "type": "subscribe", "topic": "<key value>"},
     "response_types": ["snapshot", "update"]
@@ -91,7 +91,7 @@ python -m mkio.skill_helpers.discover <url> <service>    # full descriptor as JS
 }
 ```
 
-SubPub supports a `sql` config for computed keys or JOINs. The `key` must name a column in the query result. Example: `sql = "SELECT *, symbol || ':' || side AS topic_key FROM orders"` with `key = "topic_key"` lets clients subscribe with `topic: "AAPL:Buy"`.
+SubPub supports a `sql` config for computed topics or JOINs. The `topic` must name a column in the query result. Example: `sql = "SELECT *, symbol || ':' || side AS topic_key FROM orders"` with `topic = "topic_key"` lets clients subscribe with `topic: "AAPL:Buy"`.
 
 ## WebSocket Envelope
 
@@ -124,14 +124,14 @@ Connect to `ws://<host>:<port>/ws` (general) or `ws://<host>:<port>/ws/<service>
 ### Subscribing
 
 ```json
-// SubPub — topic required (the key column value)
+// SubPub — topic required (the topic column value)
 {"service": "last_trade", "type": "subscribe", "topic": "AAPL"}
 
 // Query — with optional filter
 {"service": "all_orders", "type": "subscribe", "filter": "status == 'pending'"}
 ```
 
-- `topic` — (subpub only, required) the key column value to subscribe to. Returns a single row with `_mkio_exists: true/false`. If the topic doesn't exist yet, all fields are returned with null values (or configured defaults — expression strings evaluated at startup). When the topic later appears, it's published as an update.
+- `topic` — (subpub only, required) the topic column value to subscribe to. Returns a single row with `_mkio_exists: true/false`. If the topic doesn't exist yet, all fields are returned with null values (or configured defaults — expression strings evaluated at startup). When the topic later appears, it's published as an update.
 - `filter` — (query only) expression string, only valid if the service descriptor lists `filterable` fields
 - `fields` — optional list of field names to include in each row (e.g., `["symbol", "qty"]`). Omit to receive all fields. Filtering still operates on the full row before projection.
 - `ref` — (stream only, required) ref from the last received message for cursor-based reconnection
@@ -165,9 +165,9 @@ Format: `YYYYMMDD HH:mm:ss.mmmuuunnnppp` (UTC, lexicographically sortable).
 - Save the last `ref` you receive from a stream. Pass it back on reconnect to resume from that point.
 - The same ref is stamped into the `_mkio_ref` column in the database
 
-## Service Types
+## Protocols
 
-| Type | Purpose | Write? | Subscribe? |
+| Protocol | Purpose | Write? | Subscribe? |
 |------|---------|--------|------------|
 | `transaction` | Insert/update/delete/upsert across one or more tables | Yes | No (use a listener service) |
 | `subpub` | In-memory cache + live push. Snapshot on subscribe, then updates. | No | Yes |

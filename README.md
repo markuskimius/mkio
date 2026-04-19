@@ -33,13 +33,13 @@ port = 8080
 columns = { id = "TEXT PRIMARY KEY", symbol = "TEXT NOT NULL", qty = "INTEGER", status = "TEXT DEFAULT 'pending'" }
 
 [services.add_order]
-type = "transaction"
+protocol = "transaction"
 table = "orders"
 op_type = "insert"
 fields = ["id", "symbol", "qty"]
 
 [services.all_orders]
-type = "query"
+protocol = "query"
 primary_table = "orders"
 filterable = ["status", "symbol"]
 
@@ -88,7 +88,7 @@ Execute INSERT, UPDATE, DELETE, or UPSERT operations. Supports multi-table atomi
 
 ```toml
 [services.orders]
-type = "transaction"
+protocol = "transaction"
 
 [services.orders.ops]
 new = [
@@ -107,13 +107,13 @@ Bind references (`$N.field`) pull values from a prior op's `RETURNING` row, wher
 
 ### SubPub
 
-Subscribe by topic (the `key` column value) to get a single-row snapshot, then receive live updates as data changes. Always returns one row with `_mkio_exists` indicating whether the topic was found. Supports server-side `where` filtering (rows that don't match are never cached or published), `publish` formatting with expressions, configurable `defaults` (expression strings) for topics that don't exist yet, and custom `sql` for computed keys or JOINs.
+Subscribe by topic (the `topic` column value) to get a single-row snapshot, then receive live updates as data changes. Always returns one row with `_mkio_exists` indicating whether the topic was found. Supports server-side `where` filtering (rows that don't match are never cached or published), `publish` formatting with expressions, configurable `defaults` (expression strings) for topics that don't exist yet, and custom `sql` for computed topics or JOINs.
 
 ```toml
 [services.last_trade]
-type = "subpub"
+protocol = "subpub"
 primary_table = "orders"
-key = "symbol"
+topic = "symbol"
 where = "status == 'filled'"
 change_log_size = 10000
 
@@ -130,14 +130,14 @@ Use `sql` with a computed column when the topic doesn't map 1:1 to an existing c
 
 ```toml
 [services.last_trade_by_side]
-type = "subpub"
+protocol = "subpub"
 primary_table = "orders"
-key = "topic_key"
+topic = "topic_key"
 sql = "SELECT *, symbol || ':' || side AS topic_key FROM orders"
 where = "status == 'filled'"
 ```
 
-Clients subscribe with `topic: "AAPL:Buy"`. The `key` must name a column in the `sql` result set.
+Clients subscribe with `topic: "AAPL:Buy"`. The `topic` must name a column in the `sql` result set.
 
 ### Stream
 
@@ -145,7 +145,7 @@ Append-only data with ring buffer and ref-based cursor reconnection.
 
 ```toml
 [services.audit_feed]
-type = "stream"
+protocol = "stream"
 primary_table = "audit_log"
 buffer_size = 10000
 ```
@@ -156,7 +156,7 @@ Snapshot from SQLite with change feed. Supports delta reconnection.
 
 ```toml
 [services.all_orders]
-type = "query"
+protocol = "query"
 primary_table = "orders"
 filterable = ["status"]
 ```
