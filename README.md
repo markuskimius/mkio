@@ -175,20 +175,20 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 // Transaction with msgid (echoed back on result/error for async correlation)
 {"service": "orders", "ref": "...", "op": "new", "msgid": "req-42", "data": {"side": "Buy", "symbol": "AAPL", "qty": 100, "price": 150}}
 
-// Subscribe (subpub — topic required)
-{"service": "last_trade", "type": "subscribe", "topic": "AAPL"}
+// Subscribe (subpub — topic required, protocol required)
+{"service": "last_trade", "type": "subscribe", "protocol": "subpub", "topic": "AAPL"}
 
 // Subscribe (query — with filter)
-{"service": "all_orders", "type": "subscribe", "filter": "status == 'pending'"}
+{"service": "all_orders", "type": "subscribe", "protocol": "query", "filter": "status == 'pending'"}
 
 // Subscribe with subid (echoed on every snapshot and update for this subscription)
-{"service": "all_orders", "type": "subscribe", "subid": "my-sub-1"}
+{"service": "all_orders", "type": "subscribe", "protocol": "query", "subid": "my-sub-1"}
 
 // Subscribe with field projection (receive only specified columns)
-{"service": "all_orders", "type": "subscribe", "fields": ["symbol", "qty"]}
+{"service": "all_orders", "type": "subscribe", "protocol": "query", "fields": ["symbol", "qty"]}
 
 // Stream reconnect with ref (required for streams)
-{"service": "audit_feed", "type": "subscribe", "ref": "20260404 15:30:45.123456000000"}
+{"service": "audit_feed", "type": "subscribe", "protocol": "stream", "ref": "20260404 15:30:45.123456000000"}
 ```
 
 ## Client Libraries
@@ -201,10 +201,10 @@ from mkio.client import MkioClient
 async with MkioClient("ws://localhost:8080/ws") as client:
     result = await client.send("add_order", {"id": "1", "symbol": "AAPL", "qty": 100})
 
-    async for msg in client.subscribe("last_trade", topic="AAPL"):
+    async for msg in client.subscribe("last_trade", "subpub", topic="AAPL"):
         print(msg)  # single row with _mkio_exists
 
-    async for msg in client.subscribe("all_orders", filter="status == 'pending'"):
+    async for msg in client.subscribe("all_orders", "query", filter="status == 'pending'"):
         print(msg)
 ```
 
@@ -218,13 +218,13 @@ Auto-served at `/mkio.js` — no CDN or bundler needed.
 const client = new MkioClient("ws://localhost:8080/ws");
 await client.connect();
 
-client.subscribe("last_trade", {
+client.subscribe("last_trade", "subpub", {
     topic: "AAPL",
     onSnapshot: (rows) => renderTrade(rows[0]),
     onUpdate: (op, row) => renderTrade(row),
 });
 
-client.subscribe("all_orders", {
+client.subscribe("all_orders", "query", {
     filter: "status == 'pending'",
     onSnapshot: (rows) => renderTable(rows),
     onUpdate: (op, row) => updateRow(op, row),
@@ -253,8 +253,8 @@ mkio.monitor()                             // log every frame to/from any servic
 mkio.monitor("orders")                     // filter to one service (call again to add more)
 mkio.monitor("off")                        // stop
 mkio.send("orders", {side:"Buy",...}, {op:"new"})
-mkio.subscribe("last_trade", {topic:"AAPL"})
-mkio.subscribe("all_orders", {filter:"status == 'pending'"})
+mkio.subscribe("last_trade", "subpub", {topic:"AAPL"})
+mkio.subscribe("all_orders", "query", {filter:"status == 'pending'"})
 ```
 
 `mkio.monitor(...)` only taps **this tab's** traffic. For traffic across all connected clients use the CLI's server-side `mkio monitor` instead.
@@ -378,7 +378,7 @@ mkio monitor http://localhost:8080 last_trade
 
 ```
 [2026-04-04 15:30:45.123456 -0400] >> IN  subscribe
-{ "type": "subscribe", "service": "last_trade" }
+{ "type": "subscribe", "service": "last_trade", "protocol": "subpub" }
 
 [2026-04-04 15:30:45.125789 -0400] << OUT snapshot
 { "type": "snapshot", "rows": [...] }
