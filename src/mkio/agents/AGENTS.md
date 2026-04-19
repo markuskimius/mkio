@@ -91,6 +91,8 @@ python -m mkio.skill_helpers.discover <url> <service>    # full descriptor as JS
 }
 ```
 
+SubPub supports a `sql` config for computed keys or JOINs. The `key` must name a column in the query result. Example: `sql = "SELECT *, symbol || ':' || side AS topic_key FROM orders"` with `key = "topic_key"` lets clients subscribe with `topic: "AAPL:Buy"`.
+
 ## WebSocket Envelope
 
 Connect to `ws://<host>:<port>/ws` (general) or `ws://<host>:<port>/ws/<service>` (per-service, no `service` field needed in messages).

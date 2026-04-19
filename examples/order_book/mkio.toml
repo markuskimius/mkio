@@ -57,6 +57,20 @@ symbol = "symbol"
 price = "IF(side == 'Buy', price, -price)"
 time = "_mkio_ref"
 
+# SubPub with computed key — subscribe by "AAPL:Buy" or "MSFT:Sell"
+[services.last_trade_by_side]
+type = "subpub"
+primary_table = "orders"
+key = "topic_key"
+sql = "SELECT *, symbol || ':' || side AS topic_key FROM orders"
+where = "status == 'filled'"
+
+[services.last_trade_by_side.publish]
+symbol = "symbol"
+side = "side"
+price = "price"
+qty = "qty"
+
 [services.audit_feed]
 type = "stream"
 primary_table = "audit_log"

@@ -107,7 +107,7 @@ Bind references (`$N.field`) pull values from a prior op's `RETURNING` row, wher
 
 ### SubPub
 
-Subscribe by topic (the `key` column value) to get a single-row snapshot, then receive live updates as data changes. Always returns one row with `_mkio_exists` indicating whether the topic was found. Supports server-side `where` filtering (rows that don't match are never cached or published), `publish` formatting with expressions, and configurable `defaults` (expression strings) for topics that don't exist yet.
+Subscribe by topic (the `key` column value) to get a single-row snapshot, then receive live updates as data changes. Always returns one row with `_mkio_exists` indicating whether the topic was found. Supports server-side `where` filtering (rows that don't match are never cached or published), `publish` formatting with expressions, configurable `defaults` (expression strings) for topics that don't exist yet, and custom `sql` for computed keys or JOINs.
 
 ```toml
 [services.last_trade]
@@ -125,6 +125,19 @@ time = "''"
 symbol = "symbol"
 price = "IF(side == 'Buy', price, -price)"
 ```
+
+Use `sql` with a computed column when the topic doesn't map 1:1 to an existing column:
+
+```toml
+[services.last_trade_by_side]
+type = "subpub"
+primary_table = "orders"
+key = "topic_key"
+sql = "SELECT *, symbol || ':' || side AS topic_key FROM orders"
+where = "status == 'filled'"
+```
+
+Clients subscribe with `topic: "AAPL:Buy"`. The `key` must name a column in the `sql` result set.
 
 ### Stream
 

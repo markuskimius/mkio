@@ -484,6 +484,81 @@ async def test_subpub_defaults_on_delete(subpub_defaults_svc, bus):
     assert row["symbol"] is None
 
 
+# ---- SubPub with computed key (sql) ----------------------------------------
+
+@pytest_asyncio.fixture
+async def subpub_computed_key_svc(db, bus, writer):
+    await db.write_conn.execute(
+        "INSERT INTO orders (id, symbol, qty, status) VALUES (?, ?, ?, ?)",
+        ("1", "AAPL", 100, "pending"),
+    )
+    await db.write_conn.execute(
+        "INSERT INTO orders (id, symbol, qty, status) VALUES (?, ?, ?, ?)",
+        ("2", "AAPL", 50, "filled"),
+    )
+    await db.write_conn.commit()
+
+    config = {
+        "type": "subpub",
+        "primary_table": "orders",
+        "watch_tables": ["orders"],
+        "key": "topic_key",
+        "sql": "SELECT *, id || ':' || symbol AS topic_key FROM orders",
+        "change_log_size": 100,
+    }
+    svc = SubPubService(config=config, db=db, change_bus=bus, writer=writer)
+    svc.name = "computed_key"
+    await svc.start()
+    yield svc
+    await svc.stop()
+
+
+async def test_subpub_computed_key_snapshot(subpub_computed_key_svc):
+    ws = MockWebSocket()
+    await subpub_computed_key_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1:AAPL"})
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    row = msgs[0]["rows"][0]
+    assert row["_mkio_exists"] is True
+    assert row["id"] == "1"
+    assert row["symbol"] == "AAPL"
+    assert row["qty"] == 100
+
+
+async def test_subpub_computed_key_not_found(subpub_computed_key_svc):
+    ws = MockWebSocket()
+    await subpub_computed_key_svc.on_subscribe(ws, {"type": "subscribe", "topic": "99:NOPE"})
+    msgs = ws.get_messages()
+    row = msgs[0]["rows"][0]
+    assert row["_mkio_exists"] is False
+    assert row["topic_key"] == "99:NOPE"
+
+
+async def test_subpub_computed_key_live_update(subpub_computed_key_svc, db, bus):
+    ws = MockWebSocket()
+    await subpub_computed_key_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1:AAPL"})
+    ws.clear()
+
+    await db.write_conn.execute(
+        "UPDATE orders SET qty = 200, status = 'filled' WHERE id = '1'"
+    )
+    await db.write_conn.commit()
+
+    event = ChangeBus.make_event(
+        "orders", "update",
+        {"id": "1", "symbol": "AAPL", "qty": 200, "status": "filled"},
+        "20260404 00:00:00.000000000001",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "update"
+    assert msgs[0]["row"]["qty"] == 200
+    assert msgs[0]["row"]["_mkio_exists"] is True
+
+
 # ---- Stream Service --------------------------------------------------------
 
 @pytest_asyncio.fixture

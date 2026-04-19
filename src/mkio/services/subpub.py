@@ -48,6 +48,7 @@ class SubPubService(Service):
 
         self._cache: dict[Any, dict[str, Any]] = {}
         self._not_found_template: dict[str, Any] = {}
+        self._needs_requery = False
         self._subscribers: list[Subscriber] = []
         self._bus_queue: asyncio.Queue[ChangeEvent] | None = None
         self._listener_task: asyncio.Task[None] | None = None
@@ -71,6 +72,8 @@ class SubPubService(Service):
         self._not_found_template = {c: None for c in columns}
         if self._defaults_fn:
             self._not_found_template.update(self._defaults_fn(self._not_found_template))
+
+        self._needs_requery = "JOIN" in self._sql.upper() or self._sql != f"SELECT * FROM {self._table}"
 
         watch = self.config.get("watch_tables", [self._table])
         self._bus_queue = self.bus.subscribe(watch)
@@ -144,17 +147,18 @@ class SubPubService(Service):
             event: ChangeEvent = await self._bus_queue.get()
 
             if event.table == self._table:
-                key_val = str(event.row.get(self._key_field))
-                if "JOIN" not in self._sql.upper():
+                if not self._needs_requery:
+                    key_val = str(event.row.get(self._key_field))
                     notify = self._update_cache(event, key_val)
                     if notify is not None:
                         await self._notify_topic(key_val, exists=notify)
                 else:
-                    old_row = self._cache.get(key_val)
-                    await self._requery_row(event)
-                    new_row = self._cache.get(key_val)
-                    if old_row != new_row:
-                        await self._notify_topic(key_val, exists=new_row is not None)
+                    old_cache = dict(self._cache)
+                    await self._requery_all()
+                    topics = {sub.topic for sub in self._subscribers}
+                    for topic in topics:
+                        if old_cache.get(topic) != self._cache.get(topic):
+                            await self._notify_topic(topic, exists=topic in self._cache)
             else:
                 old_cache = dict(self._cache)
                 await self._requery_all()
@@ -205,20 +209,6 @@ class SubPubService(Service):
                 dead.append(sub)
         for sub in dead:
             self._subscribers.remove(sub)
-
-    async def _requery_row(self, event: ChangeEvent) -> None:
-        """Re-query a single row when using JOINs."""
-        key_val = str(event.row.get(self._key_field))
-        if event.op == "delete":
-            self._cache.pop(key_val, None)
-            return
-        raw_key = event.row.get(self._key_field)
-        sql = f"SELECT * FROM ({self._sql}) AS _sub WHERE {self._key_field} = ?"
-        rows = await self.db.read(sql, (raw_key,))
-        if rows and (not self._where or self._where(rows[0])):
-            self._cache[key_val] = rows[0]
-        else:
-            self._cache.pop(key_val, None)
 
     async def _requery_all(self) -> None:
         """Re-query entire dataset (for secondary table changes)."""
