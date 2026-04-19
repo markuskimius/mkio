@@ -40,6 +40,24 @@ def make_error(ref: str | None, message: str, *, msgid: str | None = None) -> by
     return dumps(envelope)
 
 
+def make_nack(
+    service: str,
+    message: str,
+    *,
+    ref: str | None = None,
+    msgid: str | None = None,
+    subid: str | None = None,
+) -> bytes:
+    envelope: dict[str, Any] = {"type": "nack", "service": service, "message": message}
+    if ref is not None:
+        envelope["ref"] = ref
+    if msgid is not None:
+        envelope["msgid"] = msgid
+    if subid is not None:
+        envelope["subid"] = subid
+    return dumps(envelope)
+
+
 def make_snapshot(
     ref: str | None,
     service: str,

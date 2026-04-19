@@ -21,7 +21,7 @@ from mkio.services.subpub import SubPubService
 from mkio.services.transaction import TransactionService
 from mkio.writer import WriteBatcher
 from mkio.migration import _parse_config_columns
-from mkio.ws_protocol import make_error, parse_message
+from mkio.ws_protocol import make_error, make_nack, parse_message
 
 SERVICE_TYPES: dict[str, type[Service]] = {
     "transaction": TransactionService,
@@ -556,19 +556,24 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             if msg_type == "subscribe":
                 req_protocol = msg.get("protocol")
+                subid = msg.get("subid")
                 if req_protocol is None:
-                    await ws.send_bytes(make_error(
-                        ref,
+                    await ws.send_bytes(make_nack(
+                        service_name,
                         "Missing 'protocol' field in subscribe message",
+                        ref=ref,
                         msgid=msgid,
+                        subid=subid,
                     ))
                     continue
                 actual = svc.config.get("protocol", "")
                 if req_protocol != actual:
-                    await ws.send_bytes(make_error(
-                        ref,
+                    await ws.send_bytes(make_nack(
+                        service_name,
                         f"Protocol mismatch: service '{service_name}' is {actual!r}, not {req_protocol!r}",
+                        ref=ref,
                         msgid=msgid,
+                        subid=subid,
                     ))
                     continue
                 await svc.on_subscribe(ws, msg)

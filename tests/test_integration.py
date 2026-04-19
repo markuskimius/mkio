@@ -177,7 +177,7 @@ async def test_missing_service_error(client):
 
 
 async def test_subscribe_protocol_mismatch(client):
-    """Subscribing with wrong protocol returns an error."""
+    """Subscribing with wrong protocol returns a nack."""
     ws = await client.ws_connect("/ws")
     result = await ws_send_recv(ws, {
         "service": "last_trade",
@@ -185,7 +185,8 @@ async def test_subscribe_protocol_mismatch(client):
         "protocol": "query",
         "topic": "1",
     })
-    assert result["type"] == "error"
+    assert result["type"] == "nack"
+    assert result["service"] == "last_trade"
     assert "Protocol mismatch" in result["message"]
     assert "'subpub'" in result["message"]
     assert "'query'" in result["message"]
@@ -208,14 +209,15 @@ async def test_subscribe_protocol_match(client):
 
 
 async def test_subscribe_protocol_missing(client):
-    """Subscribing without protocol returns an error."""
+    """Subscribing without protocol returns a nack."""
     ws = await client.ws_connect("/ws")
     result = await ws_send_recv(ws, {
         "service": "last_trade",
         "type": "subscribe",
         "topic": "1",
     })
-    assert result["type"] == "error"
+    assert result["type"] == "nack"
+    assert result["service"] == "last_trade"
     assert "protocol" in result["message"].lower()
     await ws.close()
 
