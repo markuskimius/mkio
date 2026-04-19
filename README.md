@@ -66,7 +66,7 @@ serve({...})  # or pass a dict
 - **Single port** — HTTP pages and WebSocket messages on one port
 - **Config-driven** — define tables, transactions, and live data services in TOML
 - **Transaction services** — insert, update, delete, upsert across multiple tables atomically
-- **SubPub** — topic-based single-row subscription with live push, server-side `where` filtering and `publish` formatting, configurable defaults for missing topics
+- **SubPub** — topic-based single-row subscription with live push, server-side `where` filtering and `publish` formatting, expression-based defaults for missing topics
 - **Stream** — append-only ring buffer with cursor-based reconnection
 - **Query** — snapshot + change feed from SQLite
 - **Expression language** — safe, extensible filter and formatter expressions (`qty > 100 AND status == 'pending'`)
@@ -107,7 +107,7 @@ Bind references (`$N.field`) pull values from a prior op's `RETURNING` row, wher
 
 ### SubPub
 
-Subscribe by topic (the `key` column value) to get a single-row snapshot, then receive live updates as data changes. Always returns one row with `_mkio_exists` indicating whether the topic was found. Supports server-side `where` filtering (rows that don't match are never cached or published), `publish` formatting with expressions, and configurable `defaults` for topics that don't exist yet.
+Subscribe by topic (the `key` column value) to get a single-row snapshot, then receive live updates as data changes. Always returns one row with `_mkio_exists` indicating whether the topic was found. Supports server-side `where` filtering (rows that don't match are never cached or published), `publish` formatting with expressions, and configurable `defaults` (expression strings) for topics that don't exist yet.
 
 ```toml
 [services.last_trade]
@@ -118,8 +118,8 @@ where = "status == 'filled'"
 change_log_size = 10000
 
 [services.last_trade.defaults]
-price = 0
-time = ""
+price = "0"
+time = "''"
 
 [services.last_trade.publish]
 symbol = "symbol"

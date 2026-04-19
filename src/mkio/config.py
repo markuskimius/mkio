@@ -85,6 +85,13 @@ def _normalize_service(
     if "where" in svc:
         svc["_compiled_where"] = compile_filter(svc["where"])
 
+    # Compile defaults as expressions (subpub not-found template)
+    if "defaults" in svc and svc_type == "subpub":
+        raw = svc["defaults"]
+        svc["_compiled_defaults"] = compile_formatter(
+            {k: str(v) if not isinstance(v, str) else v for k, v in raw.items()}
+        )
+
     # Validate filterable fields (query only — subpub uses topic instead)
     if "filterable" in svc and svc_type != "subpub":
         _validate_filterable(name, svc, config)

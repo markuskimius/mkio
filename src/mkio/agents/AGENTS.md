@@ -129,7 +129,7 @@ Connect to `ws://<host>:<port>/ws` (general) or `ws://<host>:<port>/ws/<service>
 {"service": "all_orders", "type": "subscribe", "filter": "status == 'pending'"}
 ```
 
-- `topic` — (subpub only, required) the key column value to subscribe to. Returns a single row with `_mkio_exists: true/false`. If the topic doesn't exist yet, all fields are returned with null values (or configured defaults). When the topic later appears, it's published as an update.
+- `topic` — (subpub only, required) the key column value to subscribe to. Returns a single row with `_mkio_exists: true/false`. If the topic doesn't exist yet, all fields are returned with null values (or configured defaults — expression strings evaluated at startup). When the topic later appears, it's published as an update.
 - `filter` — (query only) expression string, only valid if the service descriptor lists `filterable` fields
 - `fields` — optional list of field names to include in each row (e.g., `["symbol", "qty"]`). Omit to receive all fields. Filtering still operates on the full row before projection.
 - `ref` — (stream only, required) ref from the last received message for cursor-based reconnection

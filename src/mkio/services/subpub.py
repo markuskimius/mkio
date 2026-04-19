@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from aiohttp.web import WebSocketResponse
 
+from mkio._expr import compile_formatter
 from mkio.change_bus import ChangeEvent
 from mkio.services.base import Service
 from mkio.ws_protocol import make_error, make_snapshot, make_update
@@ -41,7 +42,9 @@ class SubPubService(Service):
         self._sql = self.config.get("sql", f"SELECT * FROM {self._table}")
         self._formatter = self.config.get("_compiled_formatter")
         self._where = self.config.get("_compiled_where")
-        self._defaults: dict[str, Any] = dict(self.config.get("defaults", {}))
+        self._defaults_fn = self.config.get("_compiled_defaults")
+        if not self._defaults_fn and self.config.get("defaults"):
+            self._defaults_fn = compile_formatter(self.config["defaults"])
 
         self._cache: dict[Any, dict[str, Any]] = {}
         self._not_found_template: dict[str, Any] = {}
@@ -66,7 +69,8 @@ class SubPubService(Service):
         else:
             columns = [c for c in await self.db.read_columns(self._sql) if c != "_mkio_ref"]
         self._not_found_template = {c: None for c in columns}
-        self._not_found_template.update(self._defaults)
+        if self._defaults_fn:
+            self._not_found_template.update(self._defaults_fn(self._not_found_template))
 
         watch = self.config.get("watch_tables", [self._table])
         self._bus_queue = self.bus.subscribe(watch)

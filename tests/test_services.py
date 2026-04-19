@@ -430,7 +430,7 @@ async def subpub_defaults_svc(db, bus, writer):
         "primary_table": "orders",
         "watch_tables": ["orders"],
         "key": "id",
-        "defaults": {"qty": 0, "status": "unknown"},
+        "defaults": {"qty": "0", "status": "'unknown'"},
         "change_log_size": 100,
     }
     svc = SubPubService(config=config, db=db, change_bus=bus, writer=writer)
