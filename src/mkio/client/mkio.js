@@ -282,6 +282,7 @@ class MkioClient {
       fields: opts.fields || null,
       onSnapshot: opts.onSnapshot || (() => {}),
       onUpdate: opts.onUpdate || (() => {}),
+      onNack: opts.onNack || null,
     };
     const key = sub.subid || service;
     this._subscriptions.set(key, sub);
@@ -403,6 +404,19 @@ class MkioClient {
       const { resolve } = this._pending.get(ref);
       this._pending.delete(ref);
       resolve(data);
+      return;
+    }
+
+    // Nack: deliver to callback and remove to prevent reconnect retry
+    if (type === "nack") {
+      const nackKey = data.subid || service;
+      if (nackKey && this._subscriptions.has(nackKey)) {
+        const sub = this._subscriptions.get(nackKey);
+        this._subscriptions.delete(nackKey);
+        if (sub.onNack) {
+          sub.onNack(data.message, data);
+        }
+      }
       return;
     }
 

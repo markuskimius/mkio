@@ -222,6 +222,7 @@ client.subscribe("last_trade", "subpub", {
     topic: "AAPL",
     onSnapshot: (rows) => renderTrade(rows[0]),
     onUpdate: (op, row) => renderTrade(row),
+    onNack: (message) => console.error("Subscription rejected:", message),
 });
 
 client.subscribe("all_orders", "query", {

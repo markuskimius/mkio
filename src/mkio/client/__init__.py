@@ -208,6 +208,15 @@ class MkioClient:
                 future.set_result(data)
             return
 
+        # Nack: deliver to subscription queue and remove to prevent reconnect retry
+        if msg_type == "nack" and service and service in self._subscriptions:
+            sub = self._subscriptions.pop(service)
+            try:
+                sub.queue.put_nowait(data)
+            except asyncio.QueueFull:
+                pass
+            return
+
         # Route to subscription queue
         if service and service in self._subscriptions:
             sub = self._subscriptions[service]

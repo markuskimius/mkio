@@ -166,3 +166,73 @@ async def test_client_subscribe_tracks_ref(fake_server):
         sub = client._subscriptions.get("test_service")
         assert sub is not None
         assert sub.ref == "20260404 00:00:01.000000000000"
+
+
+# ---- Nack handling ---------------------------------------------------------
+
+class NackServer:
+    """Server that nacks all subscribe requests."""
+
+    def __init__(self) -> None:
+        self.app = web.Application()
+        self.app.router.add_get("/ws", self.ws_handler)
+        self.subscribe_count = 0
+
+    async def ws_handler(self, request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+
+        async for msg in ws:
+            if msg.type in (web.WSMsgType.TEXT, web.WSMsgType.BINARY):
+                data = loads(msg.data)
+                msg_type = data.get("type", "")
+                service = data.get("service", "")
+
+                if msg_type == "subscribe":
+                    self.subscribe_count += 1
+                    resp = {
+                        "type": "nack",
+                        "service": service,
+                        "message": "Protocol mismatch",
+                    }
+                    subid = data.get("subid")
+                    if subid:
+                        resp["subid"] = subid
+                    await ws.send_bytes(dumps(resp))
+
+        return ws
+
+
+@pytest_asyncio.fixture
+async def nack_server(aiohttp_server):
+    server_obj = NackServer()
+    server = await aiohttp_server(server_obj.app)
+    yield server, server_obj
+
+
+async def test_nack_removes_subscription(nack_server):
+    """Nack should remove subscription so reconnect doesn't retry it."""
+    server, server_obj = nack_server
+    url = f"ws://localhost:{server.port}/ws"
+
+    async with MkioClient(url, reconnect=False) as client:
+        async for msg in client.subscribe("test_service", "query"):
+            assert msg["type"] == "nack"
+            assert "test_service" not in client._subscriptions
+            break
+
+
+async def test_nack_not_resubscribed_on_reconnect(nack_server):
+    """After a nack, reconnect should not re-subscribe the rejected service."""
+    server, server_obj = nack_server
+    url = f"ws://localhost:{server.port}/ws"
+
+    async with MkioClient(url, reconnect=True) as client:
+        async for msg in client.subscribe("test_service", "query"):
+            assert msg["type"] == "nack"
+            break
+
+        # Subscription should be removed
+        assert "test_service" not in client._subscriptions
+        # Server should have received exactly 1 subscribe
+        assert server_obj.subscribe_count == 1
