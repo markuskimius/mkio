@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -426,6 +427,7 @@ async def _on_startup(app: web.Application) -> None:
 
     # Services
     services: dict[str, Service] = {}
+    app["services"] = services
     for svc_name, svc_config in cfg.get("services", {}).items():
         svc_type = svc_config.get("protocol", "")
 
@@ -448,10 +450,12 @@ async def _on_startup(app: web.Application) -> None:
         svc = cls(config=svc_config, db=db, change_bus=bus, writer=writer)
         svc.name = svc_name
         svc._monitor_notifier = lambda sn, d, data, _app=app: _notify_monitors(_app, sn, d, data)
-        await svc.start()
+        try:
+            await svc.start()
+        except Exception as exc:
+            print(f"Error starting service '{svc_name}': {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
         services[svc_name] = svc
-
-    app["services"] = services
 
 
 async def _on_shutdown(app: web.Application) -> None:

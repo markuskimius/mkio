@@ -363,6 +363,37 @@ def test_defaults_column_not_in_table():
         })
 
 
+def test_subpub_defaults_invalid_column():
+    with pytest.raises(ValueError, match="defaults column 'bogus'.*not found"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY", "name": "TEXT"}}},
+            "services": {
+                "svc": {
+                    "protocol": "subpub",
+                    "primary_table": "t",
+                    "topic": "id",
+                    "defaults": {"bogus": "'x'"},
+                },
+            },
+        })
+
+
+def test_subpub_defaults_valid_publish_column():
+    cfg = load_config({
+        "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY", "val": "INTEGER"}}},
+        "services": {
+            "svc": {
+                "protocol": "subpub",
+                "primary_table": "t",
+                "topic": "id",
+                "publish": {"out_val": "val * 2"},
+                "defaults": {"out_val": "0"},
+            },
+        },
+    })
+    assert cfg["services"]["svc"].get("_compiled_defaults") is not None
+
+
 def test_filterable_shows_available_columns():
     with pytest.raises(ValueError, match="Available columns:.*id"):
         load_config({

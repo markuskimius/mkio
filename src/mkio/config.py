@@ -191,6 +191,25 @@ def _normalize_service(
     # Compile defaults as expressions (subpub not-found template)
     if "defaults" in svc and svc_type == "subpub":
         raw = svc["defaults"]
+        # Validate defaults keys are valid output columns
+        publish = svc.get("publish")
+        primary = svc.get("primary_table")
+        if publish:
+            valid_cols = set(publish.keys())
+        elif primary and primary in tables:
+            valid_cols = set(tables[primary].get("columns", {}).keys())
+        else:
+            valid_cols = None
+        if valid_cols is not None:
+            for def_col in raw:
+                if def_col not in valid_cols:
+                    close = difflib.get_close_matches(def_col, valid_cols, n=1, cutoff=0.6)
+                    hint = f" Did you mean {close[0]!r}?" if close else ""
+                    raise ValueError(
+                        f"Service '{name}': defaults column {def_col!r} "
+                        f"not found in output columns. "
+                        f"Available columns: {', '.join(sorted(valid_cols))}.{hint}"
+                    )
         svc["_compiled_defaults"] = compile_formatter(
             {k: str(v) if not isinstance(v, str) else v for k, v in raw.items()}
         )

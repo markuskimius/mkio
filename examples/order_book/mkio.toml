@@ -49,6 +49,7 @@ where = "status == 'filled'"
 change_log_size = 10000
 
 [services.last_trade.defaults]
+symbol = "_mkio_topic"
 price = "0"
 time = "''"
 

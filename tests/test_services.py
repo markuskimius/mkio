@@ -513,6 +513,73 @@ async def test_subpub_mkio_ref_default_on_not_found(db, bus, writer):
     await svc.stop()
 
 
+async def test_subpub_defaults_mkio_topic(db, bus, writer):
+    """Defaults expressions can reference _mkio_topic."""
+    await db.write_conn.execute(
+        "INSERT INTO orders (id, symbol, qty, status) VALUES (?, ?, ?, ?)",
+        ("1", "AAPL", 100, "pending"),
+    )
+    await db.write_conn.commit()
+
+    config = {
+        "protocol": "subpub",
+        "primary_table": "orders",
+        "watch_tables": ["orders"],
+        "topic": "id",
+        "defaults": {"symbol": "_mkio_topic", "status": "'missing'"},
+    }
+    svc = SubPubService(config=config, db=db, change_bus=bus, writer=writer)
+    svc.name = "topic_defaults"
+    await svc.start()
+
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe", "topic": "999"})
+    msgs = ws.get_messages()
+    row = msgs[0]["rows"][0]
+    assert row["_mkio_exists"] is False
+    assert row["symbol"] == "999"
+    assert row["status"] == "missing"
+
+    await svc.stop()
+
+
+async def test_subpub_defaults_mkio_topic_on_delete(db, bus, writer):
+    """_mkio_topic is available in defaults when topic transitions to not-found."""
+    await db.write_conn.execute(
+        "INSERT INTO orders (id, symbol, qty, status) VALUES (?, ?, ?, ?)",
+        ("1", "AAPL", 100, "pending"),
+    )
+    await db.write_conn.commit()
+
+    config = {
+        "protocol": "subpub",
+        "primary_table": "orders",
+        "watch_tables": ["orders"],
+        "topic": "id",
+        "defaults": {"symbol": "_mkio_topic"},
+    }
+    svc = SubPubService(config=config, db=db, change_bus=bus, writer=writer)
+    svc.name = "topic_defaults_del"
+    await svc.start()
+
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe", "topic": "1"})
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "delete", {"id": "1"}, "20260404 00:00:00.000000000001"
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    row = msgs[0]["row"]
+    assert row["_mkio_exists"] is False
+    assert row["symbol"] == "1"
+
+    await svc.stop()
+
+
 # ---- SubPub with computed key (sql) ----------------------------------------
 
 @pytest_asyncio.fixture

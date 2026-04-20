@@ -70,8 +70,6 @@ class SubPubService(Service):
         else:
             columns = [c for c in await self.db.read_columns(self._sql) if c != "_mkio_ref"]
         self._not_found_template = {c: None for c in columns}
-        if self._defaults_fn:
-            self._not_found_template.update(self._defaults_fn(self._not_found_template))
         self._not_found_template.setdefault("_mkio_ref", None)
 
         self._needs_requery = "JOIN" in self._sql.upper() or self._sql != f"SELECT * FROM {self._table}"
@@ -134,6 +132,9 @@ class SubPubService(Service):
             out["_mkio_exists"] = True
         else:
             out = dict(self._not_found_template)
+            out["_mkio_topic"] = sub.topic
+            if self._defaults_fn:
+                out.update(self._defaults_fn(out))
             out = self._project(out, sub.fields)
             out["_mkio_topic"] = sub.topic
             out["_mkio_exists"] = False
