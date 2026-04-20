@@ -46,8 +46,9 @@ class Service:
     async def stop(self) -> None:
         """Called at shutdown."""
 
-    async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
-        """Client wants to subscribe. Send snapshot, then start pushing updates."""
+    async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> int:
+        """Client wants to subscribe. Returns number of subscriptions created."""
+        return 0
 
     async def on_unsubscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> int:
         """Client unsubscribes or disconnects. Returns number removed."""

@@ -91,27 +91,39 @@ class SubPubService(Service):
             watch = self.config.get("watch_tables", [self._table])
             self.bus.unsubscribe(watch, self._bus_queue)
 
-    async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
+    async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> int:
         topic = msg.get("topic")
         if topic is None:
             err = make_error(None, "SubPub subscribe requires 'topic'")
             await ws.send_bytes(err)
             await self.notify_monitors("out", err)
-            return
-        topic = str(topic)
+            return 0
+        if isinstance(topic, list):
+            if len(topic) == 0:
+                err = make_error(None, "SubPub subscribe 'topic' array must not be empty")
+                await ws.send_bytes(err)
+                await self.notify_monitors("out", err)
+                return 0
+            topics = [str(t) for t in topic]
+        else:
+            topics = [str(topic)]
 
         subid = msg.get("subid")
         fields = msg.get("fields")
 
-        sub = Subscriber(ws=ws, topic=topic, formatter=self._formatter, subid=subid, fields=fields)
+        rows: list[dict[str, Any]] = []
+        subs: list[Subscriber] = []
+        for t in topics:
+            sub = Subscriber(ws=ws, topic=t, formatter=self._formatter, subid=subid, fields=fields)
+            cached_row = self._cache.get(t)
+            rows.append(self._build_row(sub, cached_row or {}, exists=cached_row is not None))
+            subs.append(sub)
 
-        cached_row = self._cache.get(topic)
-        out_row = self._build_row(sub, cached_row or {}, exists=cached_row is not None)
-
-        resp = make_snapshot(None, self.name, [out_row], subid=sub.subid)
+        resp = make_snapshot(None, self.name, rows, subid=subid)
         await ws.send_bytes(resp)
         await self.notify_monitors("out", resp)
-        self._subscribers.append(sub)
+        self._subscribers.extend(subs)
+        return len(subs)
 
     def _build_row(self, sub: Subscriber, row: dict[str, Any], *, exists: bool) -> dict[str, Any]:
         if exists:

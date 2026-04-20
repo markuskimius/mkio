@@ -285,7 +285,8 @@ class MkioClient {
       onUpdate: opts.onUpdate || (() => {}),
       onNack: opts.onNack || null,
     };
-    const key = sub.subid && sub.topic ? `${sub.subid}\0${sub.topic}` : (sub.subid || service);
+    const key = sub.subid && sub.topic && !Array.isArray(sub.topic)
+      ? `${sub.subid}\0${sub.topic}` : (sub.subid || service);
     this._subscriptions.set(key, sub);
 
     const msg = { service, type: "subscribe", protocol };
@@ -509,7 +510,7 @@ const MKIO_HELP = [
   'mkio.monitor({filter: fn})                           tap with client-side filter function',
   'mkio.monitor("off")                                  stop tapping',
   'mkio.send("<service>", data, {op, ref, msgid})       send a transaction',
-  'mkio.subpub("<svc>", "<topic>", {fields, subid})     subscribe to a subpub service',
+  'mkio.subpub("<svc>", "<topic>"|["t1","t2"], {fields, subid})  subscribe to a subpub service',
   'mkio.stream("<svc>", {ref, filter, fields, subid})   subscribe to a stream service',
   'mkio.query("<svc>", {filter, fields, subid,          subscribe to a query service',
   '                     snapshotOnly, updateOnly})',
@@ -786,9 +787,9 @@ const mkio = {
     return _mkioSend(service, data, opts);
   },
   subpub(service, topic, opts) {
-    if (topic === undefined || topic === null) {
+    if (topic === undefined || topic === null || (Array.isArray(topic) && topic.length === 0)) {
       // eslint-disable-next-line no-console
-      console.warn("mkio.subpub: topic is required");
+      console.warn("mkio.subpub: topic is required (string or non-empty array)");
       return undefined;
     }
     return _mkioSubscribe(service, "subpub", { ...opts, topic });

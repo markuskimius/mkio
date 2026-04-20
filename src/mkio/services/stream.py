@@ -82,7 +82,7 @@ class StreamService(Service):
             watch = self.config.get("watch_tables", [self._table])
             self.bus.unsubscribe(watch, self._bus_queue)
 
-    async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
+    async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> int:
         client_ref = msg.get("ref")
         filter_expr = msg.get("filter")
         subid = msg.get("subid")
@@ -91,7 +91,7 @@ class StreamService(Service):
             resp = make_error(None, "Stream subscribe requires a ref")
             await ws.send_bytes(resp)
             await self.notify_monitors("out", resp)
-            return
+            return 0
 
         fields = msg.get("fields")
 
@@ -124,6 +124,7 @@ class StreamService(Service):
         await ws.send_bytes(resp)
         await self.notify_monitors("out", resp)
         self._subscribers.append(sub)
+        return 1
 
     @staticmethod
     def _project(row: dict[str, Any], fields: list[str] | None) -> dict[str, Any]:

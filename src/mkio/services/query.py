@@ -75,7 +75,7 @@ class QueryService(Service):
             watch = self.config.get("watch_tables", [self._table])
             self.bus.unsubscribe(watch, self._bus_queue)
 
-    async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
+    async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> int:
         filter_expr = msg.get("filter")
         subid = msg.get("subid")
         want_snapshot = msg.get("snapshot", True)
@@ -108,6 +108,8 @@ class QueryService(Service):
 
         if want_updates:
             self._subscribers.append(sub)
+            return 1
+        return 0
 
     def _row_id(self, row: dict[str, Any]) -> str | None:
         if not self._pk_cols:

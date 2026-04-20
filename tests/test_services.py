@@ -1634,3 +1634,99 @@ async def test_stream_unsubscribe_by_subid(stream_svc):
     assert removed == 1
     assert len(stream_svc._subscribers) == 1
     assert stream_svc._subscribers[0].subid == "s2"
+
+
+# ---- Array topic support ----------------------------------------------------
+
+async def test_subpub_array_topic_snapshot(subpub_svc):
+    """Subscribe with topic array returns single snapshot with one row per topic."""
+    ws = MockWebSocket()
+    count = await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": ["1", "2"]})
+    assert count == 2
+    assert len(subpub_svc._subscribers) == 2
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "snapshot"
+    assert len(msgs[0]["rows"]) == 2
+    topics = {r["_mkio_topic"] for r in msgs[0]["rows"]}
+    assert topics == {"1", "2"}
+
+
+async def test_subpub_array_topic_partial_miss(subpub_svc):
+    """Array with mix of existing and missing topics."""
+    ws = MockWebSocket()
+    count = await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": ["1", "999"]})
+    assert count == 2
+
+    msgs = ws.get_messages()
+    rows = msgs[0]["rows"]
+    assert len(rows) == 2
+    found = [r for r in rows if r["_mkio_exists"]]
+    missing = [r for r in rows if not r["_mkio_exists"]]
+    assert len(found) == 1
+    assert found[0]["_mkio_topic"] == "1"
+    assert len(missing) == 1
+    assert missing[0]["_mkio_topic"] == "999"
+
+
+async def test_subpub_empty_topic_array(subpub_svc):
+    """Empty topic array returns error, no subscribers created."""
+    ws = MockWebSocket()
+    count = await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": []})
+    assert count == 0
+    assert len(subpub_svc._subscribers) == 0
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "error"
+
+
+async def test_subpub_single_element_array(subpub_svc):
+    """Single-element array behaves like a string topic."""
+    ws = MockWebSocket()
+    count = await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": ["1"]})
+    assert count == 1
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert len(msgs[0]["rows"]) == 1
+    assert msgs[0]["rows"][0]["_mkio_topic"] == "1"
+    assert msgs[0]["rows"][0]["_mkio_exists"] is True
+
+
+async def test_subpub_array_topic_updates(subpub_svc, bus):
+    """After array subscribe, individual topic updates arrive correctly."""
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": ["1", "2"], "subid": "grp"})
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "update",
+        {"id": "1", "symbol": "AAPL", "qty": 500, "status": "filled"},
+        "20260404 00:00:01.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["subid"] == "grp"
+    assert msgs[0]["row"]["_mkio_topic"] == "1"
+
+
+async def test_subpub_on_subscribe_returns_count(subpub_svc):
+    """on_subscribe returns correct count for various inputs."""
+    ws = MockWebSocket()
+
+    count = await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1"})
+    assert count == 1
+
+    count = await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": ["1", "2", "3"]})
+    assert count == 3
+
+    count = await subpub_svc.on_subscribe(ws, {"type": "subscribe"})
+    assert count == 0
+
+    count = await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": []})
+    assert count == 0

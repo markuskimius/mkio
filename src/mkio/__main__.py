@@ -628,23 +628,34 @@ async def _send_messages(
 
 def _cmd_subpub() -> None:
     args = sys.argv[2:]
-    usage = "mkio subpub <url> <service> <topic> [--subid <id>] [--fields <f1,f2,...>]"
+    usage = "mkio subpub <url> <service> <topic> [<topic2> ...] [--subid <id>] [--fields <f1,f2,...>]"
     if len(args) < 3:
         print(f"Usage: {usage}")
         sys.exit(1)
 
     url = args[0].rstrip("/")
     service = args[1]
-    topic = args[2]
-    rest = args[3:]
+
+    topics: list[str] = []
+    i = 2
+    while i < len(args) and not args[i].startswith("--"):
+        topics.append(args[i])
+        i += 1
+    if not topics:
+        print(f"Usage: {usage}")
+        sys.exit(1)
+
+    rest = list(args[i:])
     _check_unknown_flags(rest, {"--fields", "--subid"}, usage)
     fields = _extract_fields(rest)
     subid = _extract_flag(rest, "--subid")
     _check_extra_positional(rest, usage)
     ws_url = _normalize_ws_url(url)
 
+    topic_arg: str | list[str] = topics[0] if len(topics) == 1 else topics
+
     try:
-        asyncio.run(_subscribe_service(ws_url, service, "subpub", None, None, subid, topic=topic, fields=fields))
+        asyncio.run(_subscribe_service(ws_url, service, "subpub", None, None, subid, topic=topic_arg, fields=fields))
     except KeyboardInterrupt:
         print("\nSubscription stopped.")
 
@@ -744,7 +755,7 @@ async def _subscribe_service(
     snapshot: bool = True,
     updates: bool = True,
     fields: list[str] | None = None,
-    topic: str | None = None,
+    topic: str | list[str] | None = None,
 ) -> None:
     from mkio.client import MkioClient
 

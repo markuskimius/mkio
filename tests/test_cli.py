@@ -542,11 +542,11 @@ def test_send_extra_data_args():
 def test_subpub_extra_positional():
     import subprocess, sys
     result = subprocess.run(
-        [sys.executable, "-m", "mkio", "subpub", "url", "svc", "topic", "extra"],
+        [sys.executable, "-m", "mkio", "subpub", "url", "svc", "topic", "--bogus"],
         capture_output=True, text=True,
     )
     assert result.returncode != 0
-    assert "unexpected argument" in result.stdout
+    assert "Unknown option" in result.stdout
 
 
 def test_stream_unknown_flag():

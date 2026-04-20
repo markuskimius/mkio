@@ -601,12 +601,15 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                     await ws.send_bytes(resp)
                     await _notify_monitors(request.app, service_name, "out", resp)
                     continue
-                await svc.on_subscribe(ws, msg)
-                entry = subscribed.get(service_name)
-                if entry:
-                    subscribed[service_name] = (svc, entry[1] + 1)
-                else:
-                    subscribed[service_name] = (svc, 1)
+                count = await svc.on_subscribe(ws, msg)
+                if count is None:
+                    count = 1
+                if count > 0:
+                    entry = subscribed.get(service_name)
+                    if entry:
+                        subscribed[service_name] = (svc, entry[1] + count)
+                    else:
+                        subscribed[service_name] = (svc, count)
             elif msg_type == "unsubscribe":
                 if service_name in subscribed:
                     removed = await svc.on_unsubscribe(ws, msg)

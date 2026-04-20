@@ -95,7 +95,7 @@ class MkioClient:
         self,
         service: str,
         protocol: str,
-        topic: str | None = None,
+        topic: str | list[str] | None = None,
         filter: str | None = None,
         ref: str | None = None,
         subid: str | None = None,
@@ -106,7 +106,7 @@ class MkioClient:
         """Subscribe to a service. Yields messages (snapshot, update).
 
         ``protocol`` identifies the expected service protocol ("subpub", "stream", "query").
-        Pass ``topic`` for subpub services (required, the primary key value).
+        Pass ``topic`` for subpub services (string or list of strings).
         Pass ``filter`` for query services (expression filter).
         Pass ``ref`` from a previous message to resume from that point (stream only).
         Pass ``subid`` to tag all messages from this subscription.
@@ -291,7 +291,7 @@ class _Subscription:
         self,
         service: str,
         protocol: str,
-        topic: str | None,
+        topic: str | list[str] | None,
         filter: str | None,
         ref: str | None,
         queue: asyncio.Queue[dict[str, Any]],

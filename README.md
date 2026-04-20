@@ -175,8 +175,9 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 // Transaction with msgid (echoed back on result/error for async correlation)
 {"service": "orders", "ref": "...", "op": "new", "msgid": "req-42", "data": {"side": "Buy", "symbol": "AAPL", "qty": 100, "price": 150}}
 
-// Subscribe (subpub — topic required, protocol required)
+// Subscribe (subpub — topic required, protocol required; string or array)
 {"service": "last_trade", "type": "subscribe", "protocol": "subpub", "topic": "AAPL"}
+{"service": "last_trade", "type": "subscribe", "protocol": "subpub", "topic": ["AAPL", "MSFT", "GOOG"]}
 
 // Subscribe (query — with filter)
 {"service": "all_orders", "type": "subscribe", "protocol": "query", "filter": "status == 'pending'"}
@@ -203,6 +204,9 @@ async with MkioClient("ws://localhost:8080/ws") as client:
 
     async for msg in client.subscribe("last_trade", "subpub", topic="AAPL"):
         print(msg)  # single row with _mkio_exists, _mkio_topic, _mkio_ref
+
+    async for msg in client.subscribe("last_trade", "subpub", topic=["AAPL", "MSFT"]):
+        print(msg)  # snapshot with one row per topic, then individual updates
 
     async for msg in client.subscribe("all_orders", "query", filter="status == 'pending'"):
         print(msg)
@@ -256,6 +260,7 @@ mkio.monitor({filter: e => e.direction === "in"})  // filter with a function
 mkio.monitor("off")                        // stop
 mkio.send("orders", {side:"Buy",...}, {op:"new"})
 mkio.subpub("last_trade", "AAPL")
+mkio.subpub("last_trade", ["AAPL","MSFT","GOOG"])
 mkio.subpub("last_trade", "AAPL", {fields:["bid","ask"], subid:"p1"})
 mkio.stream("audit_feed")                 // ref auto-generated
 mkio.stream("audit_feed", {ref:"...", filter:"qty > 100"})
@@ -364,6 +369,7 @@ Each listener service type has its own command with only the relevant options:
 ```bash
 # SubPub — topic-based snapshot + live updates
 mkio subpub http://localhost:8080 last_trade AAPL
+mkio subpub http://localhost:8080 last_trade AAPL MSFT GOOG
 mkio subpub http://localhost:8080 last_trade AAPL --fields symbol,price
 
 # Stream — ring buffer with cursor reconnect (ref defaults to now)

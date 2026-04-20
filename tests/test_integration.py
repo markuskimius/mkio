@@ -674,3 +674,41 @@ async def test_unsubscribe_by_subid_disconnect_cleans_all(client):
     snap = loads((await ws2.receive()).data)
     assert snap["type"] == "snapshot"
     await ws2.close()
+
+
+async def test_subpub_array_topic(client):
+    """Subscribe with array of topics returns multi-row snapshot and per-topic updates."""
+    ws = await client.ws_connect("/ws")
+
+    # Subscribe to two topics at once
+    await ws.send_bytes(dumps({
+        "service": "last_trade",
+        "type": "subscribe",
+        "protocol": "subpub",
+        "topic": ["arr1", "arr2"],
+        "subid": "batch",
+    }))
+    snap = loads((await ws.receive()).data)
+    assert snap["type"] == "snapshot"
+    assert snap["subid"] == "batch"
+    assert len(snap["rows"]) == 2
+    topics = {r["_mkio_topic"] for r in snap["rows"]}
+    assert topics == {"arr1", "arr2"}
+
+    # Insert data for one topic — should get an update
+    ws2 = await client.ws_connect("/ws")
+    await ws_send_recv(ws2, {
+        "service": "add_order",
+        "ref": "tx_arr1",
+        "data": {"id": "arr1", "symbol": "NVDA", "qty": 50},
+    })
+
+    resp = await asyncio.wait_for(ws.receive(), timeout=2.0)
+    update = loads(resp.data)
+    assert update["type"] == "update"
+    assert update["subid"] == "batch"
+    assert update["row"]["_mkio_topic"] == "arr1"
+    assert update["row"]["symbol"] == "NVDA"
+
+    await ws.close()
+    await ws2.close()
