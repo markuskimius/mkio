@@ -22,6 +22,7 @@ class QuerySubscriber:
     formatter: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     subid: str | None = None
     fields: list[str] | None = None
+    sent_rows: set[str] | None = None
 
 
 class QueryService(Service):
@@ -85,7 +86,8 @@ class QueryService(Service):
         if filter_expr and self._filterable:
             filter_fn = compile_filter(filter_expr)
 
-        sub = QuerySubscriber(ws=ws, filter_fn=filter_fn, formatter=self._formatter, subid=subid, fields=fields)
+        sent_rows = set() if filter_fn else None
+        sub = QuerySubscriber(ws=ws, filter_fn=filter_fn, formatter=self._formatter, subid=subid, fields=fields, sent_rows=sent_rows)
 
         if want_snapshot:
             rows = await self.db.read(self._sql)
@@ -94,6 +96,10 @@ class QueryService(Service):
                 out_row = sub.formatter(row) if sub.formatter else row
                 if sub.filter_fn and not sub.filter_fn(out_row):
                     continue
+                if sent_rows is not None:
+                    rid = self._row_id(row)
+                    if rid is not None:
+                        sent_rows.add(rid)
                 out_rows.append(self._project(self._tag_row(row, out_row), fields))
 
             resp = make_snapshot(None, self.name, out_rows, subid=sub.subid)
@@ -149,10 +155,24 @@ class QueryService(Service):
             # Fan out
             dead: list[QuerySubscriber] = []
             notified_monitor = False
+            rid = self._row_id(row)
             for sub in self._subscribers:
                 out_row = sub.formatter(row) if sub.formatter else row
                 if sub.filter_fn and not sub.filter_fn(out_row):
+                    if sub.sent_rows is not None and rid is not None and rid in sub.sent_rows:
+                        sub.sent_rows.discard(rid)
+                        try:
+                            tagged = self._project(self._tag_row(row, out_row), sub.fields)
+                            msg_bytes = make_update(self.name, ref=None, op="delete", row=tagged, subid=sub.subid)
+                            await sub.ws.send_bytes(msg_bytes)
+                            if not notified_monitor:
+                                await self.notify_monitors("out", msg_bytes)
+                                notified_monitor = True
+                        except (ConnectionError, RuntimeError):
+                            dead.append(sub)
                     continue
+                if sub.sent_rows is not None and rid is not None:
+                    sub.sent_rows.add(rid)
                 try:
                     tagged = self._project(self._tag_row(row, out_row), sub.fields)
                     msg_bytes = make_update(self.name, ref=None, op=event.op, row=tagged, subid=sub.subid)

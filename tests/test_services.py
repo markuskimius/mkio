@@ -797,6 +797,85 @@ async def test_query_with_filter(query_svc, bus):
         assert row["status"] == "pending"
 
 
+async def test_query_filter_out_sends_delete(query_svc, bus):
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {
+        "type": "subscribe",
+        "filter": "status == 'pending'",
+    })
+    msgs = ws.get_messages()
+    assert msgs[0]["type"] == "snapshot"
+    assert len(msgs[0]["rows"]) == 1
+    assert msgs[0]["rows"][0]["id"] == "1"
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "update",
+        {"id": "1", "symbol": "AAPL", "qty": 100, "status": "filled"},
+        "20260404 00:00:07.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "update"
+    assert msgs[0]["op"] == "delete"
+    assert msgs[0]["row"]["id"] == "1"
+
+
+async def test_query_filter_in_after_delete(query_svc, bus):
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {
+        "type": "subscribe",
+        "filter": "status == 'pending'",
+    })
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "update",
+        {"id": "1", "symbol": "AAPL", "qty": 100, "status": "filled"},
+        "20260404 00:00:07.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+    msgs = ws.get_messages()
+    assert msgs[0]["op"] == "delete"
+    ws.clear()
+
+    event2 = ChangeBus.make_event(
+        "orders", "update",
+        {"id": "1", "symbol": "AAPL", "qty": 100, "status": "pending"},
+        "20260404 00:00:08.000000000000",
+    )
+    bus.publish([event2])
+    await asyncio.sleep(0.1)
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["op"] == "update"
+    assert msgs[0]["row"]["status"] == "pending"
+
+
+async def test_query_filter_no_delete_for_never_seen(query_svc, bus):
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {
+        "type": "subscribe",
+        "filter": "status == 'pending'",
+    })
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "2", "symbol": "MSFT", "qty": 50, "status": "filled"},
+        "20260404 00:00:07.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 0
+
+
 async def test_query_unsubscribe(query_svc):
     ws = MockWebSocket()
     await query_svc.on_subscribe(ws, {"type": "subscribe"})
