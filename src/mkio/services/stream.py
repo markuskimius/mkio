@@ -131,8 +131,14 @@ class StreamService(Service):
             return row
         return {k: v for k, v in row.items() if k in fields}
 
-    async def on_unsubscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
-        self._subscribers = [s for s in self._subscribers if s.ws is not ws]
+    async def on_unsubscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> int:
+        before = len(self._subscribers)
+        subid = msg.get("subid")
+        if subid is not None:
+            self._subscribers = [s for s in self._subscribers if not (s.ws is ws and s.subid == subid)]
+        else:
+            self._subscribers = [s for s in self._subscribers if s.ws is not ws]
+        return before - len(self._subscribers)
 
     async def _listen_changes(self) -> None:
         """Consume insert events, append to buffer, fan out."""

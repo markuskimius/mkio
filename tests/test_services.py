@@ -312,8 +312,9 @@ async def test_subpub_unsubscribe(subpub_svc):
     ws = MockWebSocket()
     await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1"})
     assert len(subpub_svc._subscribers) == 1
-    await subpub_svc.on_unsubscribe(ws, {"type": "unsubscribe"})
+    removed = await subpub_svc.on_unsubscribe(ws, {"type": "unsubscribe"})
     assert len(subpub_svc._subscribers) == 0
+    assert removed == 1
 
 
 # ---- SubPub Service with where ---------------------------------------------
@@ -1506,3 +1507,130 @@ async def test_stream_fields_update(stream_svc, bus):
     msgs = ws.get_messages()
     assert len(msgs) == 1
     assert set(msgs[0]["row"].keys()) == {"event"}
+
+
+# ---- Multi-topic subid & selective unsubscribe ------------------------------
+
+async def test_subpub_multi_topic_same_subid(subpub_svc, bus):
+    """Multiple topics subscribed with the same subid each get snapshots and updates."""
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1", "subid": "group-1"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "2", "subid": "group-1"})
+    assert len(subpub_svc._subscribers) == 2
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 2
+    assert all(m["subid"] == "group-1" for m in msgs)
+    topics = {m["rows"][0]["_mkio_topic"] for m in msgs}
+    assert topics == {"1", "2"}
+
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "orders", "update",
+        {"id": "1", "symbol": "AAPL", "qty": 999, "status": "filled"},
+        "20260404 00:00:01.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["subid"] == "group-1"
+    assert msgs[0]["row"]["_mkio_topic"] == "1"
+
+
+async def test_subpub_unsubscribe_by_subid(subpub_svc, bus):
+    """Unsubscribe with subid removes only matching subscribers."""
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1", "subid": "grp-A"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "2", "subid": "grp-A"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1", "subid": "grp-B"})
+    assert len(subpub_svc._subscribers) == 3
+
+    removed = await subpub_svc.on_unsubscribe(ws, {"type": "unsubscribe", "subid": "grp-A"})
+    assert removed == 2
+    assert len(subpub_svc._subscribers) == 1
+    assert subpub_svc._subscribers[0].subid == "grp-B"
+
+
+async def test_subpub_unsubscribe_without_subid_removes_all(subpub_svc):
+    """Unsubscribe without subid removes all subscribers for that ws (backward compat)."""
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1", "subid": "grp-A"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "2", "subid": "grp-B"})
+    assert len(subpub_svc._subscribers) == 2
+
+    removed = await subpub_svc.on_unsubscribe(ws, {"type": "unsubscribe"})
+    assert removed == 2
+    assert len(subpub_svc._subscribers) == 0
+
+
+async def test_subpub_unsubscribe_by_subid_other_ws_unaffected(subpub_svc):
+    """Unsubscribe by subid only affects the matching ws."""
+    ws1 = MockWebSocket()
+    ws2 = MockWebSocket()
+    await subpub_svc.on_subscribe(ws1, {"type": "subscribe", "topic": "1", "subid": "shared"})
+    await subpub_svc.on_subscribe(ws2, {"type": "subscribe", "topic": "1", "subid": "shared"})
+    assert len(subpub_svc._subscribers) == 2
+
+    removed = await subpub_svc.on_unsubscribe(ws1, {"type": "unsubscribe", "subid": "shared"})
+    assert removed == 1
+    assert len(subpub_svc._subscribers) == 1
+    assert subpub_svc._subscribers[0].ws is ws2
+
+
+async def test_subpub_unsubscribe_by_subid_still_receives_other_group(subpub_svc, bus):
+    """After unsubscribing one subid group, the other group still gets updates."""
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1", "subid": "keep"})
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1", "subid": "drop"})
+    ws.clear()
+
+    await subpub_svc.on_unsubscribe(ws, {"type": "unsubscribe", "subid": "drop"})
+
+    event = ChangeBus.make_event(
+        "orders", "update",
+        {"id": "1", "symbol": "AAPL", "qty": 500, "status": "filled"},
+        "20260404 00:00:02.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["subid"] == "keep"
+
+
+async def test_query_unsubscribe_by_subid(query_svc):
+    """Query service also supports selective unsubscribe by subid."""
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe", "subid": "q1"})
+    await query_svc.on_subscribe(ws, {"type": "subscribe", "subid": "q2"})
+    assert len(query_svc._subscribers) == 2
+
+    removed = await query_svc.on_unsubscribe(ws, {"type": "unsubscribe", "subid": "q1"})
+    assert removed == 1
+    assert len(query_svc._subscribers) == 1
+    assert query_svc._subscribers[0].subid == "q2"
+
+
+async def test_stream_unsubscribe_by_subid(stream_svc):
+    """Stream service also supports selective unsubscribe by subid."""
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {
+        "type": "subscribe",
+        "ref": "00000000 00:00:00.000000000000",
+        "subid": "s1",
+    })
+    await stream_svc.on_subscribe(ws, {
+        "type": "subscribe",
+        "ref": "00000000 00:00:00.000000000000",
+        "subid": "s2",
+    })
+    assert len(stream_svc._subscribers) == 2
+
+    removed = await stream_svc.on_unsubscribe(ws, {"type": "unsubscribe", "subid": "s1"})
+    assert removed == 1
+    assert len(stream_svc._subscribers) == 1
+    assert stream_svc._subscribers[0].subid == "s2"

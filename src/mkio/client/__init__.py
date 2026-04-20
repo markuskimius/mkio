@@ -126,7 +126,8 @@ class MkioClient:
             updates=updates,
             fields=fields,
         )
-        self._subscriptions[service] = sub
+        key = sub.subid or service
+        self._subscriptions[key] = sub
 
         msg: dict[str, Any] = {"service": service, "type": "subscribe", "protocol": protocol}
         if topic:
@@ -155,6 +156,16 @@ class MkioClient:
                     return
         except asyncio.CancelledError:
             pass
+
+    async def unsubscribe(self, service: str, subid: str | None = None) -> None:
+        """Unsubscribe from a service, optionally by subid."""
+        key = subid or service
+        self._subscriptions.pop(key, None)
+        msg: dict[str, Any] = {"service": service, "type": "unsubscribe"}
+        if subid:
+            msg["subid"] = subid
+        assert self._ws is not None
+        await self._ws.send_bytes(dumps(msg))
 
     async def check(self, service: str, ref: str) -> dict[str, Any]:
         """Check if a transaction committed (for recovery after reconnect)."""
@@ -209,17 +220,19 @@ class MkioClient:
             return
 
         # Nack: deliver to subscription queue and remove to prevent reconnect retry
-        if msg_type == "nack" and service and service in self._subscriptions:
-            sub = self._subscriptions.pop(service)
+        nack_key = data.get("subid") or service
+        if msg_type == "nack" and nack_key and nack_key in self._subscriptions:
+            sub = self._subscriptions.pop(nack_key)
             try:
                 sub.queue.put_nowait(data)
             except asyncio.QueueFull:
                 pass
             return
 
-        # Route to subscription queue
-        if service and service in self._subscriptions:
-            sub = self._subscriptions[service]
+        # Route to subscription queue (prefer subid, fall back to service name)
+        sub_key = data.get("subid") or service
+        if sub_key and sub_key in self._subscriptions:
+            sub = self._subscriptions[sub_key]
             # Track ref for recovery on reconnect
             if ref:
                 sub.ref = ref
@@ -243,9 +256,9 @@ class MkioClient:
                 self._ws = await self._session.ws_connect(self.url)
 
                 # Re-subscribe with stored state
-                for service, sub in self._subscriptions.items():
+                for _key, sub in self._subscriptions.items():
                     msg: dict[str, Any] = {
-                        "service": service,
+                        "service": sub.service,
                         "type": "subscribe",
                         "protocol": sub.protocol,
                     }

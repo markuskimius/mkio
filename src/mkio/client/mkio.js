@@ -285,7 +285,7 @@ class MkioClient {
       onUpdate: opts.onUpdate || (() => {}),
       onNack: opts.onNack || null,
     };
-    const key = sub.subid || service;
+    const key = sub.subid && sub.topic ? `${sub.subid}\0${sub.topic}` : (sub.subid || service);
     this._subscriptions.set(key, sub);
 
     const msg = { service, type: "subscribe", protocol };
@@ -305,11 +305,27 @@ class MkioClient {
    * @param {string} serviceOrSubid - Service name or subid used when subscribing
    */
   unsubscribe(serviceOrSubid) {
-    const sub = this._subscriptions.get(serviceOrSubid);
-    this._subscriptions.delete(serviceOrSubid);
-    const service = sub ? sub.service : serviceOrSubid;
+    // Collect all matching entries (composite keys share the same subid)
+    let service = serviceOrSubid;
+    let subid = null;
+    const directSub = this._subscriptions.get(serviceOrSubid);
+    if (directSub) {
+      service = directSub.service;
+      subid = directSub.subid;
+      this._subscriptions.delete(serviceOrSubid);
+    }
+    // Remove any composite-keyed entries matching this subid
+    if (!directSub || subid) {
+      for (const [key, sub] of this._subscriptions) {
+        if (sub.subid === (subid || serviceOrSubid)) {
+          service = sub.service;
+          subid = sub.subid;
+          this._subscriptions.delete(key);
+        }
+      }
+    }
     const msg = { service, type: "unsubscribe", ref: makeRef() };
-    if (sub && sub.subid) msg.subid = sub.subid;
+    if (subid) msg.subid = subid;
     if (this._ws && this._ws.readyState === WebSocket.OPEN) {
       this._sendRaw(msg);
     }
@@ -420,22 +436,25 @@ class MkioClient {
     // Nack: deliver to callback and remove to prevent reconnect retry
     if (type === "nack") {
       const nackKey = data.subid || service;
-      if (nackKey && this._subscriptions.has(nackKey)) {
-        const sub = this._subscriptions.get(nackKey);
-        this._subscriptions.delete(nackKey);
-        if (sub.onNack) {
-          sub.onNack(data.message, data);
+      for (const [key, sub] of this._subscriptions) {
+        if ((sub.subid || sub.service) === nackKey) {
+          this._subscriptions.delete(key);
+          if (sub.onNack) sub.onNack(data.message, data);
         }
       }
       return;
     }
 
-    // Route to subscription (prefer subid, fall back to service name)
-    const subKey = data.subid || service;
-    if (subKey && this._subscriptions.has(subKey)) {
-      const sub = this._subscriptions.get(subKey);
+    // Route to subscription (composite key for subid+topic, else subid or service)
+    const topic = (type === "snapshot" && data.rows && data.rows[0])
+      ? data.rows[0]._mkio_topic
+      : (data.row ? data.row._mkio_topic : null);
+    const compositeKey = data.subid && topic != null ? `${data.subid}\0${topic}` : null;
+    const fallbackKey = data.subid || service;
+    const sub = (compositeKey && this._subscriptions.get(compositeKey))
+      || this._subscriptions.get(fallbackKey);
+    if (sub) {
       if (data.ref) sub.ref = data.ref;
-
       if (type === "snapshot") {
         sub.onSnapshot(data.rows);
       } else if (type === "delta") {

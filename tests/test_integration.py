@@ -536,3 +536,141 @@ async def test_msgid_with_live_updates(client):
 
     await ws_sub.close()
     await ws_tx.close()
+
+
+async def test_multi_topic_subpub_same_subid(client):
+    """Multiple subpub subscribes with the same subid on the same service."""
+    ws = await client.ws_connect("/ws")
+
+    # Subscribe to two topics with the same subid
+    await ws.send_bytes(dumps({
+        "service": "last_trade",
+        "type": "subscribe",
+        "protocol": "subpub",
+        "topic": "mt1",
+        "subid": "group-1",
+    }))
+    snap1 = loads((await ws.receive()).data)
+    assert snap1["type"] == "snapshot"
+    assert snap1["subid"] == "group-1"
+
+    await ws.send_bytes(dumps({
+        "service": "last_trade",
+        "type": "subscribe",
+        "protocol": "subpub",
+        "topic": "mt2",
+        "subid": "group-1",
+    }))
+    snap2 = loads((await ws.receive()).data)
+    assert snap2["type"] == "snapshot"
+    assert snap2["subid"] == "group-1"
+
+    # Insert data for topic mt1
+    ws2 = await client.ws_connect("/ws")
+    await ws_send_recv(ws2, {
+        "service": "add_order",
+        "ref": "tx_mt1",
+        "data": {"id": "mt1", "symbol": "AAPL", "qty": 10},
+    })
+
+    resp = await asyncio.wait_for(ws.receive(), timeout=2.0)
+    update = loads(resp.data)
+    assert update["type"] == "update"
+    assert update["subid"] == "group-1"
+    assert update["row"]["_mkio_topic"] == "mt1"
+
+    await ws.close()
+    await ws2.close()
+
+
+async def test_unsubscribe_by_subid_keeps_other_group(client):
+    """Unsubscribe with subid removes only that group; the other keeps receiving."""
+    ws = await client.ws_connect("/ws")
+
+    # Subscribe to two groups
+    await ws.send_bytes(dumps({
+        "service": "last_trade",
+        "type": "subscribe",
+        "protocol": "subpub",
+        "topic": "ub1",
+        "subid": "keep",
+    }))
+    await ws.receive()  # snapshot
+
+    await ws.send_bytes(dumps({
+        "service": "last_trade",
+        "type": "subscribe",
+        "protocol": "subpub",
+        "topic": "ub1",
+        "subid": "drop",
+    }))
+    await ws.receive()  # snapshot
+
+    # Unsubscribe only "drop"
+    await ws.send_bytes(dumps({
+        "service": "last_trade",
+        "type": "unsubscribe",
+        "subid": "drop",
+    }))
+
+    # Insert data — only "keep" subscriber should fire
+    ws2 = await client.ws_connect("/ws")
+    await ws_send_recv(ws2, {
+        "service": "add_order",
+        "ref": "tx_ub1",
+        "data": {"id": "ub1", "symbol": "GOOG", "qty": 5},
+    })
+
+    resp = await asyncio.wait_for(ws.receive(), timeout=2.0)
+    update = loads(resp.data)
+    assert update["type"] == "update"
+    assert update["subid"] == "keep"
+
+    # Should NOT receive a second update for "drop"
+    try:
+        resp2 = await asyncio.wait_for(ws.receive(), timeout=0.3)
+        data2 = loads(resp2.data)
+        assert data2.get("subid") != "drop"
+    except asyncio.TimeoutError:
+        pass  # Expected
+
+    await ws.close()
+    await ws2.close()
+
+
+async def test_unsubscribe_by_subid_disconnect_cleans_all(client):
+    """Disconnect cleans up all subscriptions regardless of subid."""
+    ws = await client.ws_connect("/ws")
+
+    await ws.send_bytes(dumps({
+        "service": "last_trade",
+        "type": "subscribe",
+        "protocol": "subpub",
+        "topic": "dc1",
+        "subid": "grp-A",
+    }))
+    await ws.receive()
+
+    await ws.send_bytes(dumps({
+        "service": "last_trade",
+        "type": "subscribe",
+        "protocol": "subpub",
+        "topic": "dc2",
+        "subid": "grp-B",
+    }))
+    await ws.receive()
+
+    # Close the connection — server should clean up both groups
+    await ws.close()
+
+    # Verify the server is still healthy by making another connection
+    ws2 = await client.ws_connect("/ws")
+    await ws2.send_bytes(dumps({
+        "service": "last_trade",
+        "type": "subscribe",
+        "protocol": "subpub",
+        "topic": "dc1",
+    }))
+    snap = loads((await ws2.receive()).data)
+    assert snap["type"] == "snapshot"
+    await ws2.close()

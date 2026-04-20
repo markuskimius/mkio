@@ -49,8 +49,9 @@ class Service:
     async def on_subscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
         """Client wants to subscribe. Send snapshot, then start pushing updates."""
 
-    async def on_unsubscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
-        """Client unsubscribes or disconnects."""
+    async def on_unsubscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> int:
+        """Client unsubscribes or disconnects. Returns number removed."""
+        return 0
 
     async def on_message(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
         """Handle a message routed to this service (transactions, checks, custom)."""

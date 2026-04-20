@@ -512,8 +512,8 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     # Per-service endpoint pre-fills the service name
     url_service_name = request.match_info.get("service_name")
 
-    # Track active subscriptions and monitor registrations for cleanup
-    subscribed: dict[str, Service] = {}
+    # Track active subscriptions (refcounted) and monitor registrations for cleanup
+    subscribed: dict[str, tuple[Service, int]] = {}
     monitoring: set[str] = set()
 
     try:
@@ -602,11 +602,20 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                     await _notify_monitors(request.app, service_name, "out", resp)
                     continue
                 await svc.on_subscribe(ws, msg)
-                subscribed[service_name] = svc
+                entry = subscribed.get(service_name)
+                if entry:
+                    subscribed[service_name] = (svc, entry[1] + 1)
+                else:
+                    subscribed[service_name] = (svc, 1)
             elif msg_type == "unsubscribe":
                 if service_name in subscribed:
-                    await svc.on_unsubscribe(ws, msg)
-                    del subscribed[service_name]
+                    removed = await svc.on_unsubscribe(ws, msg)
+                    entry = subscribed[service_name]
+                    remaining = entry[1] - (removed if removed is not None else entry[1])
+                    if remaining <= 0:
+                        del subscribed[service_name]
+                    else:
+                        subscribed[service_name] = (entry[0], remaining)
             else:
                 await svc.on_message(ws, msg)
 
@@ -614,7 +623,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
         pass
     finally:
         # Unsubscribe from all services on disconnect
-        for svc_name, svc in subscribed.items():
+        for svc_name, (svc, _count) in subscribed.items():
             try:
                 await svc.on_unsubscribe(ws, {"type": "unsubscribe", "service": svc_name})
             except Exception:

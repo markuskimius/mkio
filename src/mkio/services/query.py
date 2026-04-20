@@ -134,8 +134,14 @@ class QueryService(Service):
             return row
         return {k: v for k, v in row.items() if k in fields or k.startswith("_mkio_")}
 
-    async def on_unsubscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
-        self._subscribers = [s for s in self._subscribers if s.ws is not ws]
+    async def on_unsubscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> int:
+        before = len(self._subscribers)
+        subid = msg.get("subid")
+        if subid is not None:
+            self._subscribers = [s for s in self._subscribers if not (s.ws is ws and s.subid == subid)]
+        else:
+            self._subscribers = [s for s in self._subscribers if s.ws is not ws]
+        return before - len(self._subscribers)
 
     async def _listen_changes(self) -> None:
         """Consume change events, append to log, fan out."""
