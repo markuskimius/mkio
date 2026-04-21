@@ -107,7 +107,7 @@ Bind references (`$N.field`) pull values from a prior op's `RETURNING` row, wher
 
 ### SubPub
 
-Subscribe by topic (the `topic` column value) to get a single-row snapshot, then receive live updates as data changes. Every published row includes three framework fields: `_mkio_exists` (whether the topic was found), `_mkio_topic` (the subscribed topic value), and `_mkio_ref` (the timestamp ref of the last write, or `null` for not-found topics). Supports server-side `where` filtering (rows that don't match are never cached or published), `publish` formatting with expressions, configurable `defaults` (expression strings) for topics that don't exist yet, and custom `sql` for computed topics or JOINs.
+Subscribe by topic (the `topic` column value) to get a single-row snapshot, then receive live updates as data changes. Every published row includes three framework fields: `_mkio_exists` (whether the topic was found), `_mkio_topic` (the subscribed topic value), and `_mkio_ref` (the timestamp ref of the last write, or `null` for not-found topics). Supports server-side `where` filtering (rows that don't match are never cached or published; once cached, a row that stops matching is frozen at its last matching state — no eviction, no notification), `publish` formatting with expressions, configurable `defaults` (expression strings) for topics that don't exist yet, and custom `sql` for computed topics or JOINs.
 
 ```toml
 [services.last_trade]

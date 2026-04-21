@@ -194,9 +194,6 @@ class SubPubService(Service):
                 row["_mkio_ref"] = event.ref
                 self._cache[topic_val] = row
                 return True
-            if topic_val in self._cache:
-                self._cache.pop(topic_val)
-                return False
             return None
         if event.op == "delete":
             if topic_val in self._cache:
@@ -230,8 +227,13 @@ class SubPubService(Service):
     async def _requery_all(self) -> None:
         """Re-query entire dataset (for secondary table changes)."""
         rows = await self.db.read(self._sql)
-        self._cache.clear()
+        new_cache: dict[str, Any] = {}
         for row in rows:
             if self._where and not self._where(row):
                 continue
-            self._cache[str(row[self._topic_field])] = row
+            new_cache[str(row[self._topic_field])] = row
+        if self._where:
+            for topic, row in self._cache.items():
+                if topic not in new_cache:
+                    new_cache[topic] = row
+        self._cache = new_cache

@@ -400,13 +400,13 @@ async def test_subpub_where_filters_live_insert(subpub_where_svc, bus):
     assert msgs[0]["row"]["symbol"] == "TSLA"
 
 
-async def test_subpub_where_removes_on_mismatch(subpub_where_svc, bus):
-    """If an update causes a row to no longer match where, subscriber gets _mkio_exists: False."""
+async def test_subpub_where_freezes_on_mismatch(subpub_where_svc, bus):
+    """If an update causes a row to no longer match where, subscriber sees no change (frozen)."""
     ws = MockWebSocket()
     await subpub_where_svc.on_subscribe(ws, {"type": "subscribe", "topic": "2"})
     ws.clear()
 
-    # Update MSFT (filled) to pending — should notify exists=False
+    # Update MSFT (filled) to pending — should NOT notify (row frozen at last match)
     event = ChangeBus.make_event(
         "orders", "update",
         {"id": "2", "symbol": "MSFT", "qty": 50, "status": "pending"},
@@ -415,9 +415,38 @@ async def test_subpub_where_removes_on_mismatch(subpub_where_svc, bus):
     bus.publish([event])
     await asyncio.sleep(0.1)
     msgs = ws.get_messages()
+    assert len(msgs) == 0
+
+
+async def test_subpub_where_frozen_row_comes_back(subpub_where_svc, bus):
+    """If a frozen row matches the where clause again, subscriber gets the updated row."""
+    ws = MockWebSocket()
+    await subpub_where_svc.on_subscribe(ws, {"type": "subscribe", "topic": "2"})
+    ws.clear()
+
+    # First: MSFT goes to pending (frozen, no notification)
+    event = ChangeBus.make_event(
+        "orders", "update",
+        {"id": "2", "symbol": "MSFT", "qty": 50, "status": "pending"},
+        "20260404 00:00:00.000000000003",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+    ws.clear()
+
+    # Then: MSFT goes back to filled with new qty — should notify with updated values
+    event2 = ChangeBus.make_event(
+        "orders", "update",
+        {"id": "2", "symbol": "MSFT", "qty": 100, "status": "filled"},
+        "20260404 00:00:00.000000000004",
+    )
+    bus.publish([event2])
+    await asyncio.sleep(0.1)
+    msgs = ws.get_messages()
     assert len(msgs) == 1
     assert msgs[0]["op"] == "update"
-    assert msgs[0]["row"]["_mkio_exists"] is False
+    assert msgs[0]["row"]["_mkio_exists"] is True
+    assert msgs[0]["row"]["qty"] == 100
 
 
 # ---- SubPub with configured defaults ----------------------------------------
