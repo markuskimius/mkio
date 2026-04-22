@@ -295,6 +295,372 @@ def test_if_in_formatter():
 # -- Security -----------------------------------------------------------------
 
 def test_rejects_attribute_access():
-    # This should be parsed as field ref "name" then unexpected "."
-    with pytest.raises(ExprError):
-        parse("name.__class__")
+    node = parse("name.__class__")
+    with pytest.raises(ExprError, match="dunder"):
+        evaluate(node, {"name": "Alice"})
+
+
+def test_rejects_dunder_bracket():
+    node = parse("meta['__class__']")
+    with pytest.raises(ExprError, match="dunder"):
+        evaluate(node, {"meta": {"__class__": "x"}})
+
+
+# -- Tokenizer: new tokens ---------------------------------------------------
+
+def test_tokenize_brackets():
+    tokens = tokenize("[1, 2]")
+    types = [t.type for t in tokens if t.type != "EOF"]
+    assert types == ["LBRACKET", "NUMBER", "COMMA", "NUMBER", "RBRACKET"]
+
+
+def test_tokenize_braces():
+    tokens = tokenize("{a: 1}")
+    types = [t.type for t in tokens if t.type != "EOF"]
+    assert types == ["LBRACE", "IDENT", "COLON", "NUMBER", "RBRACE"]
+
+
+def test_tokenize_colon():
+    tokens = tokenize(":")
+    assert tokens[0].type == "COLON"
+    assert tokens[0].value == ":"
+
+
+def test_tokenize_dot():
+    tokens = tokenize("x.y")
+    types = [t.type for t in tokens if t.type != "EOF"]
+    assert types == ["IDENT", "DOT", "IDENT"]
+
+
+def test_tokenize_dot_number_literal():
+    tokens = tokenize(".5")
+    assert tokens[0].type == "NUMBER"
+    assert tokens[0].value == ".5"
+
+
+def test_tokenize_float_unchanged():
+    tokens = tokenize("3.14")
+    assert tokens[0].type == "NUMBER"
+    assert tokens[0].value == "3.14"
+
+
+def test_tokenize_dot_after_number():
+    tokens = tokenize("a.0")
+    types = [t.type for t in tokens if t.type != "EOF"]
+    assert types == ["IDENT", "DOT", "NUMBER"]
+
+
+# -- Parser: arrays -----------------------------------------------------------
+
+def test_parse_array_literal():
+    from mkio._expr import ArrayLiteral, Literal
+    node = parse("[1, 2, 3]")
+    assert isinstance(node, ArrayLiteral)
+    assert len(node.elements) == 3
+    assert all(isinstance(e, Literal) for e in node.elements)
+
+
+def test_parse_empty_array():
+    from mkio._expr import ArrayLiteral
+    node = parse("[]")
+    assert isinstance(node, ArrayLiteral)
+    assert node.elements == ()
+
+
+def test_parse_array_with_expressions():
+    from mkio._expr import ArrayLiteral, BinOp
+    node = parse("[1 + 2, 3 * 4]")
+    assert isinstance(node, ArrayLiteral)
+    assert len(node.elements) == 2
+    assert all(isinstance(e, BinOp) for e in node.elements)
+
+
+# -- Parser: maps -------------------------------------------------------------
+
+def test_parse_map_literal():
+    from mkio._expr import MapLiteral
+    node = parse("{a: 1, b: 2}")
+    assert isinstance(node, MapLiteral)
+    assert node.keys == ("a", "b")
+    assert len(node.values) == 2
+
+
+def test_parse_map_string_keys():
+    from mkio._expr import MapLiteral
+    node = parse("{'a': 1, 'b': 2}")
+    assert isinstance(node, MapLiteral)
+    assert node.keys == ("a", "b")
+
+
+def test_parse_empty_map():
+    from mkio._expr import MapLiteral
+    node = parse("{}")
+    assert isinstance(node, MapLiteral)
+    assert node.keys == ()
+    assert node.values == ()
+
+
+def test_parse_map_bad_key():
+    with pytest.raises(ExprError, match="Map key"):
+        parse("{123: 'x'}")
+
+
+# -- Parser: index/dot access ------------------------------------------------
+
+def test_parse_index_bracket():
+    from mkio._expr import Index, FieldRef, Literal
+    node = parse("tags[0]")
+    assert isinstance(node, Index)
+    assert isinstance(node.target, FieldRef)
+    assert isinstance(node.key, Literal)
+    assert node.key.value == 0
+
+
+def test_parse_index_dot():
+    from mkio._expr import Index, FieldRef, Literal
+    node = parse("meta.region")
+    assert isinstance(node, Index)
+    assert isinstance(node.target, FieldRef)
+    assert isinstance(node.key, Literal)
+    assert node.key.value == "region"
+
+
+def test_parse_chained_access():
+    from mkio._expr import Index
+    node = parse("a.b[0].c")
+    assert isinstance(node, Index)
+    assert node.key.value == "c"
+    assert isinstance(node.target, Index)
+    assert node.target.key.value == 0
+    assert isinstance(node.target.target, Index)
+    assert node.target.target.key.value == "b"
+
+
+def test_parse_dot_number_access():
+    from mkio._expr import Index, Literal
+    node = parse("arr.0")
+    assert isinstance(node, Index)
+    assert isinstance(node.key, Literal)
+    assert node.key.value == 0
+
+
+# -- Parser: LET -------------------------------------------------------------
+
+def test_parse_let_simple():
+    from mkio._expr import Let
+    node = parse("LET x = 1 IN x + 1")
+    assert isinstance(node, Let)
+    assert len(node.bindings) == 1
+    assert node.bindings[0][0] == "x"
+
+
+def test_parse_let_multiple():
+    from mkio._expr import Let
+    node = parse("LET a = 1, b = 2 IN a + b")
+    assert isinstance(node, Let)
+    assert len(node.bindings) == 2
+    assert node.bindings[0][0] == "a"
+    assert node.bindings[1][0] == "b"
+
+
+def test_parse_let_case_insensitive():
+    from mkio._expr import Let
+    node = parse("let x = 1 in x")
+    assert isinstance(node, Let)
+
+
+def test_parse_let_missing_in():
+    with pytest.raises(ExprError, match="IN"):
+        parse("LET x = 1 x")
+
+
+def test_register_let_as_function_raises():
+    with pytest.raises(ExprError, match="keyword"):
+        register_function("LET", lambda: None)
+
+
+# -- Evaluator: arrays -------------------------------------------------------
+
+def test_eval_array_literal():
+    assert evaluate(parse("[1, 2, 3]"), {}) == [1, 2, 3]
+
+
+def test_eval_array_with_fields():
+    assert evaluate(parse("[name, qty]"), ROW) == ["Alice", 100]
+
+
+def test_eval_empty_array():
+    assert evaluate(parse("[]"), {}) == []
+
+
+def test_eval_array_in_array():
+    assert evaluate(parse("[[1, 2], [3, 4]]"), {}) == [[1, 2], [3, 4]]
+
+
+# -- Evaluator: maps ---------------------------------------------------------
+
+def test_eval_map_literal():
+    result = evaluate(parse("{symbol: name, total: qty * price}"), ROW)
+    assert result == {"symbol": "Alice", "total": 1500.0}
+
+
+def test_eval_empty_map():
+    assert evaluate(parse("{}"), {}) == {}
+
+
+def test_eval_map_with_string_keys():
+    result = evaluate(parse("{'x': 1, 'y': 2}"), {})
+    assert result == {"x": 1, "y": 2}
+
+
+def test_eval_nested_map():
+    result = evaluate(parse("{inner: {a: 1}}"), {})
+    assert result == {"inner": {"a": 1}}
+
+
+# -- Evaluator: index access -------------------------------------------------
+
+def test_eval_index_list():
+    assert evaluate(parse("[10, 20, 30][1]"), {}) == 20
+
+
+def test_eval_index_dict():
+    row = {"meta": {"region": "US", "tier": 1}}
+    assert evaluate(parse("meta['region']"), row) == "US"
+    assert evaluate(parse("meta['tier']"), row) == 1
+
+
+def test_eval_dot_access():
+    row = {"meta": {"region": "US"}}
+    assert evaluate(parse("meta.region"), row) == "US"
+
+
+def test_eval_chained_index():
+    row = {"data": {"items": [{"name": "first"}, {"name": "second"}]}}
+    assert evaluate(parse("data.items[0].name"), row) == "first"
+    assert evaluate(parse("data.items[1].name"), row) == "second"
+
+
+def test_eval_index_out_of_range():
+    with pytest.raises(ExprError, match="Index error"):
+        evaluate(parse("[1, 2][99]"), {})
+
+
+def test_eval_index_missing_key():
+    row = {"meta": {"a": 1}}
+    with pytest.raises(ExprError, match="Unknown key"):
+        evaluate(parse("meta['missing']"), row)
+
+
+def test_eval_index_null():
+    with pytest.raises(ExprError, match="Cannot index into NULL"):
+        evaluate(parse("tag[0]"), ROW)
+
+
+def test_eval_index_non_indexable():
+    with pytest.raises(ExprError, match="Cannot index into"):
+        evaluate(parse("qty[0]"), ROW)
+
+
+# -- Evaluator: LET ----------------------------------------------------------
+
+def test_eval_let_simple():
+    result = evaluate(parse("LET total = qty * price IN total > 1000"), ROW)
+    assert result is True
+
+
+def test_eval_let_multiple_bindings():
+    result = evaluate(parse("LET a = 1, b = a + 1 IN b"), {})
+    assert result == 2
+
+
+def test_eval_let_shadows_field():
+    result = evaluate(parse("LET name = 'Bob' IN name"), ROW)
+    assert result == "Bob"
+
+
+def test_eval_let_no_leak():
+    result = evaluate(parse("LET x = 99 IN x"), ROW)
+    assert result == 99
+    assert "x" not in ROW
+
+
+def test_eval_let_with_functions():
+    result = evaluate(parse("LET u = UPPER(name) IN u"), ROW)
+    assert result == "ALICE"
+
+
+def test_eval_let_in_formatter():
+    fmt = compile_formatter({"label": "LET t = qty * price IN IF(t > 1000, 'big', 'small')"})
+    assert fmt(ROW) == {"label": "big"}
+
+
+def test_eval_let_nested():
+    result = evaluate(parse("LET x = 1 IN LET y = x + 1 IN y"), {})
+    assert result == 2
+
+
+# -- Evaluator: IN with array literal ----------------------------------------
+
+def test_eval_in_with_array_literal():
+    assert evaluate(parse("status IN ['active', 'pending']"), ROW) is True
+    assert evaluate(parse("status IN ['filled', 'cancelled']"), ROW) is False
+
+
+def test_eval_in_empty_array():
+    assert evaluate(parse("name IN []"), ROW) is False
+
+
+# -- New functions ------------------------------------------------------------
+
+def test_len_string():
+    assert evaluate(parse("LEN(name)"), ROW) == 5
+
+
+def test_len_list():
+    assert evaluate(parse("LEN([1, 2, 3])"), {}) == 3
+
+
+def test_len_map():
+    assert evaluate(parse("LEN({a: 1, b: 2})"), {}) == 2
+
+
+def test_keys():
+    row = {"meta": {"x": 1, "y": 2}}
+    result = evaluate(parse("KEYS(meta)"), row)
+    assert sorted(result) == ["x", "y"]
+
+
+def test_values():
+    row = {"meta": {"x": 1, "y": 2}}
+    result = evaluate(parse("VALUES(meta)"), row)
+    assert sorted(result) == [1, 2]
+
+
+def test_flatten():
+    result = evaluate(parse("FLATTEN([[1, 2], [3], 4])"), {})
+    assert result == [1, 2, 3, 4]
+
+
+def test_merge():
+    result = evaluate(parse("MERGE({a: 1}, {b: 2, a: 3})"), {})
+    assert result == {"a": 3, "b": 2}
+
+
+def test_merge_empty():
+    result = evaluate(parse("MERGE({})"), {})
+    assert result == {}
+
+
+# -- Compile helpers with new features ----------------------------------------
+
+def test_compile_filter_with_array():
+    pred = compile_filter("status IN ['active', 'pending']")
+    assert pred(ROW) is True
+    assert pred({"status": "filled"}) is False
+
+
+def test_compile_formatter_with_map():
+    fmt = compile_formatter({"output": "{total: qty * price, label: UPPER(name)}"})
+    result = fmt(ROW)
+    assert result == {"output": {"total": 1500.0, "label": "ALICE"}}

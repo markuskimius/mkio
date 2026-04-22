@@ -17,7 +17,7 @@ pytest tests/ -x -v            # Stop on first failure, verbose
 src/mkio/
 ├── _json.py          # orjson-with-fallback (dumps -> bytes, loads)
 ├── _ref.py           # "YYYYMMDD HH:mm:ss.mmmuuunnnppp" ref strings
-├── _expr.py          # Expression language: tokenizer, parser, evaluator
+├── _expr.py          # Expression language: tokenizer, parser, evaluator, array/map/index/LET
 ├── config.py         # TOML/dict loader, normalization, validation
 ├── migration.py      # Schema diff, change classification, data preservation
 ├── database.py       # Dual aiosqlite connections (write + read), WAL mode
@@ -40,7 +40,7 @@ src/mkio/
 
 - **Write path**: TransactionService -> WriteBatcher queue -> batch with SAVEPOINTs -> single COMMIT -> ChangeBus publish -> fan out to subscribers
 - **In-memory databases** use shared-cache URI (`file:mkio_{uuid}?mode=memory&cache=shared`) so write and read connections see the same data
-- **Expression language** is parsed once (at subscribe/startup), evaluated per row via AST walk. Built-in functions: `UPPER`, `LOWER`, `ROUND`, `ABS`, `COALESCE`, `IF(cond, then, else)`. `IF` short-circuits (only the chosen branch is evaluated).
+- **Expression language** is parsed once (at subscribe/startup), evaluated per row via AST walk. Built-in functions: `UPPER`, `LOWER`, `ROUND`, `ABS`, `COALESCE`, `IF(cond, then, else)`, `LEN`, `KEYS`, `VALUES`, `FLATTEN`, `MERGE`. `IF` short-circuits (only the chosen branch is evaluated). Supports array literals (`[1, 2, 3]`), map literals (`{key: value}`), index/dot access (`tags[0]`, `meta.region`, chained as `data.items[0].name`), and `LET` bindings (`LET x = qty * price IN IF(x > 1000, 'large', 'small')`). LET binding values are parsed at arithmetic precedence; use parens for comparisons in bindings (`LET active = (status == 'filled') IN ...`). `LET` is a reserved keyword. Dunder attribute access (`__class__` etc.) is blocked at evaluation time.
 - **Ref strings** are lexicographically sortable UTC timestamps with sub-nanosecond counter for uniqueness
 - **Schema migration** uses recreate-table strategy for changes SQLite's ALTER TABLE can't handle
 - **`_mkio_ref` column** is automatically added to all tables by the framework. The writer stamps each row with the transaction's `ref` on INSERT/UPDATE/UPSERT. If the client supplies a `ref`, it is used directly; otherwise the server generates one. Stream services seed their buffer from the DB using this column on startup, enabling cursor-based reconnection across server restarts. Migration system excludes `_mkio_ref` from schema diffs. SubPub and Query services include `_mkio_ref` in every published row (snapshot and update). For SubPub not-found rows, `_mkio_ref` defaults to `null` unless the service config has a `defaults` entry for it. `_mkio_ref` survives formatters (`publish` config) and field projection — it is always set explicitly from the source row after formatting.

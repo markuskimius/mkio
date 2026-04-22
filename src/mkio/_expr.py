@@ -1,7 +1,8 @@
 """Expression language: tokenizer, parser, evaluator, and function registry.
 
 Supports: comparisons, logical ops, arithmetic, string ops, null checks,
-and extensible function calls. Safe for client-submitted expressions.
+extensible function calls, array/map literals, index/dot access, and LET
+bindings. Safe for client-submitted expressions.
 """
 
 from __future__ import annotations
@@ -37,7 +38,27 @@ class FuncCall:
     name: str
     args: tuple[Node, ...]
 
-Node = Literal | FieldRef | BinOp | UnaryOp | FuncCall
+@dataclass(frozen=True, slots=True)
+class ArrayLiteral:
+    elements: tuple[Node, ...]
+
+@dataclass(frozen=True, slots=True)
+class MapLiteral:
+    keys: tuple[str, ...]
+    values: tuple[Node, ...]
+
+@dataclass(frozen=True, slots=True)
+class Index:
+    target: Node
+    key: Node
+
+@dataclass(frozen=True, slots=True)
+class Let:
+    bindings: tuple[tuple[str, Node], ...]
+    body: Node
+
+Node = (Literal | FieldRef | BinOp | UnaryOp | FuncCall
+        | ArrayLiteral | MapLiteral | Index | Let)
 
 
 class ExprError(Exception):
@@ -54,11 +75,16 @@ FUNCTIONS: dict[str, Callable[..., Any]] = {
     "ROUND": lambda x, n=0: round(x, int(n)),
     "ABS": lambda x: abs(x),
     "COALESCE": lambda *args: next((a for a in args if a is not None), None),
+    "LEN": lambda x: len(x),
+    "KEYS": lambda m: list(m.keys()),
+    "VALUES": lambda m: list(m.values()),
+    "FLATTEN": lambda arr: [x for sub in arr for x in (sub if isinstance(sub, list) else [sub])],
+    "MERGE": lambda *maps: {k: v for m in maps for k, v in m.items()},
 }
 
 _KEYWORDS = frozenset({
     "AND", "OR", "NOT", "IS", "NULL", "IN", "CONTAINS", "STARTS_WITH",
-    "TRUE", "FALSE",
+    "TRUE", "FALSE", "LET",
 })
 
 _SPECIAL_FORMS = frozenset({"IF"})
@@ -78,7 +104,7 @@ def register_function(name: str, fn: Callable[..., Any]) -> None:
 
 @dataclass(frozen=True, slots=True)
 class Token:
-    type: str  # IDENT, NUMBER, STRING, OP, LPAREN, RPAREN, COMMA, EOF
+    type: str
     value: str
 
 _OPERATORS = frozenset({"==", "!=", ">=", "<=", ">", "<", "+", "-", "*", "/"})
@@ -111,6 +137,14 @@ def tokenize(expr: str) -> list[Token]:
             i += 1
             continue
 
+        # DOT (context-dependent: postfix position → DOT, otherwise fall through to number)
+        if c == ".":
+            prev_type = tokens[-1].type if tokens else None
+            if prev_type in ("IDENT", "RPAREN", "RBRACKET", "RBRACE", "NUMBER"):
+                tokens.append(Token("DOT", "."))
+                i += 1
+                continue
+
         # Number
         if c.isdigit() or (c == "." and i + 1 < n and expr[i + 1].isdigit()):
             start = i
@@ -135,7 +169,7 @@ def tokenize(expr: str) -> list[Token]:
             i += 1
             continue
 
-        # Parens and comma
+        # Parens, brackets, braces, comma, colon
         if c == "(":
             tokens.append(Token("LPAREN", "("))
             i += 1
@@ -144,8 +178,28 @@ def tokenize(expr: str) -> list[Token]:
             tokens.append(Token("RPAREN", ")"))
             i += 1
             continue
+        if c == "[":
+            tokens.append(Token("LBRACKET", "["))
+            i += 1
+            continue
+        if c == "]":
+            tokens.append(Token("RBRACKET", "]"))
+            i += 1
+            continue
+        if c == "{":
+            tokens.append(Token("LBRACE", "{"))
+            i += 1
+            continue
+        if c == "}":
+            tokens.append(Token("RBRACE", "}"))
+            i += 1
+            continue
         if c == ",":
             tokens.append(Token("COMMA", ","))
+            i += 1
+            continue
+        if c == ":":
+            tokens.append(Token("COLON", ":"))
             i += 1
             continue
 
@@ -246,7 +300,7 @@ class _Parser:
             return BinOp("STARTS_WITH", left, right)
         if self.match_ident("IN"):
             self.advance()
-            right = self.parse_primary()
+            right = self.parse_addition()
             return BinOp("IN", left, right)
 
         # Standard comparisons
@@ -278,7 +332,32 @@ class _Parser:
             self.advance()
             operand = self.parse_unary_minus()
             return UnaryOp("-", operand)
-        return self.parse_primary()
+        return self.parse_postfix(self.parse_primary())
+
+    def parse_postfix(self, node: Node) -> Node:
+        while True:
+            if self.peek().type == "LBRACKET":
+                self.advance()
+                key = self.parse_or()
+                self.expect("RBRACKET")
+                node = Index(node, key)
+            elif self.peek().type == "DOT":
+                self.advance()
+                tok = self.peek()
+                if tok.type == "IDENT":
+                    self.advance()
+                    node = Index(node, Literal(tok.value))
+                elif tok.type == "NUMBER":
+                    self.advance()
+                    val = float(tok.value) if "." in tok.value else int(tok.value)
+                    node = Index(node, Literal(val))
+                else:
+                    raise ExprError(
+                        f"Expected identifier or number after '.', got {tok.type}({tok.value!r})"
+                    )
+            else:
+                break
+        return node
 
     def parse_primary(self) -> Node:
         tok = self.peek()
@@ -289,6 +368,35 @@ class _Parser:
             node = self.parse_or()
             self.expect("RPAREN")
             return node
+
+        # Array literal
+        if tok.type == "LBRACKET":
+            self.advance()
+            elements: list[Node] = []
+            if self.peek().type != "RBRACKET":
+                elements.append(self.parse_or())
+                while self.peek().type == "COMMA":
+                    self.advance()
+                    elements.append(self.parse_or())
+            self.expect("RBRACKET")
+            return ArrayLiteral(tuple(elements))
+
+        # Map literal
+        if tok.type == "LBRACE":
+            self.advance()
+            keys: list[str] = []
+            values: list[Node] = []
+            if self.peek().type != "RBRACE":
+                k, v = self._parse_map_entry()
+                keys.append(k)
+                values.append(v)
+                while self.peek().type == "COMMA":
+                    self.advance()
+                    k, v = self._parse_map_entry()
+                    keys.append(k)
+                    values.append(v)
+            self.expect("RBRACE")
+            return MapLiteral(tuple(keys), tuple(values))
 
         # String literal
         if tok.type == "STRING":
@@ -302,7 +410,7 @@ class _Parser:
                 return Literal(float(tok.value))
             return Literal(int(tok.value))
 
-        # Keywords: true, false, null
+        # Keywords: true, false, null, let
         if tok.type == "IDENT":
             upper = tok.value.upper()
             if upper == "TRUE":
@@ -314,6 +422,8 @@ class _Parser:
             if upper == "NULL":
                 self.advance()
                 return Literal(None)
+            if upper == "LET":
+                return self._parse_let()
 
             # Function call or field reference
             self.advance()
@@ -336,6 +446,41 @@ class _Parser:
                 return FieldRef(tok.value)
 
         raise ExprError(f"Unexpected token: {tok.value!r}")
+
+    def _parse_map_entry(self) -> tuple[str, Node]:
+        tok = self.peek()
+        if tok.type == "IDENT":
+            key = tok.value
+            self.advance()
+        elif tok.type == "STRING":
+            key = tok.value
+            self.advance()
+        else:
+            raise ExprError(
+                f"Map key must be identifier or string, got {tok.type}({tok.value!r})"
+            )
+        self.expect("COLON")
+        value = self.parse_or()
+        return key, value
+
+    def _parse_let(self) -> Let:
+        self.advance()  # consume LET
+        bindings: list[tuple[str, Node]] = []
+        name_tok = self.expect("IDENT")
+        self.expect("OP", "=")
+        expr = self.parse_addition()
+        bindings.append((name_tok.value, expr))
+        while self.peek().type == "COMMA":
+            self.advance()
+            name_tok = self.expect("IDENT")
+            self.expect("OP", "=")
+            expr = self.parse_addition()
+            bindings.append((name_tok.value, expr))
+        if not self.match_ident("IN"):
+            raise ExprError("Expected 'IN' after LET bindings")
+        self.advance()  # consume IN
+        body = self.parse_or()
+        return Let(tuple(bindings), body)
 
 
 def parse(expr: str) -> Node:
@@ -422,6 +567,40 @@ def evaluate(node: Node, row: dict[str, Any]) -> Any:
             raise ExprError(f"Unknown function: {node.name}")
         args = [evaluate(arg, row) for arg in node.args]
         return fn(*args)
+
+    if isinstance(node, ArrayLiteral):
+        return [evaluate(el, row) for el in node.elements]
+
+    if isinstance(node, MapLiteral):
+        return {k: evaluate(v, row) for k, v in zip(node.keys, node.values)}
+
+    if isinstance(node, Index):
+        target = evaluate(node.target, row)
+        key = evaluate(node.key, row)
+        if isinstance(key, str) and key.startswith("__"):
+            raise ExprError(f"Access to dunder attributes is not allowed: {key!r}")
+        if target is None:
+            raise ExprError("Cannot index into NULL")
+        if isinstance(target, (list, tuple)):
+            try:
+                return target[int(key)]
+            except (IndexError, ValueError) as e:
+                raise ExprError(f"Index error: {e}") from None
+        if isinstance(target, dict):
+            try:
+                return target[key]
+            except KeyError:
+                available = ", ".join(sorted(str(k) for k in target.keys()))
+                raise ExprError(
+                    f"Unknown key: {key!r}. Available keys: {available}"
+                ) from None
+        raise ExprError(f"Cannot index into {type(target).__name__}")
+
+    if isinstance(node, Let):
+        scope = dict(row)
+        for name, expr in node.bindings:
+            scope[name] = evaluate(expr, scope)
+        return evaluate(node.body, scope)
 
     raise ExprError(f"Unknown node type: {type(node)}")
 
