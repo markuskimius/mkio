@@ -4,16 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mkio"
-version = "0.1.34"
+version = "0.1.35"
 description = "Config-driven microservice framework with WebSocket, SQLite, and expression language"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
     "aiohttp>=3.9,<4",
