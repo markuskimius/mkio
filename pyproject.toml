@@ -7,6 +7,7 @@ name = "mkio"
 version = "0.1.30"
 description = "Config-driven microservice framework with WebSocket, SQLite, and expression language"
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "aiohttp>=3.9,<4",
