@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mkio"
-version = "0.1.30"
+version = "0.1.31"
 description = "Config-driven microservice framework with WebSocket, SQLite, and expression language"
 readme = "README.md"
 license = "Apache-2.0"
