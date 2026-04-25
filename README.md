@@ -1,5 +1,9 @@
 # mkio
 
+[![PyPI](https://img.shields.io/pypi/v/mkio)](https://pypi.org/project/mkio/)
+[![Python](https://img.shields.io/pypi/pyversions/mkio)](https://pypi.org/project/mkio/)
+[![License](https://img.shields.io/pypi/l/mkio)](https://github.com/markuskimius/mkio/blob/main/LICENSE)
+
 Config-driven microservice framework for Python. Define your schema, services, and data flows in a TOML file — zero coding required for standard configurations.
 
 A single TCP port serves HTTP and WebSocket, backed by an embedded SQLite database. Designed for restricted environments where runtime downloads aren't possible — everything installs via `pip`.
