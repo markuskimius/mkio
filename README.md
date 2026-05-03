@@ -201,8 +201,15 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 // → {"type": "snapshot", "service": "all_orders", "subid": "q1", "rows": [...], "hasmore": false}
 // Once hasmore is false, live updates begin flowing
 
-// Stream reconnect with ref (required for streams)
+// Stream (ref resumes from that point; omit ref to start from beginning of buffer)
 {"service": "audit_feed", "type": "subscribe", "protocol": "stream", "ref": "20260404 15:30:45.123456000000"}
+
+// Stream with pagination (stateless — no getmore, just re-subscribe with returned ref)
+{"service": "audit_feed", "type": "subscribe", "protocol": "stream", "maxcount": 100}
+// → {"type": "snapshot", "service": "audit_feed", "ref": "<last-row-ref>", "rows": [...], "hasmore": true}
+// Next page: subscribe again with ref from previous response
+{"service": "audit_feed", "type": "subscribe", "protocol": "stream", "ref": "<last-row-ref>", "maxcount": 100}
+// Once hasmore is false, subscribe without maxcount to go live
 ```
 
 ## Client Libraries
@@ -401,6 +408,7 @@ mkio subpub http://localhost:8080 last_trade AAPL --fields symbol,price
 mkio stream http://localhost:8080 audit_feed
 mkio stream http://localhost:8080 audit_feed --ref "20260404 15:30:45.123456000000"
 mkio stream http://localhost:8080 audit_feed --fields event,order_id
+mkio stream http://localhost:8080 audit_feed --maxcount 100    # page from beginning of buffer
 
 # Query — snapshot + live updates
 mkio query http://localhost:8080 all_orders

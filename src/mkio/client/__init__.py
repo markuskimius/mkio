@@ -114,7 +114,9 @@ class MkioClient:
         Set ``snapshot=False`` to skip the initial snapshot.
         Set ``updates=False`` to receive only the snapshot then stop.
         Pass ``fields`` to receive only the specified columns in each row.
-        Pass ``maxcount`` for query services to paginate the snapshot.
+        Pass ``maxcount`` to paginate the snapshot (query and stream).
+        For stream, pagination is stateless: each page is a standalone
+        subscribe with the ref from the previous response.
         """
         sub = _Subscription(
             service=service,
@@ -132,26 +134,7 @@ class MkioClient:
         key = sub.subid or service
         self._subscriptions[key] = sub
 
-        msg: dict[str, Any] = {"service": service, "type": "subscribe", "protocol": protocol}
-        if topic:
-            msg["topic"] = topic
-        if filter:
-            msg["filter"] = filter
-        if ref or sub.ref:
-            msg["ref"] = ref or sub.ref
-        if sub.subid:
-            msg["subid"] = sub.subid
-        if not snapshot:
-            msg["snapshot"] = False
-        if not updates:
-            msg["updates"] = False
-        if fields:
-            msg["fields"] = fields
-        if maxcount is not None and maxcount > 0:
-            msg["maxcount"] = maxcount
-
-        assert self._ws is not None
-        await self._ws.send_bytes(dumps(msg))
+        await self._send_subscribe(sub)
 
         try:
             while True:
@@ -164,13 +147,45 @@ class MkioClient:
                         self._subscriptions[sub.subid] = sub
                     if item.get("hasmore"):
                         yield item
-                        await self._send_getmore(service, sub.subid)
+                        if protocol == "stream":
+                            sub.ref = item.get("ref")
+                            await self._send_subscribe(sub)
+                        else:
+                            await self._send_getmore(service, sub.subid)
                         continue
                 yield item
                 if not updates and item.get("type") == "snapshot" and not item.get("hasmore"):
                     return
+                if protocol == "stream" and sub.maxcount and not item.get("hasmore"):
+                    if updates:
+                        sub.ref = item.get("ref")
+                        sub.maxcount = None
+                        await self._send_subscribe(sub)
+                    else:
+                        return
         except asyncio.CancelledError:
             pass
+
+    async def _send_subscribe(self, sub: _Subscription) -> None:
+        msg: dict[str, Any] = {"service": sub.service, "type": "subscribe", "protocol": sub.protocol}
+        if sub.topic:
+            msg["topic"] = sub.topic
+        if sub.filter:
+            msg["filter"] = sub.filter
+        if sub.ref:
+            msg["ref"] = sub.ref
+        if sub.subid:
+            msg["subid"] = sub.subid
+        if not sub.snapshot:
+            msg["snapshot"] = False
+        if not sub.updates:
+            msg["updates"] = False
+        if sub.fields:
+            msg["fields"] = sub.fields
+        if sub.maxcount is not None and sub.maxcount > 0:
+            msg["maxcount"] = sub.maxcount
+        assert self._ws is not None
+        await self._ws.send_bytes(dumps(msg))
 
     async def _send_getmore(self, service: str, subid: str | None) -> None:
         """Send a getmore request for a paginating query subscription."""
@@ -280,28 +295,7 @@ class MkioClient:
 
                 # Re-subscribe with stored state
                 for _key, sub in self._subscriptions.items():
-                    msg: dict[str, Any] = {
-                        "service": sub.service,
-                        "type": "subscribe",
-                        "protocol": sub.protocol,
-                    }
-                    if sub.topic:
-                        msg["topic"] = sub.topic
-                    if sub.filter:
-                        msg["filter"] = sub.filter
-                    if sub.ref:
-                        msg["ref"] = sub.ref
-                    if sub.subid:
-                        msg["subid"] = sub.subid
-                    if not sub.snapshot:
-                        msg["snapshot"] = False
-                    if not sub.updates:
-                        msg["updates"] = False
-                    if sub.fields:
-                        msg["fields"] = sub.fields
-                    if sub.maxcount:
-                        msg["maxcount"] = sub.maxcount
-                    await self._ws.send_bytes(dumps(msg))
+                    await self._send_subscribe(sub)
 
                 # Restart receive loop
                 self._receive_task = asyncio.create_task(self._receive_loop())

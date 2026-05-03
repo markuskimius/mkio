@@ -13,7 +13,7 @@ from mkio._expr import compile_filter
 from mkio._ref import compare_refs
 from mkio.change_bus import ChangeEvent
 from mkio.services.base import Service
-from mkio.ws_protocol import make_error, make_snapshot, make_update
+from mkio.ws_protocol import make_snapshot, make_update
 
 
 @dataclass
@@ -86,14 +86,10 @@ class StreamService(Service):
         client_ref = msg.get("ref")
         filter_expr = msg.get("filter")
         subid = msg.get("subid")
-
-        if not client_ref:
-            resp = make_error(None, "Stream subscribe requires a ref")
-            await ws.send_bytes(resp)
-            await self.notify_monitors("out", resp)
-            return 0
-
         fields = msg.get("fields")
+        maxcount = msg.get("maxcount", 0)
+        if not (isinstance(maxcount, int) and not isinstance(maxcount, bool) and maxcount > 0):
+            maxcount = 0
 
         filter_fn = None
         if filter_expr and self._filterable:
@@ -101,26 +97,42 @@ class StreamService(Service):
 
         sub = StreamSubscriber(ws=ws, filter_fn=filter_fn, formatter=self._formatter, subid=subid, fields=fields)
 
-        rows_to_send: list[dict[str, Any]] = []
+        rows_to_send: list[tuple[str, dict[str, Any]]] = []
 
         if self._buffer:
-            buffer_start_ver = self._buffer[0][0]
-            if compare_refs(client_ref, buffer_start_ver) >= 0:
-                for ver, row in self._buffer:
-                    if compare_refs(ver, client_ref) > 0:
+            if client_ref:
+                buffer_start_ver = self._buffer[0][0]
+                if compare_refs(client_ref, buffer_start_ver) >= 0:
+                    for ver, row in self._buffer:
+                        if compare_refs(ver, client_ref) > 0:
+                            out_row = sub.formatter(row) if sub.formatter else row
+                            if sub.filter_fn and not sub.filter_fn(out_row):
+                                continue
+                            rows_to_send.append((ver, self._project(out_row, fields)))
+                else:
+                    for ver, row in self._buffer:
                         out_row = sub.formatter(row) if sub.formatter else row
                         if sub.filter_fn and not sub.filter_fn(out_row):
                             continue
-                        rows_to_send.append(self._project(out_row, fields))
+                        rows_to_send.append((ver, self._project(out_row, fields)))
             else:
                 for ver, row in self._buffer:
                     out_row = sub.formatter(row) if sub.formatter else row
                     if sub.filter_fn and not sub.filter_fn(out_row):
                         continue
-                    rows_to_send.append(self._project(out_row, fields))
+                    rows_to_send.append((ver, self._project(out_row, fields)))
+
+        if maxcount:
+            hasmore = len(rows_to_send) > maxcount
+            page = rows_to_send[:maxcount]
+            page_ref = page[-1][0] if page else ""
+            resp = make_snapshot(page_ref, self.name, [r for _, r in page], subid=subid, hasmore=hasmore)
+            await ws.send_bytes(resp)
+            await self.notify_monitors("out", resp)
+            return 0
 
         latest_ref = self._buffer[-1][0] if self._buffer else ""
-        resp = make_snapshot(latest_ref, self.name, rows_to_send, subid=sub.subid)
+        resp = make_snapshot(latest_ref, self.name, [r for _, r in rows_to_send], subid=subid, hasmore=False)
         await ws.send_bytes(resp)
         await self.notify_monitors("out", resp)
         self._subscribers.append(sub)

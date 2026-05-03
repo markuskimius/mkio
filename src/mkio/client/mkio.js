@@ -479,7 +479,22 @@ class MkioClient {
       if (type === "snapshot") {
         if (sub.maxcount && data.hasmore) {
           sub._snapshotRows = sub._snapshotRows.concat(data.rows);
-          this.getmore(sub.service, sub.subid || data.subid);
+          if (sub.protocol === "stream") {
+            this._sendSubscribe(sub);
+          } else {
+            this.getmore(sub.service, sub.subid || data.subid);
+          }
+        } else if (sub.maxcount && sub.protocol === "stream" && !data.hasmore) {
+          if (sub._snapshotRows.length > 0) {
+            sub.onSnapshot(sub._snapshotRows.concat(data.rows));
+            sub._snapshotRows = [];
+          } else {
+            sub.onSnapshot(data.rows);
+          }
+          if (sub.updates) {
+            sub.maxcount = null;
+            this._sendSubscribe(sub);
+          }
         } else if (sub._snapshotRows.length > 0) {
           sub.onSnapshot(sub._snapshotRows.concat(data.rows));
           sub._snapshotRows = [];
@@ -494,19 +509,23 @@ class MkioClient {
     }
   }
 
+  _sendSubscribe(sub) {
+    const msg = { service: sub.service, type: "subscribe", protocol: sub.protocol };
+    if (sub.topic) msg.topic = sub.topic;
+    if (sub.filter) msg.filter = sub.filter;
+    if (sub.ref) msg.ref = sub.ref;
+    if (sub.subid) msg.subid = sub.subid;
+    if (!sub.snapshot) msg.snapshot = false;
+    if (!sub.updates) msg.updates = false;
+    if (sub.fields) msg.fields = sub.fields;
+    if (sub.maxcount) msg.maxcount = sub.maxcount;
+    this._sendRaw(msg);
+  }
+
   _resubscribe() {
     for (const [, sub] of this._subscriptions) {
       sub._snapshotRows = [];
-      const msg = { service: sub.service, type: "subscribe", protocol: sub.protocol };
-      if (sub.topic) msg.topic = sub.topic;
-      if (sub.filter) msg.filter = sub.filter;
-      if (sub.ref) msg.ref = sub.ref;
-      if (sub.subid) msg.subid = sub.subid;
-      if (!sub.snapshot) msg.snapshot = false;
-      if (!sub.updates) msg.updates = false;
-      if (sub.fields) msg.fields = sub.fields;
-      if (sub.maxcount) msg.maxcount = sub.maxcount;
-      this._sendRaw(msg);
+      this._sendSubscribe(sub);
     }
   }
 

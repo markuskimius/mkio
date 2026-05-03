@@ -711,13 +711,15 @@ async def stream_svc(db, bus, writer):
     await svc.stop()
 
 
-async def test_stream_requires_ref(stream_svc):
-    """Subscribe without ref should be rejected."""
+async def test_stream_no_ref_gets_full_buffer(stream_svc):
+    """Subscribe without ref returns the full buffer."""
     ws = MockWebSocket()
-    await stream_svc.on_subscribe(ws, {"type": "subscribe"})
+    count = await stream_svc.on_subscribe(ws, {"type": "subscribe"})
+    assert count == 1
     msgs = ws.get_messages()
     assert len(msgs) == 1
-    assert msgs[0]["type"] == "error"
+    assert msgs[0]["type"] == "snapshot"
+    assert len(msgs[0]["rows"]) == 5
 
 
 async def test_stream_fresh_subscribe(stream_svc):
@@ -1853,6 +1855,329 @@ async def query_svc_many(db, bus, writer):
     await svc.start()
     yield svc
     await svc.stop()
+
+
+async def test_stream_pagination_basic(stream_svc):
+    """maxcount=2 returns first 2 rows with hasmore=true."""
+    ws = MockWebSocket()
+    count = await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 2,
+    })
+    assert count == 0
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    snap = msgs[0]
+    assert snap["type"] == "snapshot"
+    assert snap["hasmore"] is True
+    assert len(snap["rows"]) == 2
+    assert len(stream_svc._subscribers) == 0
+
+
+async def test_stream_pagination_full(stream_svc):
+    """Page through all rows using ref from each snapshot."""
+    ws = MockWebSocket()
+
+    # Page 1
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 2})
+    snap1 = ws.get_messages()[0]
+    assert len(snap1["rows"]) == 2
+    assert snap1["hasmore"] is True
+    ws.clear()
+
+    # Page 2
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "ref": snap1["ref"], "maxcount": 2})
+    snap2 = ws.get_messages()[0]
+    assert len(snap2["rows"]) == 2
+    assert snap2["hasmore"] is True
+    ws.clear()
+
+    # Page 3 (last row)
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "ref": snap2["ref"], "maxcount": 2})
+    snap3 = ws.get_messages()[0]
+    assert len(snap3["rows"]) == 1
+    assert snap3["hasmore"] is False
+
+    all_events = [r["event"] for r in snap1["rows"] + snap2["rows"] + snap3["rows"]]
+    assert all_events == [f"event_{i}" for i in range(5)]
+
+
+async def test_stream_pagination_no_live_subscription(stream_svc, bus):
+    """maxcount subscribe does not create a live subscriber."""
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 2})
+    assert len(stream_svc._subscribers) == 0
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "audit_log", "insert",
+        {"id": 99, "event": "live_event", "order_id": "99"},
+        "20260404 00:00:01.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 0
+
+
+async def test_stream_pagination_exact_fit(stream_svc):
+    """maxcount == row count: all rows returned, hasmore=false."""
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 5})
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 5
+    assert snap["hasmore"] is False
+
+
+async def test_stream_pagination_larger_than_buffer(stream_svc):
+    """maxcount > row count: all rows returned, hasmore=false."""
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 100})
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 5
+    assert snap["hasmore"] is False
+
+
+async def test_stream_pagination_with_filter(stream_svc, db):
+    """Filter + maxcount: only matching rows count toward the page."""
+    config = {
+        "protocol": "stream",
+        "primary_table": "audit_log",
+        "watch_tables": ["audit_log"],
+        "buffer_size": 100,
+        "filterable": ["event"],
+    }
+    svc = StreamService(config=config, db=db, change_bus=stream_svc.bus, writer=stream_svc.writer)
+    svc.name = "audit_filtered"
+    await svc.start()
+
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 2,
+        "filter": "event == 'event_1' OR event == 'event_3'",
+    })
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 2
+    assert snap["hasmore"] is False
+    events = [r["event"] for r in snap["rows"]]
+    assert events == ["event_1", "event_3"]
+
+    await svc.stop()
+
+
+async def test_stream_pagination_with_fields(stream_svc):
+    """Field projection works with pagination."""
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 2, "fields": ["event"],
+    })
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 2
+    assert snap["hasmore"] is True
+    for row in snap["rows"]:
+        assert list(row.keys()) == ["event"]
+
+
+async def test_stream_pagination_empty_buffer(db, bus, writer):
+    """Empty buffer with maxcount returns 0 rows, hasmore=false."""
+    config = {
+        "protocol": "stream",
+        "primary_table": "audit_log",
+        "watch_tables": ["audit_log"],
+        "buffer_size": 100,
+    }
+    await db.write_conn.execute("DELETE FROM audit_log")
+    await db.write_conn.commit()
+
+    svc = StreamService(config=config, db=db, change_bus=bus, writer=writer)
+    svc.name = "empty_stream"
+    await svc.start()
+
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 10})
+    snap = ws.get_messages()[0]
+    assert snap["type"] == "snapshot"
+    assert len(snap["rows"]) == 0
+    assert snap["hasmore"] is False
+
+    await svc.stop()
+
+
+async def test_stream_pagination_with_subid(stream_svc):
+    """subid is echoed on paginated snapshots."""
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 2, "subid": "page1",
+    })
+    snap = ws.get_messages()[0]
+    assert snap["subid"] == "page1"
+    assert snap["hasmore"] is True
+
+
+async def test_stream_pagination_then_live(stream_svc, bus):
+    """After paging completes, a follow-up subscribe without maxcount goes live."""
+    ws = MockWebSocket()
+
+    # Page through all
+    ref = None
+    all_rows = []
+    while True:
+        msg = {"type": "subscribe", "maxcount": 3}
+        if ref:
+            msg["ref"] = ref
+        await stream_svc.on_subscribe(ws, msg)
+        snap = ws.get_messages()[0]
+        all_rows.extend(snap["rows"])
+        ref = snap["ref"]
+        ws.clear()
+        if not snap["hasmore"]:
+            break
+
+    assert len(all_rows) == 5
+
+    # Now go live with the final ref
+    count = await stream_svc.on_subscribe(ws, {"type": "subscribe", "ref": ref})
+    assert count == 1
+    snap = ws.get_messages()[0]
+    assert snap["type"] == "snapshot"
+    assert len(snap["rows"]) == 0
+    assert snap["hasmore"] is False
+    ws.clear()
+
+    # Live update arrives
+    event = ChangeBus.make_event(
+        "audit_log", "insert",
+        {"id": 99, "event": "live_event", "order_id": "99"},
+        "20260404 00:00:01.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "update"
+    assert msgs[0]["row"]["event"] == "live_event"
+
+
+async def test_stream_pagination_maxcount_zero(stream_svc):
+    """maxcount=0 is treated as no pagination."""
+    ws = MockWebSocket()
+    count = await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "ref": "00000000 00:00:00.000000000000", "maxcount": 0,
+    })
+    assert count == 1
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 5
+    assert snap["hasmore"] is False
+
+
+async def test_stream_pagination_maxcount_negative(stream_svc):
+    """Negative maxcount is treated as no pagination."""
+    ws = MockWebSocket()
+    count = await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "ref": "00000000 00:00:00.000000000000", "maxcount": -1,
+    })
+    assert count == 1
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 5
+    assert snap["hasmore"] is False
+
+
+async def test_stream_pagination_new_rows_between_pages(stream_svc, bus):
+    """Rows inserted between pages appear in the next page."""
+    ws = MockWebSocket()
+
+    # Page 1: get first 3 rows
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 3})
+    snap1 = ws.get_messages()[0]
+    assert len(snap1["rows"]) == 3
+    assert snap1["hasmore"] is True
+    ws.clear()
+
+    # Insert 2 new rows while paging
+    from mkio._ref import next_ref
+    for i in range(2):
+        ver = next_ref()
+        event = ChangeBus.make_event(
+            "audit_log", "insert",
+            {"id": 100 + i, "event": f"new_{i}", "order_id": str(100 + i)},
+            ver,
+        )
+        bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    # Page 2: picks up remaining 2 original + 2 new rows
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "ref": snap1["ref"], "maxcount": 3})
+    snap2 = ws.get_messages()[0]
+    assert len(snap2["rows"]) == 3
+    assert snap2["hasmore"] is True
+    ws.clear()
+
+    # Page 3: last row
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "ref": snap2["ref"], "maxcount": 3})
+    snap3 = ws.get_messages()[0]
+    assert len(snap3["rows"]) == 1
+    assert snap3["hasmore"] is False
+
+
+async def test_stream_pagination_mid_buffer_ref(stream_svc):
+    """Paging from a ref in the middle of the buffer."""
+    ws = MockWebSocket()
+
+    # First get the full snapshot to find a mid-buffer ref
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 3})
+    snap1 = ws.get_messages()[0]
+    mid_ref = snap1["ref"]  # ref of 3rd row
+    ws.clear()
+
+    # Now page from mid_ref with maxcount=1
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "ref": mid_ref, "maxcount": 1})
+    snap2 = ws.get_messages()[0]
+    assert len(snap2["rows"]) == 1
+    assert snap2["rows"][0]["event"] == "event_3"
+    assert snap2["hasmore"] is True
+    ws.clear()
+
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "ref": snap2["ref"], "maxcount": 1})
+    snap3 = ws.get_messages()[0]
+    assert len(snap3["rows"]) == 1
+    assert snap3["rows"][0]["event"] == "event_4"
+    assert snap3["hasmore"] is False
+
+
+async def test_stream_pagination_maxcount_one(stream_svc):
+    """maxcount=1 pages one row at a time through the entire buffer."""
+    ws = MockWebSocket()
+    ref = None
+    all_rows = []
+    for i in range(6):
+        msg = {"type": "subscribe", "maxcount": 1}
+        if ref:
+            msg["ref"] = ref
+        await stream_svc.on_subscribe(ws, msg)
+        snap = ws.get_messages()[0]
+        all_rows.extend(snap["rows"])
+        ref = snap["ref"]
+        ws.clear()
+        if not snap["hasmore"]:
+            break
+
+    assert len(all_rows) == 5
+    assert [r["event"] for r in all_rows] == [f"event_{i}" for i in range(5)]
+
+
+async def test_stream_pagination_maxcount_non_integer(stream_svc):
+    """Non-integer maxcount (string, float) is treated as no pagination."""
+    for bad_value in ["abc", 2.5, None, True]:
+        ws = MockWebSocket()
+        count = await stream_svc.on_subscribe(ws, {
+            "type": "subscribe", "ref": "00000000 00:00:00.000000000000",
+            "maxcount": bad_value,
+        })
+        assert count == 1
+        snap = ws.get_messages()[0]
+        assert len(snap["rows"]) == 5
+        assert snap["hasmore"] is False
+        await stream_svc.on_unsubscribe(ws, {"type": "unsubscribe"})
 
 
 async def test_query_pagination_basic(query_svc_many):
