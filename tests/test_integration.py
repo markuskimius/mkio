@@ -712,3 +712,121 @@ async def test_subpub_array_topic(client):
 
     await ws.close()
     await ws2.close()
+
+
+async def test_query_pagination_integration(client):
+    """End-to-end pagination through the WS handler: subscribe, getmore, live updates."""
+    ws = await client.ws_connect("/ws")
+    ws2 = await client.ws_connect("/ws")
+
+    # Seed 3 rows
+    for i in range(1, 4):
+        await ws_send_recv(ws2, {
+            "service": "add_order",
+            "ref": f"seed{i}",
+            "data": {"id": f"p{i}", "symbol": f"S{i}", "qty": i * 10},
+        })
+
+    # Subscribe with maxcount=2
+    await ws.send_bytes(dumps({
+        "service": "all_orders",
+        "type": "subscribe",
+        "protocol": "query",
+        "maxcount": 2,
+        "subid": "pq1",
+    }))
+    resp = await asyncio.wait_for(ws.receive(), timeout=2.0)
+    page1 = loads(resp.data)
+    assert page1["type"] == "snapshot"
+    assert page1["hasmore"] is True
+    assert len(page1["rows"]) == 2
+    assert page1["subid"] == "pq1"
+
+    # Send getmore through the WS handler
+    await ws.send_bytes(dumps({
+        "service": "all_orders",
+        "type": "getmore",
+        "subid": "pq1",
+    }))
+    resp = await asyncio.wait_for(ws.receive(), timeout=2.0)
+    page2 = loads(resp.data)
+    assert page2["type"] == "snapshot"
+    assert page2["hasmore"] is False
+    assert len(page2["rows"]) == 1
+    assert page2["subid"] == "pq1"
+
+    # Now live updates should flow
+    await ws_send_recv(ws2, {
+        "service": "add_order",
+        "ref": "live1",
+        "data": {"id": "p4", "symbol": "LIVE", "qty": 99},
+    })
+    resp = await asyncio.wait_for(ws.receive(), timeout=2.0)
+    update = loads(resp.data)
+    assert update["type"] == "update"
+    assert update["op"] == "insert"
+    assert update["row"]["symbol"] == "LIVE"
+    assert update["subid"] == "pq1"
+
+    await ws.close()
+    await ws2.close()
+
+
+async def test_query_pagination_getmore_unknown_subid_integration(client):
+    """getmore with unknown subid through WS handler returns nack."""
+    ws = await client.ws_connect("/ws")
+
+    await ws.send_bytes(dumps({
+        "service": "all_orders",
+        "type": "getmore",
+        "subid": "nonexistent",
+    }))
+    resp = await asyncio.wait_for(ws.receive(), timeout=2.0)
+    nack = loads(resp.data)
+    assert nack["type"] == "nack"
+    assert "unknown subid" in nack["message"]
+
+    await ws.close()
+
+
+async def test_query_pagination_auto_subid_integration(client):
+    """Server auto-assigns subid when client omits it with maxcount."""
+    ws = await client.ws_connect("/ws")
+    ws2 = await client.ws_connect("/ws")
+
+    # Seed 2 rows
+    for i in range(1, 3):
+        await ws_send_recv(ws2, {
+            "service": "add_order",
+            "ref": f"s{i}",
+            "data": {"id": f"a{i}", "symbol": f"A{i}", "qty": i},
+        })
+
+    # Subscribe with maxcount but no subid
+    await ws.send_bytes(dumps({
+        "service": "all_orders",
+        "type": "subscribe",
+        "protocol": "query",
+        "maxcount": 1,
+    }))
+    resp = await asyncio.wait_for(ws.receive(), timeout=2.0)
+    page1 = loads(resp.data)
+    assert page1["type"] == "snapshot"
+    assert page1["hasmore"] is True
+    assert page1["subid"].startswith("_mkio_q_")
+    assigned_subid = page1["subid"]
+
+    # Use the assigned subid for getmore
+    await ws.send_bytes(dumps({
+        "service": "all_orders",
+        "type": "getmore",
+        "subid": assigned_subid,
+    }))
+    resp = await asyncio.wait_for(ws.receive(), timeout=2.0)
+    page2 = loads(resp.data)
+    assert page2["type"] == "snapshot"
+    assert page2["hasmore"] is False
+    assert page2["subid"] == assigned_subid
+
+    await ws.close()
+    await ws2.close()

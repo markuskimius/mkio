@@ -280,10 +280,12 @@ class MkioClient {
       snapshot: opts.snapshot !== false,
       updates: opts.updates !== false,
       fields: opts.fields || null,
+      maxcount: opts.maxcount || null,
       onSnapshot: opts.onSnapshot || (() => {}),
       onDelta: opts.onDelta || (() => {}),
       onUpdate: opts.onUpdate || (() => {}),
       onNack: opts.onNack || null,
+      _snapshotRows: [],
     };
     const key = sub.subid && sub.topic && !Array.isArray(sub.topic)
       ? `${sub.subid}\0${sub.topic}` : (sub.subid || service);
@@ -297,8 +299,18 @@ class MkioClient {
     if (!sub.snapshot) msg.snapshot = false;
     if (!sub.updates) msg.updates = false;
     if (sub.fields) msg.fields = sub.fields;
+    if (sub.maxcount) msg.maxcount = sub.maxcount;
 
     this._sendRaw(msg);
+  }
+
+  /**
+   * Request the next page of a paginated query snapshot.
+   * @param {string} service - Service name
+   * @param {string} subid - Subscription ID for the paginating query
+   */
+  getmore(service, subid) {
+    this._sendRaw({ service, type: "getmore", subid });
   }
 
   /**
@@ -452,12 +464,28 @@ class MkioClient {
       : (data.row ? data.row._mkio_topic : null);
     const compositeKey = data.subid && topic != null ? `${data.subid}\0${topic}` : null;
     const fallbackKey = data.subid || service;
-    const sub = (compositeKey && this._subscriptions.get(compositeKey))
-      || this._subscriptions.get(fallbackKey);
+    let sub = (compositeKey && this._subscriptions.get(compositeKey))
+      || this._subscriptions.get(fallbackKey)
+      || this._subscriptions.get(service);
     if (sub) {
+      // Track server-assigned subid (pagination auto-assigns one)
+      if (data.subid && !sub.subid) {
+        const oldKey = sub.service;
+        sub.subid = data.subid;
+        this._subscriptions.delete(oldKey);
+        this._subscriptions.set(data.subid, sub);
+      }
       if (data.ref) sub.ref = data.ref;
       if (type === "snapshot") {
-        sub.onSnapshot(data.rows);
+        if (sub.maxcount && data.hasmore) {
+          sub._snapshotRows = sub._snapshotRows.concat(data.rows);
+          this.getmore(sub.service, sub.subid || data.subid);
+        } else if (sub._snapshotRows.length > 0) {
+          sub.onSnapshot(sub._snapshotRows.concat(data.rows));
+          sub._snapshotRows = [];
+        } else {
+          sub.onSnapshot(data.rows);
+        }
       } else if (type === "delta") {
         sub.onDelta(data.changes);
       } else if (type === "update") {
@@ -468,6 +496,7 @@ class MkioClient {
 
   _resubscribe() {
     for (const [, sub] of this._subscriptions) {
+      sub._snapshotRows = [];
       const msg = { service: sub.service, type: "subscribe", protocol: sub.protocol };
       if (sub.topic) msg.topic = sub.topic;
       if (sub.filter) msg.filter = sub.filter;
@@ -476,6 +505,7 @@ class MkioClient {
       if (!sub.snapshot) msg.snapshot = false;
       if (!sub.updates) msg.updates = false;
       if (sub.fields) msg.fields = sub.fields;
+      if (sub.maxcount) msg.maxcount = sub.maxcount;
       this._sendRaw(msg);
     }
   }

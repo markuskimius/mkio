@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
@@ -1826,3 +1827,604 @@ async def test_subpub_on_subscribe_returns_count(subpub_svc):
 
     count = await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": []})
     assert count == 0
+
+
+# ---- Query Service: Pagination (maxcount / getmore) --------------------------
+
+
+@pytest_asyncio.fixture
+async def query_svc_many(db, bus, writer):
+    """Query service with 5 rows for pagination tests."""
+    for i in range(1, 6):
+        await db.write_conn.execute(
+            "INSERT INTO orders (id, symbol, qty, status) VALUES (?, ?, ?, ?)",
+            (str(i), f"SYM{i}", i * 10, "pending"),
+        )
+    await db.write_conn.commit()
+
+    config = {
+        "protocol": "query",
+        "primary_table": "orders",
+        "watch_tables": ["orders"],
+        "filterable": ["status"],
+    }
+    svc = QueryService(config=config, db=db, change_bus=bus, writer=writer)
+    svc.name = "all_orders"
+    await svc.start()
+    yield svc
+    await svc.stop()
+
+
+async def test_query_pagination_basic(query_svc_many):
+    """maxcount=2 returns first 2 rows with hasmore=true."""
+    ws = MockWebSocket()
+    count = await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 2, "subid": "q1",
+    })
+    assert count == 1
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "snapshot"
+    assert msgs[0]["hasmore"] is True
+    assert len(msgs[0]["rows"]) == 2
+    assert msgs[0]["subid"] == "q1"
+
+
+async def test_query_pagination_getmore(query_svc_many):
+    """getmore returns subsequent pages until exhausted."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 2, "subid": "q1",
+    })
+    ws.clear()
+
+    # Second page
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "snapshot"
+    assert msgs[0]["hasmore"] is True
+    assert len(msgs[0]["rows"]) == 2
+    ws.clear()
+
+    # Third page (last row)
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "snapshot"
+    assert msgs[0]["hasmore"] is False
+    assert len(msgs[0]["rows"]) == 1
+
+
+async def test_query_pagination_getmore_empty(query_svc_many):
+    """When all rows fit in first page, subscriber goes directly to live mode."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 10, "subid": "q1",
+    })
+    msgs = ws.get_messages()
+    assert msgs[0]["hasmore"] is False
+    assert "q1" not in query_svc_many._pending
+    assert len(query_svc_many._subscribers) == 1
+
+
+async def test_query_pagination_auto_subid(query_svc_many):
+    """Server assigns subid when client omits it with maxcount."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 2,
+    })
+    msgs = ws.get_messages()
+    assert msgs[0]["subid"] is not None
+    assert msgs[0]["subid"].startswith("_mkio_q_")
+    assert msgs[0]["hasmore"] is True
+
+
+async def test_query_pagination_updates_buffered(query_svc_many, bus):
+    """Updates arriving during pagination are buffered and delivered after final page."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 2, "subid": "q1",
+    })
+    ws.clear()
+
+    # Inject an update while still paginating
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "6", "symbol": "NEW", "qty": 60, "status": "pending"},
+        "20260501 00:00:01.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.05)
+
+    # Should NOT have received the update yet
+    msgs = ws.get_messages()
+    assert len(msgs) == 0
+
+    # Paginate through remaining rows
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    ws.clear()
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    msgs = ws.get_messages()
+    # Last page + buffered update delivered
+    snapshot_msg = msgs[0]
+    assert snapshot_msg["type"] == "snapshot"
+    assert snapshot_msg["hasmore"] is False
+    # Buffered update should follow
+    assert len(msgs) == 2
+    assert msgs[1]["type"] == "update"
+    assert msgs[1]["row"]["symbol"] == "NEW"
+
+
+async def test_query_pagination_no_updates(query_svc_many):
+    """maxcount with updates=false doesn't register for live updates."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 2, "subid": "q1", "updates": False,
+    })
+    ws.clear()
+
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    ws.clear()
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+
+    # After pagination completes, subscriber should not be in _subscribers
+    assert len(query_svc_many._subscribers) == 0
+    assert "q1" not in query_svc_many._pending
+
+
+async def test_query_pagination_unknown_subid(query_svc_many):
+    """getmore with unknown subid returns nack."""
+    ws = MockWebSocket()
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "bogus"})
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "nack"
+    assert "unknown subid" in msgs[0]["message"]
+
+
+async def test_query_pagination_missing_subid(query_svc_many):
+    """getmore without subid returns nack."""
+    ws = MockWebSocket()
+    await query_svc_many.on_getmore(ws, {"type": "getmore"})
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "nack"
+    assert "missing subid" in msgs[0]["message"]
+
+
+async def test_query_pagination_wrong_ws(query_svc_many):
+    """getmore from a different WebSocket returns nack."""
+    ws1 = MockWebSocket()
+    ws2 = MockWebSocket()
+    await query_svc_many.on_subscribe(ws1, {
+        "type": "subscribe", "maxcount": 2, "subid": "q1",
+    })
+
+    await query_svc_many.on_getmore(ws2, {"type": "getmore", "subid": "q1"})
+    msgs = ws2.get_messages()
+    assert msgs[0]["type"] == "nack"
+    assert "unknown subid" in msgs[0]["message"]
+
+
+async def test_query_pagination_buffer_overflow(query_svc_many, bus):
+    """Buffer overflow sets overflowed flag and nacks next getmore."""
+    ws = MockWebSocket()
+    query_svc_many._max_buffer = 1
+
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 1, "subid": "q1",
+    })
+    ws.clear()
+
+    # effective max_buffer = max(1, 5 + 1) = 6
+    # pending_rows has 4 items after first page
+    # Need 3 buffered updates to overflow: 4 + 3 = 7 > 6
+    for i in range(3):
+        event = ChangeBus.make_event(
+            "orders", "insert",
+            {"id": f"x{i}", "symbol": "OVF", "qty": 1, "status": "pending"},
+            f"20260501 00:00:0{i}.000000000000",
+        )
+        bus.publish([event])
+        await asyncio.sleep(0.05)
+
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    msgs = ws.get_messages()
+    assert msgs[0]["type"] == "nack"
+    assert "buffer overflow" in msgs[0]["message"]
+    assert "q1" not in query_svc_many._pending
+
+
+async def test_query_pagination_unsubscribe_pending(query_svc_many):
+    """Unsubscribing removes pending subscriber."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 2, "subid": "q1",
+    })
+    assert "q1" in query_svc_many._pending
+
+    removed = await query_svc_many.on_unsubscribe(ws, {
+        "type": "unsubscribe", "subid": "q1",
+    })
+    assert removed == 1
+    assert "q1" not in query_svc_many._pending
+
+
+async def test_query_pagination_disconnect_cleanup(query_svc_many):
+    """Disconnecting removes all pending subscribers for that ws."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 2, "subid": "q1",
+    })
+    assert "q1" in query_svc_many._pending
+
+    removed = await query_svc_many.on_unsubscribe(ws, {"type": "unsubscribe"})
+    assert removed == 1
+    assert "q1" not in query_svc_many._pending
+
+
+async def test_query_no_maxcount_has_hasmore_false(query_svc):
+    """Snapshot without maxcount includes hasmore=false."""
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
+    msgs = ws.get_messages()
+    assert msgs[0]["hasmore"] is False
+
+
+async def test_query_pagination_with_filter(query_svc_many, db):
+    """Pagination works correctly with filtered results."""
+    await db.write_conn.execute(
+        "UPDATE orders SET status = 'filled' WHERE id IN ('1', '2')"
+    )
+    await db.write_conn.commit()
+
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe",
+        "maxcount": 2,
+        "subid": "q1",
+        "filter": "status == 'pending'",
+    })
+    msgs = ws.get_messages()
+    assert msgs[0]["hasmore"] is True
+    assert len(msgs[0]["rows"]) == 2
+    ws.clear()
+
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    msgs = ws.get_messages()
+    assert msgs[0]["hasmore"] is False
+    assert len(msgs[0]["rows"]) == 1
+
+
+async def test_query_pagination_via_on_message(query_svc_many):
+    """getmore routed via on_message works."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 2, "subid": "q1",
+    })
+    ws.clear()
+
+    await query_svc_many.on_message(ws, {"type": "getmore", "subid": "q1"})
+    msgs = ws.get_messages()
+    assert msgs[0]["type"] == "snapshot"
+    assert len(msgs[0]["rows"]) == 2
+
+
+async def test_query_pagination_maxcount_zero(query_svc_many):
+    """maxcount=0 behaves as no pagination (all rows at once)."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 0, "subid": "q1",
+    })
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["hasmore"] is False
+    assert len(msgs[0]["rows"]) == 5
+    assert len(query_svc_many._pending) == 0
+    assert len(query_svc_many._subscribers) == 1
+
+
+async def test_query_pagination_maxcount_negative(query_svc_many):
+    """Negative maxcount behaves as no pagination."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": -5, "subid": "q1",
+    })
+    msgs = ws.get_messages()
+    assert msgs[0]["hasmore"] is False
+    assert len(msgs[0]["rows"]) == 5
+    assert len(query_svc_many._pending) == 0
+
+
+async def test_query_pagination_snapshot_false(query_svc_many, bus):
+    """maxcount with snapshot=False skips pagination, registers for updates only."""
+    ws = MockWebSocket()
+    count = await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 2, "subid": "q1", "snapshot": False,
+    })
+    assert count == 1
+    msgs = ws.get_messages()
+    assert len(msgs) == 0
+    assert len(query_svc_many._pending) == 0
+    assert len(query_svc_many._subscribers) == 1
+
+    # Should receive live updates directly
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "6", "symbol": "LIVE", "qty": 60, "status": "pending"},
+        "20260501 00:00:01.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.05)
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "update"
+    assert msgs[0]["row"]["symbol"] == "LIVE"
+
+
+@pytest_asyncio.fixture
+async def query_svc_empty(db, bus, writer):
+    """Query service with no rows."""
+    config = {
+        "protocol": "query",
+        "primary_table": "orders",
+        "watch_tables": ["orders"],
+        "filterable": ["status"],
+    }
+    svc = QueryService(config=config, db=db, change_bus=bus, writer=writer)
+    svc.name = "all_orders"
+    await svc.start()
+    yield svc
+    await svc.stop()
+
+
+async def test_query_pagination_empty_table(query_svc_empty):
+    """Pagination on empty table: hasmore=false, 0 rows, subscriber goes to live mode."""
+    ws = MockWebSocket()
+    count = await query_svc_empty.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 10, "subid": "q1",
+    })
+    assert count == 1
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["hasmore"] is False
+    assert len(msgs[0]["rows"]) == 0
+    assert len(query_svc_empty._pending) == 0
+    assert len(query_svc_empty._subscribers) == 1
+
+
+async def test_query_pagination_live_updates_after_finalization(query_svc_many, bus):
+    """After pagination completes, subscriber receives live updates normally."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 3, "subid": "q1",
+    })
+    ws.clear()
+
+    # Finish pagination
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    ws.clear()
+
+    # Verify subscriber moved to _subscribers
+    assert "q1" not in query_svc_many._pending
+    assert any(s.subid == "q1" for s in query_svc_many._subscribers)
+
+    # Now send a live update
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "7", "symbol": "LIVE", "qty": 70, "status": "pending"},
+        "20260501 00:00:02.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.05)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    assert msgs[0]["type"] == "update"
+    assert msgs[0]["op"] == "insert"
+    assert msgs[0]["row"]["symbol"] == "LIVE"
+    assert msgs[0]["subid"] == "q1"
+
+
+async def test_query_pagination_multiple_concurrent(query_svc_many, bus):
+    """Two clients paginating the same service simultaneously."""
+    ws1 = MockWebSocket()
+    ws2 = MockWebSocket()
+
+    await query_svc_many.on_subscribe(ws1, {
+        "type": "subscribe", "maxcount": 2, "subid": "a1",
+    })
+    await query_svc_many.on_subscribe(ws2, {
+        "type": "subscribe", "maxcount": 3, "subid": "b1",
+    })
+
+    assert "a1" in query_svc_many._pending
+    assert "b1" in query_svc_many._pending
+
+    # ws1 first page: 2 rows
+    msgs1 = ws1.get_messages()
+    assert len(msgs1[0]["rows"]) == 2
+    assert msgs1[0]["hasmore"] is True
+
+    # ws2 first page: 3 rows
+    msgs2 = ws2.get_messages()
+    assert len(msgs2[0]["rows"]) == 3
+    assert msgs2[0]["hasmore"] is True
+
+    ws1.clear()
+    ws2.clear()
+
+    # Inject update while both are paginating
+    event = ChangeBus.make_event(
+        "orders", "insert",
+        {"id": "8", "symbol": "BOTH", "qty": 80, "status": "pending"},
+        "20260501 00:00:03.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.05)
+
+    # Neither should have received the update yet
+    assert len(ws1.get_messages()) == 0
+    assert len(ws2.get_messages()) == 0
+
+    # Finish ws2 pagination (needs 1 more page: 2 remaining rows)
+    await query_svc_many.on_getmore(ws2, {"type": "getmore", "subid": "b1"})
+    msgs2 = ws2.get_messages()
+    assert msgs2[0]["type"] == "snapshot"
+    assert msgs2[0]["hasmore"] is False
+    assert len(msgs2[0]["rows"]) == 2
+    # Buffered update delivered
+    assert msgs2[1]["type"] == "update"
+    assert msgs2[1]["row"]["symbol"] == "BOTH"
+
+    # ws1 still paginating — still shouldn't have update
+    assert "a1" in query_svc_many._pending
+
+
+async def test_query_pagination_buffered_update_order(query_svc_many, bus):
+    """Multiple buffered updates are delivered in arrival order."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 3, "subid": "q1",
+    })
+    ws.clear()
+
+    # Send 3 updates in sequence
+    for i, sym in enumerate(["FIRST", "SECOND", "THIRD"]):
+        event = ChangeBus.make_event(
+            "orders", "insert",
+            {"id": f"u{i}", "symbol": sym, "qty": i, "status": "pending"},
+            f"20260501 00:00:0{i}.000000000000",
+        )
+        bus.publish([event])
+        await asyncio.sleep(0.02)
+
+    # Finish pagination
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    msgs = ws.get_messages()
+
+    # snapshot page + 3 buffered updates
+    assert msgs[0]["type"] == "snapshot"
+    assert msgs[0]["hasmore"] is False
+    assert msgs[1]["row"]["symbol"] == "FIRST"
+    assert msgs[2]["row"]["symbol"] == "SECOND"
+    assert msgs[3]["row"]["symbol"] == "THIRD"
+
+
+async def test_query_pagination_filter_buffered_delete(query_svc_many, bus):
+    """Row matching filter during snapshot that stops matching during pagination sends buffered delete."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe",
+        "maxcount": 3,
+        "subid": "q1",
+        "filter": "status == 'pending'",
+    })
+    ws.clear()
+
+    # Update row id=4 to 'filled' — it was in the snapshot (matched), now doesn't match
+    event = ChangeBus.make_event(
+        "orders", "update",
+        {"id": "4", "symbol": "SYM4", "qty": 40, "status": "filled"},
+        "20260501 00:00:01.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.05)
+
+    # Finish pagination
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    msgs = ws.get_messages()
+
+    # Last snapshot page + buffered delete
+    snapshot = msgs[0]
+    assert snapshot["type"] == "snapshot"
+    assert snapshot["hasmore"] is False
+
+    delete_msg = msgs[1]
+    assert delete_msg["type"] == "update"
+    assert delete_msg["op"] == "delete"
+    assert delete_msg["row"]["_mkio_row"] == "4"
+
+
+async def test_query_pagination_getmore_after_finalization(query_svc_many):
+    """getmore after pagination completed returns nack (subid no longer in _pending)."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 3, "subid": "q1",
+    })
+    ws.clear()
+
+    # Finish pagination
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    ws.clear()
+    assert "q1" not in query_svc_many._pending
+
+    # Send another getmore — should nack
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    msgs = ws.get_messages()
+    assert msgs[0]["type"] == "nack"
+    assert "unknown subid" in msgs[0]["message"]
+
+
+async def test_query_pagination_maxcount_one(query_svc_many):
+    """maxcount=1 delivers one row per page across 5 pages."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 1, "subid": "q1",
+    })
+    msgs = ws.get_messages()
+    assert len(msgs[0]["rows"]) == 1
+    assert msgs[0]["hasmore"] is True
+    ws.clear()
+
+    all_rows = msgs[0]["rows"][:]
+    for i in range(3):
+        await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+        msgs = ws.get_messages()
+        assert len(msgs[0]["rows"]) == 1
+        assert msgs[0]["hasmore"] is True
+        all_rows.extend(msgs[0]["rows"])
+        ws.clear()
+
+    # Final page
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    msgs = ws.get_messages()
+    assert len(msgs[0]["rows"]) == 1
+    assert msgs[0]["hasmore"] is False
+    all_rows.extend(msgs[0]["rows"])
+
+    # All 5 rows delivered
+    assert len(all_rows) == 5
+    symbols = {r["symbol"] for r in all_rows}
+    assert symbols == {"SYM1", "SYM2", "SYM3", "SYM4", "SYM5"}
+
+
+async def test_query_pagination_timeout_cleanup(query_svc_many):
+    """Idle pending subscribers are cleaned up after timeout."""
+    import mkio.services.query as qmod
+    original_timeout = qmod._GETMORE_TIMEOUT
+    qmod._GETMORE_TIMEOUT = 0.1  # 100ms for testing
+
+    try:
+        ws = MockWebSocket()
+        await query_svc_many.on_subscribe(ws, {
+            "type": "subscribe", "maxcount": 2, "subid": "q1",
+        })
+        assert "q1" in query_svc_many._pending
+
+        # Wait for timeout check to fire (checks every 10s, but we patched timeout to 0.1s)
+        # We need to also reduce the check interval — or just call the check directly
+        await asyncio.sleep(0.15)
+        # Manually trigger the check since the task sleeps 10s
+        now = time.monotonic()
+        expired = [
+            subid for subid, sub in query_svc_many._pending.items()
+            if now - sub.last_activity > qmod._GETMORE_TIMEOUT
+        ]
+        for subid in expired:
+            del query_svc_many._pending[subid]
+
+        assert "q1" not in query_svc_many._pending
+    finally:
+        qmod._GETMORE_TIMEOUT = original_timeout

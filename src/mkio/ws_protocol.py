@@ -8,7 +8,7 @@ from mkio._json import dumps, loads
 
 
 _VALID_MSG_TYPES = frozenset({
-    "subscribe", "unsubscribe", "monitor", "check", "transaction", "",
+    "subscribe", "unsubscribe", "monitor", "check", "transaction", "getmore", "",
 })
 
 
@@ -77,11 +77,13 @@ def make_snapshot(
     rows: list[dict[str, Any]],
     *,
     subid: str | None = None,
+    hasmore: bool = False,
 ) -> bytes:
     envelope: dict[str, Any] = {
         "type": "snapshot",
         "service": service,
         "rows": rows,
+        "hasmore": hasmore,
     }
     if ref is not None:
         envelope["ref"] = ref

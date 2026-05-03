@@ -102,6 +102,7 @@ class MkioClient:
         snapshot: bool = True,
         updates: bool = True,
         fields: list[str] | None = None,
+        maxcount: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to a service. Yields messages (snapshot, update).
 
@@ -113,6 +114,7 @@ class MkioClient:
         Set ``snapshot=False`` to skip the initial snapshot.
         Set ``updates=False`` to receive only the snapshot then stop.
         Pass ``fields`` to receive only the specified columns in each row.
+        Pass ``maxcount`` for query services to paginate the snapshot.
         """
         sub = _Subscription(
             service=service,
@@ -125,6 +127,7 @@ class MkioClient:
             snapshot=snapshot,
             updates=updates,
             fields=fields,
+            maxcount=maxcount,
         )
         key = sub.subid or service
         self._subscriptions[key] = sub
@@ -144,6 +147,8 @@ class MkioClient:
             msg["updates"] = False
         if fields:
             msg["fields"] = fields
+        if maxcount is not None and maxcount > 0:
+            msg["maxcount"] = maxcount
 
         assert self._ws is not None
         await self._ws.send_bytes(dumps(msg))
@@ -151,11 +156,29 @@ class MkioClient:
         try:
             while True:
                 item = await sub.queue.get()
+                if item.get("type") == "snapshot":
+                    if not sub.subid and item.get("subid"):
+                        old_key = key
+                        sub.subid = item["subid"]
+                        self._subscriptions.pop(old_key, None)
+                        self._subscriptions[sub.subid] = sub
+                    if item.get("hasmore"):
+                        yield item
+                        await self._send_getmore(service, sub.subid)
+                        continue
                 yield item
-                if not updates and item.get("type") == "snapshot":
+                if not updates and item.get("type") == "snapshot" and not item.get("hasmore"):
                     return
         except asyncio.CancelledError:
             pass
+
+    async def _send_getmore(self, service: str, subid: str | None) -> None:
+        """Send a getmore request for a paginating query subscription."""
+        msg: dict[str, Any] = {"service": service, "type": "getmore"}
+        if subid:
+            msg["subid"] = subid
+        assert self._ws is not None
+        await self._ws.send_bytes(dumps(msg))
 
     async def unsubscribe(self, service: str, subid: str | None = None) -> None:
         """Unsubscribe from a service, optionally by subid."""
@@ -231,8 +254,8 @@ class MkioClient:
 
         # Route to subscription queue (prefer subid, fall back to service name)
         sub_key = data.get("subid") or service
-        if sub_key and sub_key in self._subscriptions:
-            sub = self._subscriptions[sub_key]
+        sub = self._subscriptions.get(sub_key) or self._subscriptions.get(service)
+        if sub:
             # Track ref for recovery on reconnect
             if ref:
                 sub.ref = ref
@@ -276,6 +299,8 @@ class MkioClient:
                         msg["updates"] = False
                     if sub.fields:
                         msg["fields"] = sub.fields
+                    if sub.maxcount:
+                        msg["maxcount"] = sub.maxcount
                     await self._ws.send_bytes(dumps(msg))
 
                 # Restart receive loop
@@ -299,6 +324,7 @@ class _Subscription:
         snapshot: bool = True,
         updates: bool = True,
         fields: list[str] | None = None,
+        maxcount: int | None = None,
     ) -> None:
         self.service = service
         self.protocol = protocol
@@ -310,3 +336,4 @@ class _Subscription:
         self.snapshot = snapshot
         self.updates = updates
         self.fields = fields
+        self.maxcount = maxcount

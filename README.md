@@ -192,6 +192,15 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 // Subscribe with field projection (receive only specified columns)
 {"service": "all_orders", "type": "subscribe", "protocol": "query", "fields": ["symbol", "qty"]}
 
+// Subscribe with pagination (server sends at most N rows per snapshot message)
+{"service": "all_orders", "type": "subscribe", "protocol": "query", "maxcount": 50, "subid": "q1"}
+// → {"type": "snapshot", "service": "all_orders", "subid": "q1", "rows": [...], "hasmore": true}
+
+// Request next page (subid required to identify the subscription)
+{"service": "all_orders", "type": "getmore", "subid": "q1"}
+// → {"type": "snapshot", "service": "all_orders", "subid": "q1", "rows": [...], "hasmore": false}
+// Once hasmore is false, live updates begin flowing
+
 // Stream reconnect with ref (required for streams)
 {"service": "audit_feed", "type": "subscribe", "protocol": "stream", "ref": "20260404 15:30:45.123456000000"}
 ```
@@ -214,6 +223,10 @@ async with MkioClient("ws://localhost:8080/ws") as client:
 
     async for msg in client.subscribe("all_orders", "query", filter="status == 'pending'"):
         print(msg)
+
+    # Paginated query (client auto-sends getmore until snapshot complete)
+    async for msg in client.subscribe("all_orders", "query", maxcount=50):
+        print(msg)
 ```
 
 ### JavaScript
@@ -235,6 +248,13 @@ client.subscribe("last_trade", "subpub", {
 
 client.subscribe("all_orders", "query", {
     filter: "status == 'pending'",
+    onSnapshot: (rows) => renderTable(rows),
+    onUpdate: (op, row) => updateRow(op, row),
+});
+
+// Paginated query (client auto-sends getmore; onSnapshot fires once with all rows)
+client.subscribe("all_orders", "query", {
+    maxcount: 50,
     onSnapshot: (rows) => renderTable(rows),
     onUpdate: (op, row) => updateRow(op, row),
 });
@@ -269,6 +289,7 @@ mkio.subpub("last_trade", "AAPL", {fields:["bid","ask"], subid:"p1"})
 mkio.stream("audit_feed")                 // ref auto-generated
 mkio.stream("audit_feed", {ref:"...", filter:"qty > 100"})
 mkio.query("all_orders", {filter:"status == 'pending'"})
+mkio.query("all_orders", {maxcount: 50})     // paginated snapshot
 mkio.query("all_orders", {snapshotOnly: true})
 mkio.query("all_orders", {updateOnly: true, fields:["id","status"]})
 ```
