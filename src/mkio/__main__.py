@@ -94,7 +94,7 @@ def _cmd_services() -> None:
         print(f"Error: 'services' takes 1–2 arguments (url [service]), got {len(args)}")
         print(f"Usage: {usage}")
         sys.exit(1)
-    url = args[0].rstrip("/")
+    url = _normalize_url(args[0].rstrip("/"))
     service_name = args[1] if len(args) >= 2 else None
     if service_name:
         asyncio.run(_fetch_service_detail(url, service_name))
@@ -847,14 +847,36 @@ def _connection_error(ws_url: str, exc: Exception) -> None:
     sys.exit(1)
 
 
+def _normalize_url(url: str) -> str:
+    """Normalize a URL: default to http:// and port 80."""
+    if not (url.startswith("http://") or url.startswith("https://")
+            or url.startswith("ws://") or url.startswith("wss://")):
+        url = "http://" + url
+    # If no port specified, add :80 for http/ws schemes.
+    # Split off scheme, check host:port portion.
+    scheme_end = url.index("://") + 3
+    rest = url[scheme_end:]
+    # rest is host[:port][/path...]
+    slash = rest.find("/")
+    hostport = rest[:slash] if slash >= 0 else rest
+    if ":" not in hostport:
+        scheme = url[:scheme_end]
+        if scheme in ("http://", "ws://"):
+            hostport += ":80"
+        elif scheme in ("https://", "wss://"):
+            hostport += ":443"
+        tail = rest[slash:] if slash >= 0 else ""
+        url = scheme + hostport + tail
+    return url
+
+
 def _normalize_ws_url(url: str) -> str:
     """Normalize a URL to ws:// and append /ws path."""
+    url = _normalize_url(url)
     if url.startswith("http://"):
         url = "ws://" + url[7:]
     elif url.startswith("https://"):
         url = "wss://" + url[8:]
-    elif not url.startswith("ws://") and not url.startswith("wss://"):
-        url = "ws://" + url
     return f"{url}/ws"
 
 

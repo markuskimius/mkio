@@ -268,6 +268,7 @@ class MkioClient {
    * @param {string[]} [opts.fields] - Restrict rows to these fields only
    * @param {Function} [opts.onSnapshot] - (rows) => void
    * @param {Function} [opts.onUpdate] - (op, row) => void
+   * @param {Function} [opts.onPage] - (rows, {hasmore, ref}) => void; disables auto-paging when set with maxcount
    */
   subscribe(service, protocol, opts = {}) {
     const sub = {
@@ -285,6 +286,7 @@ class MkioClient {
       onDelta: opts.onDelta || (() => {}),
       onUpdate: opts.onUpdate || (() => {}),
       onNack: opts.onNack || null,
+      onPage: opts.onPage || null,
       _snapshotRows: [],
     };
     const key = sub.subid && sub.topic && !Array.isArray(sub.topic)
@@ -477,7 +479,9 @@ class MkioClient {
       }
       if (data.ref) sub.ref = data.ref;
       if (type === "snapshot") {
-        if (sub.maxcount && data.hasmore) {
+        if (sub.onPage && sub.maxcount) {
+          sub.onPage(data.rows, { hasmore: !!data.hasmore, ref: data.ref || null });
+        } else if (sub.maxcount && data.hasmore) {
           sub._snapshotRows = sub._snapshotRows.concat(data.rows);
           if (sub.protocol === "stream") {
             this._sendSubscribe(sub);

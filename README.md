@@ -376,11 +376,19 @@ register_function("MASK_PAN", lambda s: "****" + s[-4:])
 
 ## CLI Tools
 
+The URL argument defaults to `http://` and port 80, so you can use shorthand:
+
+```bash
+mkio services localhost:8080          # same as http://localhost:8080
+mkio services myhost                  # same as http://myhost:80
+mkio services https://prod.example.com  # uses port 443, wss for WebSocket
+```
+
 ### List and inspect services
 
 ```bash
-mkio services http://localhost:8080                # List all services
-mkio services http://localhost:8080 orders         # Show detail for one service
+mkio services localhost:8080                # List all services
+mkio services localhost:8080 orders         # Show detail for one service
 ```
 
 Detail view shows fields, types, required/optional, auto-generated columns, and example commands.
@@ -388,10 +396,10 @@ Detail view shows fields, types, required/optional, auto-generated columns, and 
 ### Send transactions
 
 ```bash
-mkio send http://localhost:8080 orders --op new '{"side":"Buy","symbol":"AAPL","qty":100,"price":150}'
-mkio send http://localhost:8080 orders --op new orders.json    # From JSON file
-mkio send http://localhost:8080 orders --op new orders.csv     # From CSV file
-mkio send http://localhost:8080 orders mixed.csv                 # CSV with per-row op column
+mkio send localhost:8080 orders --op new '{"side":"Buy","symbol":"AAPL","qty":100,"price":150}'
+mkio send localhost:8080 orders --op new orders.json    # From JSON file
+mkio send localhost:8080 orders --op new orders.csv     # From CSV file
+mkio send localhost:8080 orders mixed.csv               # CSV with per-row op column
 ```
 
 ### Subscribe to live data
@@ -400,20 +408,20 @@ Each listener service type has its own command with only the relevant options:
 
 ```bash
 # SubPub — topic-based snapshot + live updates
-mkio subpub http://localhost:8080 last_trade AAPL
-mkio subpub http://localhost:8080 last_trade AAPL MSFT GOOG
-mkio subpub http://localhost:8080 last_trade AAPL --fields symbol,price
+mkio subpub localhost:8080 last_trade AAPL
+mkio subpub localhost:8080 last_trade AAPL MSFT GOOG
+mkio subpub localhost:8080 last_trade AAPL --fields symbol,price
 
 # Stream — ring buffer with cursor reconnect (ref defaults to now)
-mkio stream http://localhost:8080 audit_feed
-mkio stream http://localhost:8080 audit_feed --ref "20260404 15:30:45.123456000000"
-mkio stream http://localhost:8080 audit_feed --fields event,order_id
-mkio stream http://localhost:8080 audit_feed --maxcount 100    # page from beginning of buffer
+mkio stream localhost:8080 audit_feed
+mkio stream localhost:8080 audit_feed --ref "20260404 15:30:45.123456000000"
+mkio stream localhost:8080 audit_feed --fields event,order_id
+mkio stream localhost:8080 audit_feed --maxcount 100    # page from beginning of buffer
 
 # Query — snapshot + live updates
-mkio query http://localhost:8080 all_orders
-mkio query http://localhost:8080 all_orders --filter "status == 'pending'"
-mkio query http://localhost:8080 all_orders --fields symbol,qty --snapshotOnly
+mkio query localhost:8080 all_orders
+mkio query localhost:8080 all_orders --filter "status == 'pending'"
+mkio query localhost:8080 all_orders --fields symbol,qty --snapshotOnly
 ```
 
 ### Monitor traffic
@@ -421,10 +429,10 @@ mkio query http://localhost:8080 all_orders --fields symbol,qty --snapshotOnly
 Tap into inbound and outbound message flow in real time. Monitor a single service or all services at once:
 
 ```bash
-mkio monitor http://localhost:8080                 # Monitor all services
-mkio monitor http://localhost:8080 orders          # Monitor one service
-mkio monitor http://localhost:8080 --filter "direction == 'in'"    # Inbound only
-mkio monitor http://localhost:8080 --filter "service == 'orders'"  # Filter by service
+mkio monitor localhost:8080                 # Monitor all services
+mkio monitor localhost:8080 orders          # Monitor one service
+mkio monitor localhost:8080 --filter "direction == 'in'"    # Inbound only
+mkio monitor localhost:8080 --filter "service == 'orders'"  # Filter by service
 ```
 
 ```

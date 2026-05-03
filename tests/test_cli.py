@@ -591,3 +591,50 @@ def test_load_messages_missing_csv(capsys):
         _load_messages("/nonexistent/file.csv")
     captured = capsys.readouterr()
     assert "file not found" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# URL normalization
+# ---------------------------------------------------------------------------
+
+class TestNormalizeUrl:
+    def setup_method(self):
+        from mkio.__main__ import _normalize_url, _normalize_ws_url
+        self.normalize = _normalize_url
+        self.normalize_ws = _normalize_ws_url
+
+    def test_bare_host(self):
+        assert self.normalize("localhost") == "http://localhost:80"
+
+    def test_bare_host_with_port(self):
+        assert self.normalize("localhost:9000") == "http://localhost:9000"
+
+    def test_http_no_port(self):
+        assert self.normalize("http://myhost") == "http://myhost:80"
+
+    def test_http_with_port(self):
+        assert self.normalize("http://myhost:8080") == "http://myhost:8080"
+
+    def test_https_no_port(self):
+        assert self.normalize("https://prod.example.com") == "https://prod.example.com:443"
+
+    def test_https_with_port(self):
+        assert self.normalize("https://prod.example.com:8443") == "https://prod.example.com:8443"
+
+    def test_ws_no_port(self):
+        assert self.normalize("ws://myhost") == "ws://myhost:80"
+
+    def test_wss_no_port(self):
+        assert self.normalize("wss://myhost") == "wss://myhost:443"
+
+    def test_ws_url_bare_host(self):
+        assert self.normalize_ws("myhost") == "ws://myhost:80/ws"
+
+    def test_ws_url_with_port(self):
+        assert self.normalize_ws("myhost:9000") == "ws://myhost:9000/ws"
+
+    def test_ws_url_https(self):
+        assert self.normalize_ws("https://prod.example.com") == "wss://prod.example.com:443/ws"
+
+    def test_ws_url_http_explicit(self):
+        assert self.normalize_ws("http://localhost:8080") == "ws://localhost:8080/ws"
