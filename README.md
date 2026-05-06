@@ -376,11 +376,12 @@ register_function("MASK_PAN", lambda s: "****" + s[-4:])
 
 ## CLI Tools
 
-The URL argument defaults to `http://` and port 80, so you can use shorthand:
+The URL argument defaults to `localhost`, `http://`, and port 80, so you can use shorthand:
 
 ```bash
-mkio services localhost:8080          # same as http://localhost:8080
-mkio services myhost                  # same as http://myhost:80
+mkio services 8080                      # same as http://localhost:8080
+mkio services localhost:8080            # same as http://localhost:8080
+mkio services myhost                    # same as http://myhost:80
 mkio services https://prod.example.com  # uses port 443, wss for WebSocket
 ```
 

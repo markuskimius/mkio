@@ -43,3 +43,7 @@ def test_trailing_slash_and_ws_suffix():
 
 def test_bare_host_with_ws_suffix():
     assert _normalize_http_url("localhost:8080/ws") == "http://localhost:8080"
+
+
+def test_bare_port():
+    assert _normalize_http_url("8080") == "http://localhost:8080"

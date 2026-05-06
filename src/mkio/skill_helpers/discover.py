@@ -22,6 +22,8 @@ def _fetch_json(url: str) -> dict | list:
 
 
 def _normalize_http_url(url: str) -> str:
+    if url.isdigit():
+        url = "localhost:" + url
     url = url.rstrip("/")
     if url.startswith("ws://"):
         url = "http://" + url[5:]

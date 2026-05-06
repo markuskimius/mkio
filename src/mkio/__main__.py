@@ -849,6 +849,8 @@ def _connection_error(ws_url: str, exc: Exception) -> None:
 
 def _normalize_url(url: str) -> str:
     """Normalize a URL: default to http:// and port 80."""
+    if url.isdigit():
+        url = "localhost:" + url
     if not (url.startswith("http://") or url.startswith("https://")
             or url.startswith("ws://") or url.startswith("wss://")):
         url = "http://" + url

@@ -638,3 +638,9 @@ class TestNormalizeUrl:
 
     def test_ws_url_http_explicit(self):
         assert self.normalize_ws("http://localhost:8080") == "ws://localhost:8080/ws"
+
+    def test_bare_port(self):
+        assert self.normalize("8080") == "http://localhost:8080"
+
+    def test_ws_url_bare_port(self):
+        assert self.normalize_ws("8080") == "ws://localhost:8080/ws"
