@@ -17,6 +17,7 @@ from mkio.config import load_config
 from mkio.database import Database
 from mkio.services.base import Service
 from mkio.services.query import QueryService
+from mkio.services.reqrep import ReqRepService
 from mkio.services.stream import StreamService
 from mkio.services.subpub import SubPubService
 from mkio.services.transaction import TransactionService
@@ -29,6 +30,7 @@ SERVICE_TYPES: dict[str, type[Service]] = {
     "subpub": SubPubService,
     "stream": StreamService,
     "query": QueryService,
+    "reqrep": ReqRepService,
 }
 
 
@@ -158,8 +160,90 @@ def _build_service_detail(
             ),
             "check_message": {"service": name, "type": "check", "ref": "<ref>"},
         }
+    elif svc_type == "reqrep":
+        detail.update(_build_reqrep_detail(name, config))
     else:
         detail.update(_build_listener_detail(name, config, tables))
+
+    return detail
+
+
+def _build_reqrep_detail(
+    name: str, config: dict[str, Any]
+) -> dict[str, Any]:
+    """Build detail for reqrep services."""
+    import json
+    import re
+
+    from mkio._expr import field_refs, numeric_fields, parse
+
+    detail: dict[str, Any] = {}
+    sql = config.get("sql")
+    reply = config.get("reply")
+    params_cfg = config.get("params")
+
+    if sql:
+        detail["sql"] = sql
+        sql_params = re.findall(r":(\w+)", sql)
+        if sql_params:
+            detail["parameters"] = sql_params
+    if params_cfg:
+        detail["params"] = params_cfg
+    if reply:
+        detail["reply"] = reply
+
+    # Reply shape
+    if sql and isinstance(reply, dict):
+        detail["reply_shape"] = "rows (transformed)"
+    elif sql and isinstance(reply, str):
+        detail["reply_shape"] = "value (scalar from SQL)"
+    elif sql:
+        detail["reply_shape"] = "rows"
+    elif isinstance(reply, dict):
+        detail["reply_shape"] = "row (single record)"
+    elif isinstance(reply, str):
+        detail["reply_shape"] = "value (scalar)"
+
+    # Discover input fields from expressions
+    input_fields: set[str] = set()
+    num_fields: set[str] = set()
+    if params_cfg:
+        for expr_str in params_cfg.values():
+            ast = parse(str(expr_str))
+            input_fields |= field_refs(ast)
+            num_fields |= numeric_fields(ast)
+    elif not sql and reply:
+        exprs = [reply] if isinstance(reply, str) else list(reply.values())
+        for expr_str in exprs:
+            ast = parse(str(expr_str))
+            input_fields |= field_refs(ast)
+            num_fields |= numeric_fields(ast)
+
+    if input_fields:
+        detail["input_fields"] = sorted(input_fields)
+
+    # Build example data from SQL params or input fields
+    example_data: dict[str, Any] = {}
+    for p in detail.get("parameters", []):
+        example_data[p] = "..."
+    if not example_data:
+        for f in detail.get("input_fields", []):
+            example_data[f] = 0 if f in num_fields else "..."
+
+    detail["request"] = {
+        "message": {
+            "service": name,
+            "type": "request",
+            "reqid": "<reqid>",
+            "data": example_data or {"...": "..."},
+        },
+        "reply_type": "reply",
+    }
+
+    data_str = json.dumps(example_data) if example_data else "{}"
+    detail["example"] = {
+        "request": f"mkio reqrep <url> {name} '{data_str}'",
+    }
 
     return detail
 

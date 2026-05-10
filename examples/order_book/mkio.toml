@@ -83,6 +83,30 @@ primary_table = "orders"
 filterable = ["status", "symbol"]
 change_log_size = 10000
 
+# --- Request-reply services ---
+
+# Look up a single order by id
+[services.order_lookup]
+protocol = "reqrep"
+sql = "SELECT * FROM orders WHERE id = :id"
+
+# Summary stats for a symbol
+[services.symbol_summary]
+protocol = "reqrep"
+params = { symbol = "UPPER(symbol)" }
+sql = "SELECT symbol, COUNT(*) as total_orders, SUM(CASE WHEN status = 'filled' THEN 1 ELSE 0 END) as filled, SUM(CASE WHEN status = 'filled' THEN qty ELSE 0 END) as filled_qty, ROUND(AVG(CASE WHEN status = 'filled' THEN price END), 2) as avg_fill_price FROM orders WHERE symbol = :symbol GROUP BY symbol"
+
+# Compute order total from client-supplied data (no DB)
+[services.order_total]
+protocol = "reqrep"
+reply = { subtotal = "qty * price", fee = "ROUND(qty * price * 0.001, 2)", total = "ROUND(qty * price * 1.001, 2)" }
+
+# Count orders by status (scalar)
+[services.order_count]
+protocol = "reqrep"
+sql = "SELECT COUNT(*) as n FROM orders WHERE status = :status"
+reply = "COALESCE(n, 0)"
+
 # --- Static file serving ---
 
 [static]

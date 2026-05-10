@@ -70,6 +70,14 @@ TEST_CONFIG = {
             "filterable": ["status", "symbol"],
             "change_log_size": 100,
         },
+        "price_lookup": {
+            "protocol": "reqrep",
+            "sql": "SELECT * FROM orders WHERE symbol = :symbol",
+        },
+        "calc": {
+            "protocol": "reqrep",
+            "reply": {"total": "qty * price"},
+        },
     },
 }
 
@@ -291,3 +299,39 @@ async def test_detail_example_generation(client):
     resp = await client.get("/api/services/last_trade")
     data = await resp.json()
     assert "mkio subpub" in data["example"]["subscribe"]
+
+
+# ---- ReqRep detail -----------------------------------------------------------
+
+async def test_detail_reqrep_sql(client):
+    resp = await client.get("/api/services/price_lookup")
+    assert resp.status == 200
+    data = await resp.json()
+
+    assert data["name"] == "price_lookup"
+    assert data["protocol"] == "reqrep"
+    assert data["sql"] == "SELECT * FROM orders WHERE symbol = :symbol"
+    assert data["parameters"] == ["symbol"]
+    assert data["reply_shape"] == "rows"
+
+    # Request message template
+    req = data["request"]
+    assert req["message"]["type"] == "request"
+    assert req["message"]["service"] == "price_lookup"
+    assert req["reply_type"] == "reply"
+
+    # Example
+    assert "mkio reqrep" in data["example"]["request"]
+
+
+async def test_detail_reqrep_reply_dict(client):
+    resp = await client.get("/api/services/calc")
+    assert resp.status == 200
+    data = await resp.json()
+
+    assert data["protocol"] == "reqrep"
+    assert data["reply"] == {"total": "qty * price"}
+    assert data["reply_shape"] == "row (single record)"
+    assert sorted(data["input_fields"]) == ["price", "qty"]
+    assert data["request"]["message"]["data"]["qty"] == 0
+    assert data["request"]["message"]["data"]["price"] == 0

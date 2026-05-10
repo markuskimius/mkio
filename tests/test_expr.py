@@ -664,3 +664,64 @@ def test_compile_formatter_with_map():
     fmt = compile_formatter({"output": "{total: qty * price, label: UPPER(name)}"})
     result = fmt(ROW)
     assert result == {"output": {"total": 1500.0, "label": "ALICE"}}
+
+
+# ---------------------------------------------------------------------------
+# field_refs / numeric_fields
+# ---------------------------------------------------------------------------
+
+def test_field_refs_simple():
+    from mkio._expr import field_refs, parse
+    refs = field_refs(parse("qty * price"))
+    assert refs == {"qty", "price"}
+
+
+def test_field_refs_with_functions():
+    from mkio._expr import field_refs, parse
+    refs = field_refs(parse("ROUND(qty * price, 2)"))
+    assert refs == {"qty", "price"}
+
+
+def test_field_refs_with_literals_only():
+    from mkio._expr import field_refs, parse
+    refs = field_refs(parse("1 + 2"))
+    assert refs == set()
+
+
+def test_field_refs_excludes_let_bindings():
+    from mkio._expr import field_refs, parse
+    refs = field_refs(parse("LET total = qty * price IN total + tax"))
+    assert refs == {"qty", "price", "tax"}
+    assert "total" not in refs
+
+
+def test_field_refs_complex():
+    from mkio._expr import field_refs, parse
+    refs = field_refs(parse("IF(status == 'filled', UPPER(symbol), COALESCE(note, '-'))"))
+    assert refs == {"status", "symbol", "note"}
+
+
+def test_numeric_fields_arithmetic():
+    from mkio._expr import numeric_fields, parse
+    nums = numeric_fields(parse("qty * price"))
+    assert nums == {"qty", "price"}
+
+
+def test_numeric_fields_round():
+    from mkio._expr import numeric_fields, parse
+    nums = numeric_fields(parse("ROUND(qty * price * 0.08, 2)"))
+    assert nums == {"qty", "price"}
+
+
+def test_numeric_fields_mixed():
+    from mkio._expr import numeric_fields, parse
+    nums = numeric_fields(parse("UPPER(name)"))
+    assert nums == set()
+
+
+def test_numeric_fields_no_false_positives():
+    from mkio._expr import numeric_fields, parse
+    nums = numeric_fields(parse("IF(status == 'filled', qty * price, 0)"))
+    assert "qty" in nums
+    assert "price" in nums
+    assert "status" not in nums

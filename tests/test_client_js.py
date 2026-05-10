@@ -236,7 +236,7 @@ console.log(JSON.stringify({entries, seen, afterOffIsNull, dispatcherMethods}));
 
     # Dispatcher exposes CLI-matching verbs as methods
     assert out["dispatcherMethods"] == [
-        "help", "instances", "monitor", "query", "send", "services", "stream", "subpub",
+        "help", "instances", "monitor", "query", "reqrep", "send", "services", "stream", "subpub",
     ]
 
 

@@ -124,7 +124,7 @@ class Database:
         assert self._read_conn is not None, "Database not started"
         return self._read_conn
 
-    async def read(self, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    async def read(self, sql: str, params: tuple[Any, ...] | dict[str, Any] = ()) -> list[dict[str, Any]]:
         """Execute a read query on the read connection. Returns list of dicts."""
         async with self.read_conn.execute(sql, params) as cursor:
             rows = await cursor.fetchall()

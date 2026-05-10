@@ -6,9 +6,12 @@ from typing import Any
 
 from mkio._json import dumps, loads
 
+_UNSET = object()
+
 
 _VALID_MSG_TYPES = frozenset({
-    "subscribe", "unsubscribe", "monitor", "check", "transaction", "getmore", "",
+    "subscribe", "unsubscribe", "monitor", "check", "transaction", "getmore",
+    "request", "",
 })
 
 
@@ -23,7 +26,7 @@ def parse_message(data: bytes | str) -> dict[str, Any]:
     if msg_type and msg_type not in _VALID_MSG_TYPES:
         raise ValueError(
             f"Unknown message type: {msg_type!r}. "
-            f"Valid types: subscribe, unsubscribe, monitor, check"
+            f"Valid types: subscribe, unsubscribe, monitor, check, request"
         )
     return msg
 
@@ -44,12 +47,20 @@ def make_result(
     return dumps(envelope)
 
 
-def make_error(ref: str | None, message: str, *, msgid: str | None = None) -> bytes:
+def make_error(
+    ref: str | None,
+    message: str,
+    *,
+    msgid: str | None = None,
+    reqid: str | None = None,
+) -> bytes:
     envelope: dict[str, Any] = {"type": "error", "message": message}
     if ref is not None:
         envelope["ref"] = ref
     if msgid is not None:
         envelope["msgid"] = msgid
+    if reqid is not None:
+        envelope["reqid"] = reqid
     return dumps(envelope)
 
 
@@ -68,6 +79,26 @@ def make_nack(
         envelope["msgid"] = msgid
     if subid is not None:
         envelope["subid"] = subid
+    return dumps(envelope)
+
+
+def make_reply(
+    service: str,
+    *,
+    value: Any = _UNSET,
+    row: dict[str, Any] | None = None,
+    rows: list[dict[str, Any]] | None = None,
+    reqid: str | None = None,
+) -> bytes:
+    envelope: dict[str, Any] = {"type": "reply", "service": service}
+    if reqid is not None:
+        envelope["reqid"] = reqid
+    if value is not _UNSET:
+        envelope["value"] = value
+    elif row is not None:
+        envelope["row"] = row
+    elif rows is not None:
+        envelope["rows"] = rows
     return dumps(envelope)
 
 

@@ -1,4 +1,4 @@
-"""CLI entry point: mkio serve | services | monitor | send | subpub | stream | query"""
+"""CLI entry point: mkio serve | services | monitor | send | subpub | stream | query | reqrep"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from mkio._json import loads
 from mkio._ref import local_ts
 
 
-_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query")
+_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep")
 
 
 def main() -> None:
@@ -39,6 +39,8 @@ def main() -> None:
         _cmd_stream()
     elif cmd == "query":
         _cmd_query()
+    elif cmd == "reqrep":
+        _cmd_reqrep()
     else:
         import difflib
         close = difflib.get_close_matches(cmd, _VALID_COMMANDS, n=1, cutoff=0.5)
@@ -61,6 +63,8 @@ def _usage() -> None:
     print("                                   Subscribe to a stream service")
     print("  mkio query <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--snapshotOnly] [--updateOnly]")
     print("                                   Subscribe to a query service")
+    print("  mkio reqrep <url> <service> [data]")
+    print("                                   Send a request-reply query (JSON or key=value)")
     sys.exit(1)
 
 
@@ -880,6 +884,64 @@ def _normalize_ws_url(url: str) -> str:
     elif url.startswith("https://"):
         url = "wss://" + url[8:]
     return f"{url}/ws"
+
+
+def _cmd_reqrep() -> None:
+    usage = "mkio reqrep <url> <service> [data]"
+    args = sys.argv[2:]
+    if len(args) < 2:
+        print(f"Usage: {usage}")
+        print("  <data> can be inline JSON or key=value pairs")
+        print("  e.g. mkio reqrep localhost:8080 lookup '{\"symbol\": \"AAPL\"}'")
+        print("  e.g. mkio reqrep localhost:8080 calculate qty=10 price=99.95")
+        sys.exit(1)
+
+    url = args[0]
+    service = args[1]
+    rest = args[2:]
+
+    data: dict[str, Any] = {}
+    if rest:
+        if len(rest) == 1 and rest[0].startswith("{"):
+            try:
+                data = json.loads(rest[0])
+            except json.JSONDecodeError as e:
+                print(f"Error: invalid JSON: {e}")
+                sys.exit(1)
+        else:
+            for kv in rest:
+                if "=" not in kv:
+                    print(f"Error: expected key=value, got {kv!r}")
+                    print(f"Usage: {usage}")
+                    sys.exit(1)
+                k, v = kv.split("=", 1)
+                data[k] = _auto_convert(v)
+
+    ws_url = _normalize_ws_url(url)
+    try:
+        asyncio.run(_reqrep_request(ws_url, service, data))
+    except KeyboardInterrupt:
+        pass
+
+
+async def _reqrep_request(
+    ws_url: str, service: str, data: dict[str, Any]
+) -> None:
+    from mkio.client import MkioClient
+
+    async with MkioClient(ws_url, reconnect=False) as client:
+        result = await client.request(service, data)
+        if result.get("type") == "error":
+            print(f"Error: {result.get('message', 'unknown error')}")
+            sys.exit(1)
+        if "value" in result:
+            print(result["value"])
+        elif "row" in result:
+            print(json.dumps(result["row"], default=str))
+        elif "rows" in result:
+            rows = result["rows"]
+            for row in rows:
+                print(json.dumps(row, default=str))
 
 
 if __name__ == "__main__":

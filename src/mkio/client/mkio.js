@@ -255,6 +255,23 @@ class MkioClient {
   }
 
   /**
+   * Send a request message and wait for the reply.
+   * @param {string} service
+   * @param {Object} [data]
+   * @param {Object} [opts] - May include reqid
+   * @returns {Promise<Object>}
+   */
+  request(service, data, opts = {}) {
+    const reqid = opts.reqid || makeRef();
+    const msg = { service, type: "request", reqid, data: data || {} };
+
+    return new Promise((resolve, reject) => {
+      this._pending.set(reqid, { resolve, reject, service });
+      this._sendRaw(msg);
+    });
+  }
+
+  /**
    * Subscribe to a service with callbacks.
    * @param {string} service
    * @param {Object} opts
@@ -448,6 +465,15 @@ class MkioClient {
       return;
     }
 
+    // Route reqrep reply/error by reqid
+    const reqid = data.reqid;
+    if (reqid && this._pending.has(reqid) && (type === "reply" || type === "error")) {
+      const { resolve } = this._pending.get(reqid);
+      this._pending.delete(reqid);
+      resolve(data);
+      return;
+    }
+
     // Nack: deliver to callback and remove to prevent reconnect retry
     if (type === "nack") {
       const nackKey = data.subid || service;
@@ -567,6 +593,7 @@ const MKIO_HELP = [
   'mkio.stream("<svc>", {ref, filter, fields, subid})   subscribe to a stream service',
   'mkio.query("<svc>", {filter, fields, subid,          subscribe to a query service',
   '                     snapshotOnly, updateOnly})',
+  'mkio.reqrep("<service>", data, {reqid})              send a request-reply message',
   'mkio.instances()                                     list live MkioClient instances',
 ].join("\n");
 
@@ -868,6 +895,11 @@ const mkio = {
       delete o.updateOnly;
     }
     return _mkioSubscribe(service, "query", o);
+  },
+  reqrep(service, data, opts) {
+    const client = _mkioPickClient();
+    if (!client) return null;
+    return client.request(service, data, opts || {});
   },
   instances() {
     return MkioClient.instances();

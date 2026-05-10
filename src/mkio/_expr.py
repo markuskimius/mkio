@@ -61,6 +61,85 @@ Node = (Literal | FieldRef | BinOp | UnaryOp | FuncCall
         | ArrayLiteral | MapLiteral | Index | Let)
 
 
+def field_refs(node: Node) -> set[str]:
+    """Collect all FieldRef names from an AST, excluding LET-bound variables."""
+    refs: set[str] = set()
+    _collect_refs(node, refs, set())
+    return refs
+
+
+def _collect_refs(node: Node, refs: set[str], bound: set[str]) -> None:
+    if isinstance(node, FieldRef):
+        if node.name not in bound:
+            refs.add(node.name)
+    elif isinstance(node, BinOp):
+        _collect_refs(node.left, refs, bound)
+        _collect_refs(node.right, refs, bound)
+    elif isinstance(node, UnaryOp):
+        _collect_refs(node.operand, refs, bound)
+    elif isinstance(node, FuncCall):
+        for arg in node.args:
+            _collect_refs(arg, refs, bound)
+    elif isinstance(node, ArrayLiteral):
+        for el in node.elements:
+            _collect_refs(el, refs, bound)
+    elif isinstance(node, MapLiteral):
+        for v in node.values:
+            _collect_refs(v, refs, bound)
+    elif isinstance(node, Index):
+        _collect_refs(node.target, refs, bound)
+        _collect_refs(node.key, refs, bound)
+    elif isinstance(node, Let):
+        inner = set(bound)
+        for name, val in node.bindings:
+            _collect_refs(val, refs, inner)
+            inner.add(name)
+        _collect_refs(node.body, refs, inner)
+
+
+_NUMERIC_OPS = frozenset({"*", "/", "-"})
+_NUMERIC_FUNCS = frozenset({"ROUND", "ABS"})
+
+
+def numeric_fields(node: Node) -> set[str]:
+    """Collect FieldRef names that appear in numeric contexts."""
+    refs: set[str] = set()
+    _collect_numeric(node, refs, False, set())
+    return refs
+
+
+def _collect_numeric(
+    node: Node, refs: set[str], numeric_ctx: bool, bound: set[str]
+) -> None:
+    if isinstance(node, FieldRef):
+        if numeric_ctx and node.name not in bound:
+            refs.add(node.name)
+    elif isinstance(node, BinOp):
+        child_ctx = numeric_ctx or node.op in _NUMERIC_OPS
+        _collect_numeric(node.left, refs, child_ctx, bound)
+        _collect_numeric(node.right, refs, child_ctx, bound)
+    elif isinstance(node, UnaryOp):
+        _collect_numeric(node.operand, refs, True, bound)
+    elif isinstance(node, FuncCall):
+        child_ctx = numeric_ctx or node.name.upper() in _NUMERIC_FUNCS
+        for arg in node.args:
+            _collect_numeric(arg, refs, child_ctx, bound)
+    elif isinstance(node, ArrayLiteral):
+        for el in node.elements:
+            _collect_numeric(el, refs, numeric_ctx, bound)
+    elif isinstance(node, MapLiteral):
+        for v in node.values:
+            _collect_numeric(v, refs, numeric_ctx, bound)
+    elif isinstance(node, Index):
+        _collect_numeric(node.target, refs, numeric_ctx, bound)
+    elif isinstance(node, Let):
+        inner = set(bound)
+        for name, val in node.bindings:
+            _collect_numeric(val, refs, numeric_ctx, inner)
+            inner.add(name)
+        _collect_numeric(node.body, refs, numeric_ctx, inner)
+
+
 class ExprError(Exception):
     pass
 
@@ -608,6 +687,14 @@ def evaluate(node: Node, row: dict[str, Any]) -> Any:
 # ---------------------------------------------------------------------------
 # Compiler API
 # ---------------------------------------------------------------------------
+
+def compile_expression(expr: str) -> Callable[[dict[str, Any]], Any]:
+    """Parse an expression once, return a function that evaluates it."""
+    ast = parse(expr)
+    def evaluator(row: dict[str, Any]) -> Any:
+        return evaluate(ast, row)
+    return evaluator
+
 
 def compile_filter(expr: str) -> Callable[[dict[str, Any]], bool]:
     """Parse an expression once, return a row predicate function."""

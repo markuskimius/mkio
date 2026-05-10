@@ -8,7 +8,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from mkio._expr import compile_filter, compile_formatter
+from mkio._expr import compile_expression, compile_filter, compile_formatter
 
 
 log = logging.getLogger("mkio.config")
@@ -47,9 +47,12 @@ _VALID_SERVICE_KEYS: dict[str, frozenset[str]] = {
         "protocol", "primary_table", "watch_tables", "sql",
         "publish", "filterable", "where", "change_log_size", "description",
     }),
+    "reqrep": frozenset({
+        "protocol", "sql", "reply", "params", "description",
+    }),
 }
 
-_VALID_PROTOCOLS = frozenset({"transaction", "subpub", "stream", "query"})
+_VALID_PROTOCOLS = frozenset({"transaction", "subpub", "stream", "query", "reqrep"})
 
 
 def load_config(source: str | Path | dict[str, Any]) -> dict[str, Any]:
@@ -156,6 +159,13 @@ def _normalize_service(
                 f"provide either 'ops' or shorthand 'table'+'op_type' fields"
             )
 
+    if svc_type == "reqrep":
+        if "sql" not in svc and "reply" not in svc:
+            raise ValueError(
+                f"Service '{name}' (reqrep): requires at least one of "
+                f"'sql' or 'reply'"
+            )
+
     # Normalize watch_tables
     if "primary_table" in svc and "watch_tables" not in svc:
         svc["watch_tables"] = [svc["primary_table"]]
@@ -213,6 +223,16 @@ def _normalize_service(
         svc["_compiled_defaults"] = compile_formatter(
             {k: str(v) if not isinstance(v, str) else v for k, v in raw.items()}
         )
+
+    # Compile reqrep reply and params
+    if svc_type == "reqrep":
+        reply = svc.get("reply")
+        if isinstance(reply, str):
+            svc["_compiled_reply_expr"] = compile_expression(reply)
+        elif isinstance(reply, dict):
+            svc["_compiled_reply_formatter"] = compile_formatter(reply)
+        if "params" in svc:
+            svc["_compiled_params"] = compile_formatter(svc["params"])
 
     # Validate filterable fields (query only — subpub uses topic instead)
     if "filterable" in svc and svc_type != "subpub":

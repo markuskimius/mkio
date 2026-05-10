@@ -73,6 +73,7 @@ serve({...})  # or pass a dict
 - **SubPub** — topic-based single-row subscription with live push, server-side `where` filtering and `publish` formatting, expression-based defaults for missing topics
 - **Stream** — append-only ring buffer with cursor-based reconnection
 - **Query** — snapshot + change feed from SQLite
+- **ReqRep** — one-shot request-reply with parameterized SQL and/or expression evaluation, returning scalar values, single records, or result sets
 - **Expression language** — safe, extensible filter and formatter expressions (`qty > 100 AND status == 'pending'`)
 - **Schema migration** — automatic detection of safe/destructive changes with interactive confirmation
 - **Write batching** — hundreds of writes committed in a single SQLite transaction for high throughput
@@ -165,6 +166,42 @@ primary_table = "orders"
 filterable = ["status"]
 ```
 
+### ReqRep
+
+One-shot request-reply: the client sends a request with data, the server evaluates configured SQL and/or expressions, and returns a reply. No subscriptions or change feeds — pure request-reply. Supports three reply shapes determined by config:
+
+| `sql` | `reply` config | Reply field | Description |
+|-------|---------------|-------------|-------------|
+| no | `"expr"` (string) | `"value": ...` | Scalar computed from request data |
+| no | `{ ... }` (dict) | `"row": {...}` | Single record computed from request data |
+| yes | (none) | `"rows": [...]` | Raw SQL result set |
+| yes | `{ ... }` (dict) | `"rows": [...]` | SQL rows, each transformed |
+| yes | `"expr"` (string) | `"value": ...` | Scalar from first SQL row |
+
+```toml
+# Scalar from expression
+[services.tax]
+protocol = "reqrep"
+reply = "ROUND(qty * price * rate, 2)"
+
+# Single record from expressions
+[services.invoice]
+protocol = "reqrep"
+reply = { subtotal = "qty * price", tax = "ROUND(qty * price * 0.08, 2)" }
+
+# SQL result set with params manipulation
+[services.search]
+protocol = "reqrep"
+params = { symbol = "UPPER(symbol)" }
+sql = "SELECT * FROM prices WHERE symbol = :symbol"
+
+# SQL rows with per-row transform
+[services.holdings]
+protocol = "reqrep"
+sql = "SELECT p.*, pr.price FROM positions p JOIN prices pr ON p.symbol = pr.symbol WHERE p.account = :account"
+reply = { symbol = "symbol", qty = "qty", market_value = "ROUND(qty * price, 2)" }
+```
+
 ## WebSocket Protocol
 
 Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
@@ -210,6 +247,13 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 // Next page: subscribe again with ref from previous response
 {"service": "audit_feed", "type": "subscribe", "protocol": "stream", "ref": "<last-row-ref>", "maxcount": 100}
 // Once hasmore is false, subscribe without maxcount to go live
+
+// ReqRep — one-shot request-reply (reqid echoed on reply for correlation)
+{"service": "tax", "type": "request", "reqid": "r1", "data": {"qty": 10, "price": 99.95, "rate": 0.08}}
+// → {"type": "reply", "service": "tax", "reqid": "r1", "value": 79.96}
+
+{"service": "search", "type": "request", "reqid": "r2", "data": {"symbol": "AAPL"}}
+// → {"type": "reply", "service": "search", "reqid": "r2", "rows": [{"symbol": "AAPL", ...}]}
 ```
 
 ## Client Libraries
@@ -234,6 +278,10 @@ async with MkioClient("ws://localhost:8080/ws") as client:
     # Paginated query (client auto-sends getmore until snapshot complete)
     async for msg in client.subscribe("all_orders", "query", maxcount=50):
         print(msg)
+
+    # ReqRep — one-shot request-reply (auto-generates reqid)
+    result = await client.request("tax", {"qty": 10, "price": 99.95, "rate": 0.08})
+    print(result)  # {"type": "reply", "value": 79.96, ...}
 ```
 
 ### JavaScript
@@ -299,6 +347,8 @@ mkio.query("all_orders", {filter:"status == 'pending'"})
 mkio.query("all_orders", {maxcount: 50})     // paginated snapshot
 mkio.query("all_orders", {snapshotOnly: true})
 mkio.query("all_orders", {updateOnly: true, fields:["id","status"]})
+mkio.reqrep("tax", {qty: 10, price: 99.95, rate: 0.08})
+mkio.reqrep("search", {symbol: "AAPL"})
 ```
 
 All subscribe methods return a `MkioSubscription` with `.stop()`. Nack responses are logged to the console by default. Console commands auto-generate `subid` (subscriptions) and `msgid` (sends) with a `_mkio_` prefix so they never intercept messages meant for the application.
@@ -423,6 +473,10 @@ mkio stream localhost:8080 audit_feed --maxcount 100    # page from beginning of
 mkio query localhost:8080 all_orders
 mkio query localhost:8080 all_orders --filter "status == 'pending'"
 mkio query localhost:8080 all_orders --fields symbol,qty --snapshotOnly
+
+# ReqRep — one-shot request-reply
+mkio reqrep localhost:8080 tax '{"qty": 10, "price": 99.95, "rate": 0.08}'
+mkio reqrep localhost:8080 search symbol=AAPL
 ```
 
 ### Monitor traffic
@@ -454,7 +508,7 @@ mkio validates your TOML config at load time and fails fast with clear error mes
 
 - **Table references** — `primary_table`, `watch_tables`, and op `table` fields must reference tables defined in `[tables]`
 - **Column references** — op `fields`, `key`, `defaults`, `bind` columns, `filterable`, and subpub `topic` are checked against table schemas
-- **Protocol validation** — service `protocol` must be a known type (`transaction`, `subpub`, `stream`, `query`)
+- **Protocol validation** — service `protocol` must be a known type (`transaction`, `subpub`, `stream`, `query`, `reqrep`)
 - **Required fields** — missing `protocol`, `primary_table`, `topic`, `ops`, or `key` (for update/delete/upsert) are caught immediately
 - **Bind references** — forward references and out-of-bounds op indices in `$N.field` binds are rejected
 - **Typo detection** — unknown config keys produce warnings with "did you mean?" suggestions

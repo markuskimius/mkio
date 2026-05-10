@@ -37,6 +37,7 @@ class MkioClient:
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._pending_no_ref: list[asyncio.Future[dict[str, Any]]] = []
+        self._pending_reqid: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._subscriptions: dict[str, _Subscription] = {}
         self._receive_task: asyncio.Task[None] | None = None
 
@@ -86,6 +87,30 @@ class MkioClient:
             self._pending[ref] = future
         else:
             self._pending_no_ref.append(future)
+
+        assert self._ws is not None
+        await self._ws.send_bytes(dumps(msg))
+        return await future
+
+    async def request(
+        self,
+        service: str,
+        data: dict[str, Any] | None = None,
+        reqid: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a request message and wait for the reply."""
+        if reqid is None:
+            reqid = make_ref()
+        msg: dict[str, Any] = {
+            "service": service,
+            "type": "request",
+            "reqid": reqid,
+            "data": data or {},
+        }
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._pending_reqid[reqid] = future
 
         assert self._ws is not None
         await self._ws.send_bytes(dumps(msg))
@@ -246,6 +271,14 @@ class MkioClient:
         # Route to pending future (transaction results, check results)
         if ref and ref in self._pending:
             future = self._pending.pop(ref)
+            if not future.done():
+                future.set_result(data)
+            return
+
+        # Route to pending reqrep future (reply or error with reqid)
+        reqid = data.get("reqid")
+        if reqid and reqid in self._pending_reqid:
+            future = self._pending_reqid.pop(reqid)
             if not future.done():
                 future.set_result(data)
             return
