@@ -1,7 +1,7 @@
 {
   "service": "orders",
   "op": "reject",
-  "msgid" : "8",
+  "txnid" : "8",
   "data": {
     "id": 3
   }

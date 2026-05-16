@@ -33,7 +33,7 @@ class ReqRepService(Service):
             self.name,
             "reqrep does not support subscriptions — use type 'request'",
             ref=msg.get("ref"),
-            msgid=msg.get("msgid"),
+            txnid=msg.get("txnid"),
             subid=subid,
         )
         await ws.send_bytes(resp)

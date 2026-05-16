@@ -241,7 +241,7 @@ class MkioClient {
    * Send a transaction message and wait for the result.
    * @param {string} service
    * @param {Object} data
-   * @param {Object} [opts] - May include ref, msgid, op, etc.
+   * @param {Object} [opts] - May include ref, txnid, op, etc.
    * @returns {Promise<Object>}
    */
   send(service, data, opts = {}) {
@@ -588,7 +588,7 @@ const MKIO_HELP = [
   'mkio.monitor("<service>")                            tap one service (call again to add more)',
   'mkio.monitor({filter: fn})                           tap with client-side filter function',
   'mkio.monitor("off")                                  stop tapping',
-  'mkio.send("<service>", data, {op, ref, msgid})       send a transaction',
+  'mkio.send("<service>", data, {op, ref, txnid})       send a transaction',
   'mkio.subpub("<svc>", "<topic>"|["t1","t2"], {fields, subid})  subscribe to a subpub service',
   'mkio.stream("<svc>", {ref, filter, fields, subid})   subscribe to a stream service',
   'mkio.query("<svc>", {filter, fields, subid,          subscribe to a query service',
@@ -816,7 +816,7 @@ function _mkioSend(service, data, opts) {
   const client = _mkioPickClient();
   if (!client) return null;
   const o = { ...(opts || {}) };
-  if (!o.msgid) o.msgid = _mkioConsoleId();
+  if (!o.txnid) o.txnid = _mkioConsoleId();
   return client.send(service, data, o);
 }
 

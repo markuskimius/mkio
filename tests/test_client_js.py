@@ -353,16 +353,16 @@ c._subscriptions.set("feed", {
 c._dispatch({ type: "delta", service: "feed", changes: [{ op: "insert", row: { id: 1 } }] });
 results.deltaReceived = deltaReceived;
 
-// send auto-generates msgid
+// send auto-generates txnid
 FakeWS.sent = [];
 mkio.send("orders", { id: 1 }, { op: "new" });
-results.sendMsgid = FakeWS.sent[0].msgid;
-results.sendHasMsgid = typeof FakeWS.sent[0].msgid === "string" && FakeWS.sent[0].msgid.startsWith("_mkio_");
+results.sendTxnid = FakeWS.sent[0].txnid;
+results.sendHasTxnid = typeof FakeWS.sent[0].txnid === "string" && FakeWS.sent[0].txnid.startsWith("_mkio_");
 
-// send preserves explicit msgid
+// send preserves explicit txnid
 FakeWS.sent = [];
-mkio.send("orders", { id: 2 }, { op: "new", msgid: "user-123" });
-results.sendExplicitMsgid = FakeWS.sent[0].msgid;
+mkio.send("orders", { id: 2 }, { op: "new", txnid: "user-123" });
+results.sendExplicitTxnid = FakeWS.sent[0].txnid;
 
 // nack default handler (just verify it doesn't throw)
 FakeWS.sent = [];
@@ -422,11 +422,11 @@ console.log(JSON.stringify(results));
     # delta dispatch
     assert out["deltaReceived"] == [{"op": "insert", "row": {"id": 1}}]
 
-    # send auto-generates msgid with _mkio_ prefix
-    assert out["sendHasMsgid"] is True
+    # send auto-generates txnid with _mkio_ prefix
+    assert out["sendHasTxnid"] is True
 
-    # send preserves explicit msgid
-    assert out["sendExplicitMsgid"] == "user-123"
+    # send preserves explicit txnid
+    assert out["sendExplicitTxnid"] == "user-123"
 
     # nack default handler exists
     assert out["nackHandlerExists"] is True

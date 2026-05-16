@@ -283,39 +283,39 @@ async def test_send_csv_per_row_op(client, tmp_path, capsys):
     await ws.close()
 
 
-async def test_send_csv_with_msgid(client, tmp_path):
-    """CSV with msgid column passes it through as envelope field."""
+async def test_send_csv_with_txnid(client, tmp_path):
+    """CSV with txnid column passes it through as envelope field."""
     from mkio.__main__ import _load_messages
 
-    csv_file = tmp_path / "with_msgid.csv"
+    csv_file = tmp_path / "with_txnid.csv"
     csv_file.write_text(
-        'op,msgid,data.side,data.symbol,data.qty,data.price,data.event\n'
+        'op,txnid,data.side,data.symbol,data.qty,data.price,data.event\n'
         'place,msg-1,Buy,AAPL,100,150.0,order_placed\n'
         'place,msg-2,Sell,GOOG,50,2800.0,order_placed\n'
     )
 
     messages = _load_messages(str(csv_file))
     assert len(messages) == 2
-    assert messages[0]["msgid"] == "msg-1"
-    assert messages[1]["msgid"] == "msg-2"
-    assert "msgid" not in messages[0]["data"]
-    assert "msgid" not in messages[1]["data"]
+    assert messages[0]["txnid"] == "msg-1"
+    assert messages[1]["txnid"] == "msg-2"
+    assert "txnid" not in messages[0]["data"]
+    assert "txnid" not in messages[1]["data"]
 
 
-async def test_send_json_with_msgid(client, tmp_path):
-    """JSON with msgid field passes it through as envelope field."""
+async def test_send_json_with_txnid(client, tmp_path):
+    """JSON with txnid field passes it through as envelope field."""
     from mkio.__main__ import _load_messages
 
-    json_file = tmp_path / "with_msgid.json"
+    json_file = tmp_path / "with_txnid.json"
     json_file.write_text(json.dumps({
         "op": "place",
-        "msgid": "msg-42",
+        "txnid": "msg-42",
         "data": {"side": "Buy", "symbol": "AAPL", "qty": 100, "price": 150.0, "event": "order_placed"},
     }))
 
     messages = _load_messages(str(json_file))
     assert len(messages) == 1
-    assert messages[0]["msgid"] == "msg-42"
+    assert messages[0]["txnid"] == "msg-42"
 
 
 # ---- subscribe tests --------------------------------------------------------

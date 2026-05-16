@@ -619,7 +619,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             service_name = url_service_name or msg.get("service")
             ref = msg.get("ref")
-            msgid = msg.get("msgid")
+            txnid = msg.get("txnid")
             msg_type = msg.get("type", "")
 
             # Handle monitor requests — omit service to monitor all
@@ -630,7 +630,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                     await ws.send_bytes(make_error(
                         ref,
                         f"Unknown service: {target!r}. Available services: {available}",
-                        msgid=msgid,
+                        txnid=txnid,
                     ))
                     continue
                 monitors[target].add(ws)
@@ -644,7 +644,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                 continue
 
             if not service_name:
-                await ws.send_bytes(make_error(ref, "Missing 'service' field", msgid=msgid))
+                await ws.send_bytes(make_error(ref, "Missing 'service' field", txnid=txnid))
                 continue
 
             svc = services.get(service_name)
@@ -655,7 +655,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                     service_name,
                     f"Unknown service: {service_name!r}. Available services: {available}",
                     ref=ref,
-                    msgid=msgid,
+                    txnid=txnid,
                     subid=subid,
                 ))
                 continue
@@ -671,7 +671,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                         service_name,
                         "Missing 'protocol' field in subscribe message",
                         ref=ref,
-                        msgid=msgid,
+                        txnid=txnid,
                         subid=subid,
                     )
                     await ws.send_bytes(resp)
@@ -683,7 +683,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                         service_name,
                         f"Protocol mismatch: service '{service_name}' is {actual!r}, not {req_protocol!r}",
                         ref=ref,
-                        msgid=msgid,
+                        txnid=txnid,
                         subid=subid,
                     )
                     await ws.send_bytes(resp)

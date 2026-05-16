@@ -213,8 +213,8 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 // Named op transaction
 {"service": "orders", "ref": "...", "op": "new", "data": {"side": "Buy", "symbol": "AAPL", "qty": 100, "price": 150}}
 
-// Transaction with msgid (echoed back on result/error for async correlation)
-{"service": "orders", "ref": "...", "op": "new", "msgid": "req-42", "data": {"side": "Buy", "symbol": "AAPL", "qty": 100, "price": 150}}
+// Transaction with txnid (echoed back on result/error for async correlation)
+{"service": "orders", "ref": "...", "op": "new", "txnid": "req-42", "data": {"side": "Buy", "symbol": "AAPL", "qty": 100, "price": 150}}
 
 // Subscribe (subpub — topic required, protocol required; string or array)
 {"service": "last_trade", "type": "subscribe", "protocol": "subpub", "topic": "AAPL"}
@@ -351,7 +351,7 @@ mkio.reqrep("tax", {qty: 10, price: 99.95, rate: 0.08})
 mkio.reqrep("search", {symbol: "AAPL"})
 ```
 
-All subscribe methods return a `MkioSubscription` with `.stop()`. Nack responses are logged to the console by default. Console commands auto-generate `subid` (subscriptions) and `msgid` (sends) with a `_mkio_` prefix so they never intercept messages meant for the application.
+All subscribe methods return a `MkioSubscription` with `.stop()`. Nack responses are logged to the console by default. Console commands auto-generate `subid` (subscriptions) and `txnid` (sends) with a `_mkio_` prefix so they never intercept messages meant for the application.
 
 `mkio.monitor(...)` only taps **this tab's** traffic. For traffic across all connected clients use the CLI's server-side `mkio monitor` instead.
 

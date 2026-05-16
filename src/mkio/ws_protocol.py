@@ -36,11 +36,11 @@ def make_result(
     service: str,
     payload: dict[str, Any] | None = None,
     *,
-    msgid: str | None = None,
+    txnid: str | None = None,
 ) -> bytes:
     envelope: dict[str, Any] = {"type": "result", "service": service, "ref": ref}
-    if msgid is not None:
-        envelope["msgid"] = msgid
+    if txnid is not None:
+        envelope["txnid"] = txnid
     if payload:
         envelope.update(payload)
     envelope.setdefault("ok", True)
@@ -51,14 +51,14 @@ def make_error(
     ref: str | None,
     message: str,
     *,
-    msgid: str | None = None,
+    txnid: str | None = None,
     reqid: str | None = None,
 ) -> bytes:
     envelope: dict[str, Any] = {"type": "error", "message": message}
     if ref is not None:
         envelope["ref"] = ref
-    if msgid is not None:
-        envelope["msgid"] = msgid
+    if txnid is not None:
+        envelope["txnid"] = txnid
     if reqid is not None:
         envelope["reqid"] = reqid
     return dumps(envelope)
@@ -69,14 +69,14 @@ def make_nack(
     message: str,
     *,
     ref: str | None = None,
-    msgid: str | None = None,
+    txnid: str | None = None,
     subid: str | None = None,
 ) -> bytes:
     envelope: dict[str, Any] = {"type": "nack", "service": service, "message": message}
     if ref is not None:
         envelope["ref"] = ref
-    if msgid is not None:
-        envelope["msgid"] = msgid
+    if txnid is not None:
+        envelope["txnid"] = txnid
     if subid is not None:
         envelope["subid"] = subid
     return dumps(envelope)
