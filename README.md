@@ -505,10 +505,12 @@ The monitor protocol is a native framework feature — any mkio application supp
 
 ## Config Endpoint
 
-The `/config` path serves files from a configured directory, with automatic TOML-to-JSON conversion. This keeps the `/static` path strictly for static assets.
+The `[config]` section maps routes to directories, with automatic TOML-to-JSON conversion. This keeps `[static]` strictly for static assets.
 
 ```toml
-config_dir = "./configs"
+[config]
+"/config" = "./configs"
+"/settings" = "./settings"
 ```
 
 **Behavior:**
@@ -516,6 +518,7 @@ config_dir = "./configs"
 - If no `.toml` file exists, falls back to serving `./configs/app.json` directly
 - `GET /config/style.css` — serves the file as-is (no conversion for non-`.json` extensions)
 - Subdirectories are supported: `GET /config/sub/db.json` reads `./configs/sub/db.toml`
+- Multiple routes map to independent directories
 - Path traversal is blocked
 
 ## Config Validation

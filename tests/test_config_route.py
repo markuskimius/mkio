@@ -42,9 +42,25 @@ async def config_dir(tmp_path):
 
 
 @pytest_asyncio.fixture
+async def alt_dir(tmp_path):
+    alt = tmp_path / "alt"
+    alt.mkdir()
+    (alt / "settings.toml").write_text('[ui]\ntheme = "dark"\n')
+    return alt
+
+
+@pytest_asyncio.fixture
 async def client(aiohttp_client, config_dir):
     app = web.Application()
     app.router.add_get("/config/{path:.*}", _make_config_handler(config_dir))
+    return await aiohttp_client(app)
+
+
+@pytest_asyncio.fixture
+async def multi_client(aiohttp_client, config_dir, alt_dir):
+    app = web.Application()
+    app.router.add_get("/config/{path:.*}", _make_config_handler(config_dir))
+    app.router.add_get("/settings/{path:.*}", _make_config_handler(alt_dir))
     return await aiohttp_client(app)
 
 
@@ -196,3 +212,28 @@ async def test_traversal_dot_segment_at_end(client):
     """Trailing dot segment."""
     resp = await client.get("/config/sub/../sub/../../../etc/passwd")
     assert resp.status in (403, 404)
+
+
+# ---- Multiple routes ---------------------------------------------------------
+
+
+async def test_multiple_routes_independent(multi_client):
+    """Each route maps to its own directory."""
+    resp = await multi_client.get("/config/app.json")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data == {"database": {"host": "localhost", "port": 5432}}
+
+    resp = await multi_client.get("/settings/settings.json")
+    assert resp.status == 200
+    data = await resp.json()
+    assert data == {"ui": {"theme": "dark"}}
+
+
+async def test_multiple_routes_no_cross_access(multi_client):
+    """Files from one route's directory aren't visible on the other route."""
+    resp = await multi_client.get("/settings/app.json")
+    assert resp.status == 404
+
+    resp = await multi_client.get("/config/settings.json")
+    assert resp.status == 404

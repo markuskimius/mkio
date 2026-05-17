@@ -72,11 +72,11 @@ def serve(config: str | Path | dict[str, Any]) -> None:
             )
         app.router.add_get("/mkio.js", serve_js)
 
-    # Config file route (TOML-to-JSON conversion)
-    config_dir = cfg.get("config_dir")
-    if config_dir:
-        config_path = Path(config_dir).resolve()
-        app.router.add_get("/config/{path:.*}", _make_config_handler(config_path))
+    # Config file routes (TOML-to-JSON conversion)
+    for route, directory in cfg.get("config", {}).items():
+        config_path = Path(directory).resolve()
+        route_pattern = route.rstrip("/") + "/{path:.*}"
+        app.router.add_get(route_pattern, _make_config_handler(config_path))
 
     # Static file routes
     for route, directory in cfg.get("static", {}).items():
