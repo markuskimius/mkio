@@ -594,6 +594,7 @@ const MKIO_HELP = [
   'mkio.query("<svc>", {filter, fields, subid,          subscribe to a query service',
   '                     snapshotOnly, updateOnly})',
   'mkio.reqrep("<service>", data, {reqid})              send a request-reply message',
+  'mkio.check({version, protocol, mkio})               check version compatibility',
   'mkio.instances()                                     list live MkioClient instances',
 ].join("\n");
 
@@ -915,6 +916,37 @@ const mkio = {
           if (result.message.includes(`protocol '${proto}'`)) { console.warn(`Hint: try ${fn}("${service}", ...)`); break; }
         }
       }
+      return result;
+    });
+  },
+  check(data) {
+    const client = _mkioPickClient();
+    if (!client) return null;
+    const expect = {};
+    if (data) {
+      for (const k of ["version", "protocol", "mkio"]) {
+        if (k in data) expect[k] = data[k];
+      }
+    }
+    return client.request("_mkio", expect, {}).then(result => {
+      if (result.type === "error") {
+        console.warn(`Error: ${result.message}`);
+        return result;
+      }
+      const row = result.row || {};
+      const lines = [
+        `  name:      ${row.name || "(not set)"}`,
+        `  version:   ${row.version || "(not set)"}`,
+        `  mkio:      ${row.mkio || "?"}`,
+        `  protocol:  ${row.protocol || "?"}`,
+      ];
+      if ("compatible" in row) {
+        lines.push(`  compatible: ${row.compatible ? "yes" : "NO"}`);
+        for (const [k, v] of Object.entries(row.compatibility || {})) {
+          lines.push(`    ${k}: ${row[k] || "?"} (${v ? "ok" : "MISMATCH"})`);
+        }
+      }
+      console.log(lines.join("\n"));
       return result;
     });
   },

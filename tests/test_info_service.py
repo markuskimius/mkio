@@ -16,7 +16,7 @@ from mkio.change_bus import ChangeBus
 from mkio.config import load_config
 from mkio.database import Database
 from mkio.server import _on_startup, _on_shutdown, _ws_handler, _api_services, _api_service_detail
-from mkio.services.info import InfoService, _config_hash
+from mkio.services.info import InfoService, _config_hash, _parse_semver, _semver_compatible
 from mkio.writer import WriteBatcher
 
 
@@ -248,6 +248,181 @@ async def test_config_hash_stable(db, bus, writer):
     assert hash1 == hash2
 
 
+@pytest.mark.parametrize("input_val,expected", [
+    ("1.2.3", (1, 2, 3)),
+    ("1.0", (1, 0, 0)),
+    ("0.0.0", (0, 0, 0)),
+    ("0.1.45", (0, 1, 45)),
+    ("10.20.30", (10, 20, 30)),
+    ("", None),
+    ("dev", None),
+    ("1", None),
+    ("1.2.3.4", None),
+    ("1.x.3", None),
+    ("-1.0.0", None),
+    (None, None),
+    ("1.0.0-beta", None),
+    (123, None),
+])
+def test_parse_semver(input_val, expected):
+    assert _parse_semver(input_val) == expected
+
+
+@pytest.mark.parametrize("server,client,expected", [
+    ("1.2.3", "1.2.3", True),
+    ("1.2.4", "1.2.3", True),
+    ("1.3.0", "1.2.3", True),
+    ("2.0.0", "1.2.3", False),
+    ("1.2.2", "1.2.3", False),
+    ("1.2", "1.0", True),
+    ("0.1.2", "0.1.0", True),
+    ("0.1.5", "0.1.5", True),
+    ("0.2.0", "0.1.0", False),
+    ("0.1.0", "0.1.1", False),
+    ("0.0.1", "0.0.1", True),
+    ("0.0.2", "0.0.1", False),
+    ("0.0.0", "0.0.1", False),
+    ("", "1.0.0", False),
+    ("dev", "1.0.0", False),
+    ("1.0.0", "bogus", False),
+    ("", "", False),
+])
+def test_semver_compatible(server, client, expected):
+    assert _semver_compatible(server, client) is expected
+
+
+async def test_no_data_no_compatible(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1"})
+    row = ws.get_messages()[0]["row"]
+    assert "compatible" not in row
+    assert "compatibility" not in row
+
+
+async def test_empty_data_no_compatible(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {}})
+    row = ws.get_messages()[0]["row"]
+    assert "compatible" not in row
+    assert "compatibility" not in row
+
+
+async def test_data_none_no_compatible(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": None})
+    row = ws.get_messages()[0]["row"]
+    assert "compatible" not in row
+    assert "compatibility" not in row
+
+
+async def test_data_not_dict_no_compatible(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": "hello"})
+    row = ws.get_messages()[0]["row"]
+    assert "compatible" not in row
+    assert "compatibility" not in row
+
+
+async def test_compatible_protocol_match(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {"protocol": "1.0"}})
+    row = ws.get_messages()[0]["row"]
+    assert row["compatible"] is True
+    assert row["compatibility"] == {"protocol": True}
+
+
+async def test_compatible_protocol_mismatch(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {"protocol": "2.0"}})
+    row = ws.get_messages()[0]["row"]
+    assert row["compatible"] is False
+    assert row["compatibility"] == {"protocol": False}
+
+
+async def test_compatible_version_match(db, bus, writer):
+    config = {**TEST_CONFIG, "version": "2.1.0"}
+    svc = _make_info_svc(db, bus, writer, config=config)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {"version": "2.0.0"}})
+    row = ws.get_messages()[0]["row"]
+    assert row["compatible"] is True
+    assert row["compatibility"] == {"version": True}
+
+
+async def test_compatible_version_empty_server(db, bus, writer):
+    config = {k: v for k, v in TEST_CONFIG.items() if k != "version"}
+    svc = _make_info_svc(db, bus, writer, config=config)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {"version": "1.0.0"}})
+    row = ws.get_messages()[0]["row"]
+    assert row["compatible"] is False
+    assert row["compatibility"] == {"version": False}
+
+
+async def test_compatible_multiple_keys(db, bus, writer):
+    config = {**TEST_CONFIG, "version": "3.0.0"}
+    svc = _make_info_svc(db, bus, writer, config=config)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {"version": "3.0.0", "protocol": "1.0"}})
+    row = ws.get_messages()[0]["row"]
+    assert row["compatible"] is True
+    assert row["compatibility"] == {"version": True, "protocol": True}
+
+
+async def test_compatible_mixed_results(db, bus, writer):
+    config = {**TEST_CONFIG, "version": "2.0.0"}
+    svc = _make_info_svc(db, bus, writer, config=config)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {"version": "3.0.0", "protocol": "1.0"}})
+    row = ws.get_messages()[0]["row"]
+    assert row["compatible"] is False
+    assert row["compatibility"] == {"version": False, "protocol": True}
+
+
+async def test_compatible_ignores_unknown_keys(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {"protocol": "1.0", "foo": "bar"}})
+    row = ws.get_messages()[0]["row"]
+    assert row["compatible"] is True
+    assert row["compatibility"] == {"protocol": True}
+    assert "foo" not in row["compatibility"]
+
+
+async def test_compatible_unknown_keys_only_no_fields(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {"foo": "bar"}})
+    row = ws.get_messages()[0]["row"]
+    assert "compatible" not in row
+    assert "compatibility" not in row
+
+
+async def test_compatible_invalid_client_version(db, bus, writer):
+    config = {**TEST_CONFIG, "version": "1.0.0"}
+    svc = _make_info_svc(db, bus, writer, config=config)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {"version": "not-a-version"}})
+    row = ws.get_messages()[0]["row"]
+    assert row["compatible"] is False
+    assert row["compatibility"] == {"version": False}
+
+
+async def test_original_fields_unchanged_with_data(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {"protocol": "1.0"}})
+    row = ws.get_messages()[0]["row"]
+    original_keys = {"name", "version", "mkio", "protocol", "services", "tables", "config_hash", "uptime", "started"}
+    assert original_keys.issubset(set(row.keys()))
+
+
 async def test_config_hash_differs():
     h1 = _config_hash({"name": "a", "tables": {}})
     h2 = _config_hash({"name": "b", "tables": {}})
@@ -369,3 +544,33 @@ async def test_config_no_name_no_warning(caplog):
     with caplog.at_level(logging.WARNING, logger="mkio.config"):
         load_config({"db_path": ":memory:"})
     assert "name" not in caplog.text.lower() or "unknown" not in caplog.text.lower()
+
+
+async def test_mkio_version_compat_integration(client):
+    ws = await client.ws_connect("/ws")
+    reply = await ws_send_recv(ws, {
+        "type": "request",
+        "service": "_mkio",
+        "reqid": "vc1",
+        "data": {"protocol": "1.0"},
+    })
+    assert reply["type"] == "reply"
+    row = reply["row"]
+    assert row["compatible"] is True
+    assert row["compatibility"] == {"protocol": True}
+    await ws.close()
+
+
+async def test_mkio_version_compat_mismatch_integration(client):
+    ws = await client.ws_connect("/ws")
+    reply = await ws_send_recv(ws, {
+        "type": "request",
+        "service": "_mkio",
+        "reqid": "vc2",
+        "data": {"protocol": "9.0.0"},
+    })
+    assert reply["type"] == "reply"
+    row = reply["row"]
+    assert row["compatible"] is False
+    assert row["compatibility"] == {"protocol": False}
+    await ws.close()

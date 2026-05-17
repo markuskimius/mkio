@@ -22,7 +22,7 @@ _PROTOCOL_CLI_HINT = {
 }
 
 
-_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep")
+_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep", "check")
 
 
 def main() -> None:
@@ -49,6 +49,8 @@ def main() -> None:
         _cmd_query()
     elif cmd == "reqrep":
         _cmd_reqrep()
+    elif cmd == "check":
+        _cmd_check()
     else:
         import difflib
         close = difflib.get_close_matches(cmd, _VALID_COMMANDS, n=1, cutoff=0.5)
@@ -73,6 +75,8 @@ def _usage() -> None:
     print("                                   Subscribe to a query service")
     print("  mkio reqrep <url> <service> [data]")
     print("                                   Send a request-reply query (JSON or key=value)")
+    print("  mkio check <url> [version=... protocol=... mkio=...]")
+    print("                                   Check version compatibility with server")
     sys.exit(1)
 
 
@@ -962,6 +966,59 @@ async def _reqrep_request(
             rows = result["rows"]
             for row in rows:
                 print(json.dumps(row, default=str))
+
+
+def _cmd_check() -> None:
+    usage = "mkio check <url> [version=... protocol=... mkio=...]"
+    args = sys.argv[2:]
+    if len(args) < 1:
+        print(f"Usage: {usage}")
+        print("  Check version compatibility with a running mkio server")
+        print("  e.g. mkio check 8080")
+        print("  e.g. mkio check 8080 version=2.0.0 protocol=1.0")
+        print("  e.g. mkio check 8080 mkio=0.1.46")
+        sys.exit(1)
+
+    url = args[0]
+    data: dict[str, Any] = {}
+    for kv in args[1:]:
+        if "=" not in kv:
+            print(f"Error: expected key=value, got {kv!r}")
+            print(f"Usage: {usage}")
+            sys.exit(1)
+        k, v = kv.split("=", 1)
+        if k not in ("version", "protocol", "mkio"):
+            print(f"Error: unknown key {k!r} (expected version, protocol, or mkio)")
+            sys.exit(1)
+        data[k] = v
+
+    ws_url = _normalize_ws_url(url)
+    try:
+        asyncio.run(_check_request(ws_url, data))
+    except KeyboardInterrupt:
+        pass
+
+
+async def _check_request(ws_url: str, data: dict[str, Any]) -> None:
+    from mkio.client import MkioClient
+
+    async with MkioClient(ws_url, reconnect=False) as client:
+        result = await client.request("_mkio", data)
+        if result.get("type") == "error":
+            print(f"Error: {result.get('message', 'unknown error')}")
+            sys.exit(1)
+        row = result.get("row", {})
+        print(f"  name:        {row.get('name') or '(not set)'}")
+        print(f"  version:     {row.get('version') or '(not set)'}")
+        print(f"  mkio:        {row.get('mkio', '?')}")
+        print(f"  protocol:    {row.get('protocol', '?')}")
+        if "compatible" in row:
+            status = "yes" if row["compatible"] else "NO"
+            print(f"  compatible:  {status}")
+            for k, v in row.get("compatibility", {}).items():
+                label = "ok" if v else "MISMATCH"
+                print(f"    {k}: {row.get(k, '?')} ({label})")
+            sys.exit(0 if row["compatible"] else 1)
 
 
 if __name__ == "__main__":

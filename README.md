@@ -220,7 +220,7 @@ Reply:
   "row": {
     "name": "order-book-dev",
     "version": "2.1.0",
-    "mkio": "0.1.45",
+    "mkio": "0.1.46",
     "protocol": "1.0",
     "services": {"orders": "transaction", "last_trade": "subpub", "all_orders": "query"},
     "tables": ["orders", "audit_log"],
@@ -252,6 +252,38 @@ port = 8080
 ```
 
 From the CLI: `mkio reqrep 8080 _mkio`. From the browser console: `mkio.reqrep("_mkio")`.
+
+#### Version Compatibility
+
+Clients can check whether they're compatible with the server by sending expected version(s) in the request `data`. The server replies with a `compatible` boolean (AND of all checks) and a `compatibility` dict with per-version results. All versions use semantic versioning (caret `^` convention).
+
+```json
+{"type": "request", "service": "_mkio", "reqid": "v1",
+ "data": {"version": "2.0.0", "protocol": "1.0", "mkio": "0.1.40"}}
+```
+
+Reply:
+
+```json
+{
+  "type": "reply", "service": "_mkio", "reqid": "v1",
+  "row": {
+    "name": "order-book-dev", "version": "2.3.0", "mkio": "0.1.46", "protocol": "1.0",
+    "compatible": true,
+    "compatibility": {"version": true, "protocol": true, "mkio": true},
+    ...
+  }
+}
+```
+
+If any version is incompatible, `compatible` is `false` and the failing key(s) show `false` in `compatibility`. When no version expectations are sent, neither field appears (backward compatible).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `compatible` | bool | `true` if all requested versions are compatible |
+| `compatibility` | dict | Per-version result: `{key: true/false}` for each key sent in `data` |
+
+From the CLI: `mkio check 8080 version=2.0.0 protocol=1.0`. From the browser console: `mkio.check({version: "2.0.0", protocol: "1.0"})`. The CLI exits with code 0 if compatible, 1 if not.
 
 The `_mkio` service is hidden from `/api/services` and error hints. Using the wrong protocol (e.g., `mkio subpub 8080 _mkio`) returns a nack with a hint suggesting the correct command.
 
