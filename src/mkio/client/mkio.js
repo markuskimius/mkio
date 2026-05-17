@@ -845,7 +845,15 @@ function _mkioSubscribe(service, protocol, opts) {
     o.onUpdate = (op, row) => console.log(`[${makeLocalTs()}] \u2190 ${service} update ${op}`, row);
   }
   if (!o.onNack) {
-    o.onNack = (message) => console.warn(`[${makeLocalTs()}] \u2190 ${service} nack: ${message}`);
+    o.onNack = (message) => {
+      console.warn(`[${makeLocalTs()}] \u2190 ${service} nack: ${message}`);
+      if (message && message.includes("Protocol mismatch")) {
+        const hints = { subpub: "mkio.subpub", stream: "mkio.stream", query: "mkio.query", reqrep: "mkio.reqrep", transaction: "mkio.send" };
+        for (const [proto, fn] of Object.entries(hints)) {
+          if (message.includes(`is '${proto}'`)) { console.warn(`Hint: try ${fn}("${service}", ...)`); break; }
+        }
+      }
+    };
   }
   client.subscribe(service, protocol, o);
   return new MkioSubscription(o.subid, client);
@@ -899,7 +907,16 @@ const mkio = {
   reqrep(service, data, opts) {
     const client = _mkioPickClient();
     if (!client) return null;
-    return client.request(service, data, opts || {});
+    return client.request(service, data, opts || {}).then(result => {
+      if (result.type === "error" && result.message && result.message.includes("not 'reqrep'")) {
+        console.warn(`Error: ${result.message}`);
+        const hints = { subpub: "mkio.subpub", stream: "mkio.stream", query: "mkio.query", transaction: "mkio.send" };
+        for (const [proto, fn] of Object.entries(hints)) {
+          if (result.message.includes(`protocol '${proto}'`)) { console.warn(`Hint: try ${fn}("${service}", ...)`); break; }
+        }
+      }
+      return result;
+    });
   },
   instances() {
     return MkioClient.instances();

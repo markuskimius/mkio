@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -12,10 +14,12 @@ from typing import Any
 from aiohttp import web
 
 from mkio._json import dumps, loads
+from mkio._ref import next_ref
 from mkio.change_bus import ChangeBus
 from mkio.config import load_config
 from mkio.database import Database
 from mkio.services.base import Service
+from mkio.services.info import InfoService
 from mkio.services.query import QueryService
 from mkio.services.reqrep import ReqRepService
 from mkio.services.stream import StreamService
@@ -137,6 +141,8 @@ async def _api_services(request: web.Request) -> web.Response:
     services: dict[str, Service] = request.app.get("services", {})
     result = []
     for name, svc in services.items():
+        if name.startswith("_"):
+            continue
         info: dict[str, Any] = {
             "name": name,
             "protocol": svc.config.get("protocol", "unknown"),
@@ -166,7 +172,7 @@ async def _api_service_detail(request: web.Request) -> web.Response:
     service_name = request.match_info["service_name"]
     services: dict[str, Service] = request.app.get("services", {})
     svc = services.get(service_name)
-    if svc is None:
+    if svc is None or service_name.startswith("_"):
         return web.json_response(
             {"error": f"Unknown service: {service_name}"}, status=404
         )
@@ -516,6 +522,8 @@ def _build_send_example(
 
 async def _on_startup(app: web.Application) -> None:
     cfg = app["config"]
+    started_ref = next_ref()
+    started_monotonic = time.monotonic()
 
     # Monitors: service_name -> set of WebSocketResponse
     app.setdefault("monitors", defaultdict(set))
@@ -577,6 +585,20 @@ async def _on_startup(app: web.Application) -> None:
             print(f"Error starting service '{svc_name}': {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
         services[svc_name] = svc
+
+    # Built-in _mkio service
+    if "_mkio" in services:
+        logging.getLogger("mkio").warning(
+            "User service '_mkio' overridden by built-in _mkio service"
+        )
+    info_svc = InfoService(config={"protocol": "reqrep"}, db=db, change_bus=bus, writer=writer)
+    info_svc.name = "_mkio"
+    info_svc._server_config = cfg
+    info_svc._server_services = services
+    info_svc._started_ref = started_ref
+    info_svc._started_monotonic = started_monotonic
+    info_svc._monitor_notifier = lambda sn, d, data, _app=app: _notify_monitors(_app, sn, d, data)
+    services["_mkio"] = info_svc
 
 
 async def _on_shutdown(app: web.Application) -> None:
@@ -663,7 +685,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
             if msg_type == "monitor":
                 target = service_name or "*"
                 if target != "*" and target not in services:
-                    available = ", ".join(sorted(services.keys()))
+                    available = ", ".join(sorted(k for k in services if not k.startswith("_")))
                     await ws.send_bytes(make_error(
                         ref,
                         f"Unknown service: {target!r}. Available services: {available}",
@@ -686,7 +708,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             svc = services.get(service_name)
             if svc is None:
-                available = ", ".join(sorted(services.keys()))
+                available = ", ".join(sorted(k for k in services if not k.startswith("_")))
                 subid = msg.get("subid")
                 await ws.send_bytes(make_nack(
                     service_name,
@@ -744,6 +766,18 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                         del subscribed[service_name]
                     else:
                         subscribed[service_name] = (entry[0], remaining)
+            elif msg_type == "request":
+                actual = svc.config.get("protocol", "")
+                if actual != "reqrep":
+                    resp = make_error(
+                        ref,
+                        f"Service '{service_name}' uses protocol {actual!r}, not 'reqrep'",
+                        reqid=msg.get("reqid"),
+                    )
+                    await ws.send_bytes(resp)
+                    await _notify_monitors(request.app, service_name, "out", resp)
+                    continue
+                await svc.on_message(ws, msg)
             else:
                 await svc.on_message(ws, msg)
 

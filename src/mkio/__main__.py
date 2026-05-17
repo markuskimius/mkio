@@ -13,6 +13,14 @@ from typing import Any
 from mkio._json import loads
 from mkio._ref import local_ts
 
+_PROTOCOL_CLI_HINT = {
+    "subpub": "mkio subpub <url> <service> <topic>",
+    "stream": "mkio stream <url> <service>",
+    "query": "mkio query <url> <service>",
+    "reqrep": "mkio reqrep <url> <service> [data]",
+    "transaction": "mkio send <url> <service> <op> [data]",
+}
+
 
 _VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep")
 
@@ -769,7 +777,13 @@ async def _subscribe_service(
     async with MkioClient(ws_url, reconnect=True) as client:
         async for msg in client.subscribe(service, protocol, topic=topic, filter=filter_expr, ref=ref, subid=subid, snapshot=snapshot, updates=updates, fields=fields, maxcount=maxcount):
             if msg.get("type") == "nack":
-                print(f"Error: {msg.get('message', 'subscription rejected')}")
+                message = msg.get("message", "subscription rejected")
+                print(f"Error: {message}")
+                if "Protocol mismatch" in message:
+                    for proto, hint in _PROTOCOL_CLI_HINT.items():
+                        if f"is {proto!r}" in message or f"is '{proto}'" in message:
+                            print(f"Hint: try {hint}")
+                            break
                 sys.exit(1)
             _print_subscribe_message(msg)
 
@@ -932,7 +946,13 @@ async def _reqrep_request(
     async with MkioClient(ws_url, reconnect=False) as client:
         result = await client.request(service, data)
         if result.get("type") == "error":
-            print(f"Error: {result.get('message', 'unknown error')}")
+            message = result.get("message", "unknown error")
+            print(f"Error: {message}")
+            if "not 'reqrep'" in message:
+                for proto, hint in _PROTOCOL_CLI_HINT.items():
+                    if f"protocol {proto!r}" in message or f"protocol '{proto}'" in message:
+                        print(f"Hint: try {hint}")
+                        break
             sys.exit(1)
         if "value" in result:
             print(result["value"])

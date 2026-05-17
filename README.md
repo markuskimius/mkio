@@ -83,6 +83,7 @@ serve({...})  # or pass a dict
 - **Graceful shutdown** — drains pending writes, checkpoints WAL, clean close
 - **Service monitoring** — tap into any service's inbound/outbound message flow via CLI or WebSocket
 - **Service discovery** — `GET /api/services` list and `GET /api/services/<name>` detail endpoints, `mkio services` CLI
+- **Connection identity** — built-in `_mkio` reqrep service reports server name, version, framework version, protocol version, services, tables, config hash, and uptime — lets clients verify they're connected to the correct session
 - **Config endpoint** — `/config` path serves TOML files as JSON (request `foo.json`, server reads `foo.toml` and returns JSON); falls back to literal `.json` files; other extensions served as-is
 - **CLI tools** — send transactions, subscribe to live data, monitor traffic, inspect services
 
@@ -202,6 +203,57 @@ protocol = "reqrep"
 sql = "SELECT p.*, pr.price FROM positions p JOIN prices pr ON p.symbol = pr.symbol WHERE p.account = :account"
 reply = { symbol = "symbol", qty = "qty", market_value = "ROUND(qty * price, 2)" }
 ```
+
+### Connection Identity (`_mkio`)
+
+Every mkio server automatically registers a built-in `_mkio` reqrep service (no config required). Clients can verify they're connected to the correct server by sending a request:
+
+```json
+{"type": "request", "service": "_mkio", "reqid": "hello"}
+```
+
+Reply:
+
+```json
+{
+  "type": "reply", "service": "_mkio", "reqid": "hello",
+  "row": {
+    "name": "order-book-dev",
+    "version": "2.1.0",
+    "mkio": "0.1.45",
+    "protocol": "1.0",
+    "services": {"orders": "transaction", "last_trade": "subpub", "all_orders": "query"},
+    "tables": ["orders", "audit_log"],
+    "config_hash": "a3f7c2b1",
+    "uptime": 3621.4,
+    "started": "20260517 08:12:03.000000000000"
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `name` | Application name from config `name` key (default `""`) |
+| `version` | Application version from config `version` key (default `""`) |
+| `mkio` | Framework version |
+| `protocol` | Protocol version (semver — bump minor for compatible additions, major for breaking changes) |
+| `services` | Map of service name → protocol type |
+| `tables` | List of configured table names |
+| `config_hash` | Short hex hash of the running config (detects config drift) |
+| `uptime` | Seconds since server startup |
+| `started` | Server startup time as a ref string |
+
+Set `name` and `version` in your config to identify the application:
+
+```toml
+name = "order-book-dev"
+version = "2.1.0"
+port = 8080
+```
+
+From the CLI: `mkio reqrep 8080 _mkio`. From the browser console: `mkio.reqrep("_mkio")`.
+
+The `_mkio` service is hidden from `/api/services` and error hints. Using the wrong protocol (e.g., `mkio subpub 8080 _mkio`) returns a nack with a hint suggesting the correct command.
 
 ## WebSocket Protocol
 
