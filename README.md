@@ -83,6 +83,7 @@ serve({...})  # or pass a dict
 - **Graceful shutdown** — drains pending writes, checkpoints WAL, clean close
 - **Service monitoring** — tap into any service's inbound/outbound message flow via CLI or WebSocket
 - **Service discovery** — `GET /api/services` list and `GET /api/services/<name>` detail endpoints, `mkio services` CLI
+- **Config endpoint** — `/config` path serves TOML files as JSON (request `foo.json`, server reads `foo.toml` and returns JSON); falls back to literal `.json` files; other extensions served as-is
 - **CLI tools** — send transactions, subscribe to live data, monitor traffic, inspect services
 
 ## Service Types
@@ -501,6 +502,21 @@ mkio monitor localhost:8080 --filter "service == 'orders'"  # Filter by service
 The `--filter` flag accepts any expression from the [expression language](#expression-language), evaluated against each monitor envelope (`direction`, `service`, `message`).
 
 The monitor protocol is a native framework feature — any mkio application supports it.
+
+## Config Endpoint
+
+The `/config` path serves files from a configured directory, with automatic TOML-to-JSON conversion. This keeps the `/static` path strictly for static assets.
+
+```toml
+config_dir = "./configs"
+```
+
+**Behavior:**
+- `GET /config/app.json` — reads `./configs/app.toml`, parses it, and serves as `application/json`
+- If no `.toml` file exists, falls back to serving `./configs/app.json` directly
+- `GET /config/style.css` — serves the file as-is (no conversion for non-`.json` extensions)
+- Subdirectories are supported: `GET /config/sub/db.json` reads `./configs/sub/db.toml`
+- Path traversal is blocked
 
 ## Config Validation
 

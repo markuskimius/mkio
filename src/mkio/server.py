@@ -72,6 +72,12 @@ def serve(config: str | Path | dict[str, Any]) -> None:
             )
         app.router.add_get("/mkio.js", serve_js)
 
+    # Config file route (TOML-to-JSON conversion)
+    config_dir = cfg.get("config_dir")
+    if config_dir:
+        config_path = Path(config_dir).resolve()
+        app.router.add_get("/config/{path:.*}", _make_config_handler(config_path))
+
     # Static file routes
     for route, directory in cfg.get("static", {}).items():
         path = Path(directory).resolve()
@@ -92,6 +98,37 @@ def serve(config: str | Path | dict[str, Any]) -> None:
 def _make_index_handler(static_path: Path):
     async def handler(request: web.Request) -> web.FileResponse:
         return web.FileResponse(static_path / "index.html")
+    return handler
+
+
+def _make_config_handler(config_path: Path):
+    import tomllib as _tomllib
+
+    async def handler(request: web.Request) -> web.Response:
+        rel = request.match_info["path"]
+        if "\x00" in rel:
+            raise web.HTTPForbidden()
+        resolved = (config_path / rel).resolve()
+        if not str(resolved).startswith(str(config_path)):
+            raise web.HTTPForbidden()
+
+        if resolved.suffix == ".json":
+            toml_path = resolved.with_suffix(".toml")
+            if toml_path.is_file():
+                with open(toml_path, "rb") as f:
+                    data = _tomllib.load(f)
+                return web.Response(
+                    body=dumps(data),
+                    content_type="application/json",
+                )
+            if resolved.is_file():
+                return web.FileResponse(resolved)
+            raise web.HTTPNotFound()
+
+        if resolved.is_file():
+            return web.FileResponse(resolved)
+        raise web.HTTPNotFound()
+
     return handler
 
 

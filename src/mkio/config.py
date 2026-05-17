@@ -27,7 +27,8 @@ _DEFAULTS = {
 }
 
 _VALID_TOP_LEVEL_KEYS = frozenset(
-    set(_DEFAULTS.keys()) | {"tables", "services", "static", "shutdown_timeout"}
+    set(_DEFAULTS.keys())
+    | {"tables", "services", "static", "config_dir", "shutdown_timeout"}
 )
 
 _VALID_SERVICE_KEYS: dict[str, frozenset[str]] = {
