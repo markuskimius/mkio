@@ -220,7 +220,7 @@ Reply:
   "row": {
     "name": "order-book-dev",
     "version": "2.1.0",
-    "mkio": "0.1.46",
+    "mkio": "0.1.47",
     "protocol": "1.0",
     "services": {"orders": "transaction", "last_trade": "subpub", "all_orders": "query"},
     "tables": ["orders", "audit_log"],
@@ -268,7 +268,7 @@ Reply:
 {
   "type": "reply", "service": "_mkio", "reqid": "v1",
   "row": {
-    "name": "order-book-dev", "version": "2.3.0", "mkio": "0.1.46", "protocol": "1.0",
+    "name": "order-book-dev", "version": "2.3.0", "mkio": "0.1.47", "protocol": "1.0",
     "compatible": true,
     "compatibility": {"version": true, "protocol": true, "mkio": true},
     ...
@@ -586,6 +586,17 @@ mkio monitor localhost:8080 --filter "service == 'orders'"  # Filter by service
 The `--filter` flag accepts any expression from the [expression language](#expression-language), evaluated against each monitor envelope (`direction`, `service`, `message`).
 
 The monitor protocol is a native framework feature — any mkio application supports it.
+
+### Error handling
+
+All CLI commands show clean error messages instead of Python tracebacks. Common scenarios:
+
+- **Server not running** — `Error: could not connect to ... Is the mkio server running?`
+- **Port already in use** — `Error: address already in use ... Stop the other process or change the port in mkio.toml`
+- **Invalid TOML** — `Error: invalid TOML in mkio.toml ...`
+- **Invalid config** — `Error: invalid config: ...`
+
+Use `--traceback` (or `MKIO_TRACEBACK=1`) to show the full Python traceback for debugging.
 
 ## Config Endpoint
 

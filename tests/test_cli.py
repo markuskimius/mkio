@@ -593,6 +593,107 @@ def test_load_messages_missing_csv(capsys):
     assert "file not found" in captured.out
 
 
+# ---- CLI error handling tests ------------------------------------------------
+
+
+def test_serve_missing_config():
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "serve", "/nonexistent/path.toml"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "Config file not found" in result.stdout
+
+
+def test_serve_invalid_toml(tmp_path):
+    import subprocess, sys
+    bad = tmp_path / "bad.toml"
+    bad.write_text("bad toml [[[")
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "serve", str(bad)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "invalid TOML" in result.stdout
+
+
+def test_serve_invalid_config(tmp_path):
+    import subprocess, sys
+    bad = tmp_path / "bad_config.toml"
+    bad.write_text('[services.test]\nprotocol = "bogus"\n')
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "serve", str(bad)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "invalid config" in result.stdout
+
+
+def test_send_connection_refused():
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "send", "59999", "test", '{}'],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode != 0
+    assert "could not connect" in result.stdout
+    assert "Is the mkio server running?" in result.stdout
+
+
+def test_subpub_connection_refused():
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "subpub", "59999", "test", "topic1"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode != 0
+    assert "could not connect" in result.stdout
+
+
+def test_reqrep_connection_refused():
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "reqrep", "59999", "test"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode != 0
+    assert "could not connect" in result.stdout
+
+
+def test_check_connection_refused():
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "check", "59999"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode != 0
+    assert "could not connect" in result.stdout
+
+
+def test_traceback_flag_shows_traceback():
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "--traceback", "check", "59999"],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode != 0
+    assert "Traceback" in result.stderr
+
+
+def test_traceback_env_var(tmp_path):
+    import subprocess, sys
+    bad = tmp_path / "bad.toml"
+    bad.write_text("bad toml [[[")
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "serve", str(bad)],
+        capture_output=True, text=True,
+        env={**__import__("os").environ, "MKIO_TRACEBACK": "1"},
+    )
+    assert result.returncode != 0
+    assert "Traceback" in result.stderr
+
+
 # ---------------------------------------------------------------------------
 # URL normalization
 # ---------------------------------------------------------------------------

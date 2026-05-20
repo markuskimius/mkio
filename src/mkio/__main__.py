@@ -6,12 +6,15 @@ import asyncio
 import csv
 import io
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from typing import Any
 
 from mkio._json import loads
 from mkio._ref import local_ts
+
+_TRACEBACK = False
 
 _PROTOCOL_CLI_HINT = {
     "subpub": "mkio subpub <url> <service> <topic>",
@@ -26,6 +29,13 @@ _VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "
 
 
 def main() -> None:
+    global _TRACEBACK
+    if "--traceback" in sys.argv:
+        sys.argv.remove("--traceback")
+        _TRACEBACK = True
+    if os.environ.get("MKIO_TRACEBACK") == "1":
+        _TRACEBACK = True
+
     if len(sys.argv) < 2:
         _usage()
 
@@ -77,6 +87,8 @@ def _usage() -> None:
     print("                                   Send a request-reply query (JSON or key=value)")
     print("  mkio check <url> [version=... protocol=... mkio=...]")
     print("                                   Check version compatibility with server")
+    print()
+    print("  --traceback            Show full Python traceback on errors")
     sys.exit(1)
 
 
@@ -94,7 +106,16 @@ def _cmd_serve() -> None:
         print(f"Config file not found: {config_path}")
         sys.exit(1)
     from mkio.server import serve
-    serve(config_path)
+    try:
+        serve(config_path)
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        pass
+    except Exception as exc:
+        if _TRACEBACK:
+            raise
+        _serve_error(config_path, exc)
 
 
 def _cmd_services() -> None:
@@ -365,12 +386,11 @@ def _cmd_monitor() -> None:
             print(f"Error: invalid filter expression: {e}")
             sys.exit(1)
 
-    try:
-        asyncio.run(_monitor_service(ws_url, service, filter_fn))
-    except KeyboardInterrupt:
-        print("\nMonitor stopped.")
-    except Exception as e:
-        _connection_error(ws_url, e)
+    _run_client_command(
+        ws_url,
+        _monitor_service(ws_url, service, filter_fn),
+        "\nMonitor stopped.",
+    )
 
 
 async def _monitor_service(
@@ -380,48 +400,40 @@ async def _monitor_service(
 ) -> None:
     import aiohttp
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.ws_connect(ws_url) as ws:
-                # Send monitor request
-                from mkio._json import dumps
-                monitor_msg: dict[str, Any] = {"type": "monitor"}
-                if service:
-                    monitor_msg["service"] = service
-                await ws.send_bytes(dumps(monitor_msg))
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(ws_url) as ws:
+            from mkio._json import dumps
+            monitor_msg: dict[str, Any] = {"type": "monitor"}
+            if service:
+                monitor_msg["service"] = service
+            await ws.send_bytes(dumps(monitor_msg))
 
-                # Wait for ack
-                ack_msg = await ws.receive()
-                ack = loads(ack_msg.data)
-                if ack.get("type") == "error":
-                    print(f"Error: {ack.get('message', 'Unknown error')}")
-                    sys.exit(1)
+            ack_msg = await ws.receive()
+            ack = loads(ack_msg.data)
+            if ack.get("type") == "error":
+                print(f"Error: {ack.get('message', 'Unknown error')}")
+                sys.exit(1)
 
-                label = f"service: {service}" if service else "all services"
-                print(f"Monitoring {label}")
-                print(f"Connected to: {ws_url}")
-                if filter_fn:
-                    print(f"Filter active")
-                print("---")
+            label = f"service: {service}" if service else "all services"
+            print(f"Monitoring {label}")
+            print(f"Connected to: {ws_url}")
+            if filter_fn:
+                print(f"Filter active")
+            print("---")
 
-                # Stream messages
-                async for msg in ws:
-                    if msg.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
-                        data = loads(msg.data)
-                        if filter_fn:
-                            try:
-                                if not filter_fn(data):
-                                    continue
-                            except Exception:
-                                pass
-                        _print_monitor_message(data)
-                    elif msg.type == aiohttp.WSMsgType.ERROR:
-                        print(f"WebSocket error: {ws.exception()}")
-                        break
-
-    except aiohttp.ClientError as e:
-        print(f"Error connecting to {ws_url}: {e}")
-        sys.exit(1)
+            async for msg in ws:
+                if msg.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
+                    data = loads(msg.data)
+                    if filter_fn:
+                        try:
+                            if not filter_fn(data):
+                                continue
+                        except Exception:
+                            pass
+                    _print_monitor_message(data)
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    print(f"WebSocket error: {ws.exception()}")
+                    break
 
 
 def _print_monitor_message(data: dict[str, Any]) -> None:
@@ -491,11 +503,7 @@ def _cmd_send() -> None:
     messages = _load_messages(data_arg)
 
     ws_url = _normalize_ws_url(url)
-
-    try:
-        asyncio.run(_send_messages(ws_url, service, op_name, messages))
-    except KeyboardInterrupt:
-        pass
+    _run_client_command(ws_url, _send_messages(ws_url, service, op_name, messages))
 
 
 _ENVELOPE_KEYS = {"op", "ref", "service", "txnid"}
@@ -670,10 +678,11 @@ def _cmd_subpub() -> None:
 
     topic_arg: str | list[str] = topics[0] if len(topics) == 1 else topics
 
-    try:
-        asyncio.run(_subscribe_service(ws_url, service, "subpub", None, None, subid, topic=topic_arg, fields=fields))
-    except KeyboardInterrupt:
-        print("\nSubscription stopped.")
+    _run_client_command(
+        ws_url,
+        _subscribe_service(ws_url, service, "subpub", None, None, subid, topic=topic_arg, fields=fields),
+        "\nSubscription stopped.",
+    )
 
 
 def _cmd_stream() -> None:
@@ -699,10 +708,11 @@ def _cmd_stream() -> None:
     _check_extra_positional(rest, usage)
     ws_url = _normalize_ws_url(url)
 
-    try:
-        asyncio.run(_subscribe_service(ws_url, service, "stream", filter_expr, ref, subid, fields=fields, maxcount=maxcount))
-    except KeyboardInterrupt:
-        print("\nSubscription stopped.")
+    _run_client_command(
+        ws_url,
+        _subscribe_service(ws_url, service, "stream", filter_expr, ref, subid, fields=fields, maxcount=maxcount),
+        "\nSubscription stopped.",
+    )
 
 
 def _cmd_query() -> None:
@@ -723,10 +733,11 @@ def _cmd_query() -> None:
     _check_extra_positional(rest, usage)
     ws_url = _normalize_ws_url(url)
 
-    try:
-        asyncio.run(_subscribe_service(ws_url, service, "query", filter_expr, None, subid, snapshot=snapshot, updates=updates, fields=fields))
-    except KeyboardInterrupt:
-        print("\nSubscription stopped.")
+    _run_client_command(
+        ws_url,
+        _subscribe_service(ws_url, service, "query", filter_expr, None, subid, snapshot=snapshot, updates=updates, fields=fields),
+        "\nSubscription stopped.",
+    )
 
 
 def _parse_mode_flags(args: list[str]) -> tuple[bool, bool]:
@@ -869,6 +880,51 @@ def _connection_error(ws_url: str, exc: Exception) -> None:
     sys.exit(1)
 
 
+def _run_client_command(
+    ws_url: str,
+    coro: Any,
+    interrupt_msg: str | None = None,
+) -> None:
+    """Run an async client command with connection error handling."""
+    try:
+        asyncio.run(coro)
+    except KeyboardInterrupt:
+        if interrupt_msg:
+            print(interrupt_msg)
+    except Exception as exc:
+        import aiohttp
+        if isinstance(exc, (aiohttp.ClientError, OSError)):
+            if _TRACEBACK:
+                raise
+            _connection_error(ws_url, exc)
+        raise
+
+
+def _serve_error(config_path: str, exc: Exception) -> None:
+    """Print a helpful server start error and exit."""
+    import errno as _errno
+    import tomllib
+    if isinstance(exc, tomllib.TOMLDecodeError):
+        print(f"Error: invalid TOML in {config_path}")
+        print(f"  {exc}")
+    elif isinstance(exc, ValueError):
+        print(f"Error: invalid config: {exc}")
+    elif isinstance(exc, OSError) and exc.errno == _errno.EADDRINUSE:
+        print(f"Error: address already in use")
+        print(f"  {exc}")
+        print(f"  Stop the other process or change the port in {config_path}")
+    elif isinstance(exc, OSError) and exc.errno == _errno.EACCES:
+        print(f"Error: permission denied")
+        print(f"  {exc}")
+        print(f"  Try a port >= 1024 or run with elevated privileges.")
+    elif isinstance(exc, OSError):
+        print(f"Error: could not start server")
+        print(f"  {exc}")
+    else:
+        raise exc
+    sys.exit(1)
+
+
 def _normalize_url(url: str) -> str:
     """Normalize a URL: default to http:// and port 80."""
     if url.isdigit():
@@ -936,10 +992,7 @@ def _cmd_reqrep() -> None:
                 data[k] = _auto_convert(v)
 
     ws_url = _normalize_ws_url(url)
-    try:
-        asyncio.run(_reqrep_request(ws_url, service, data))
-    except KeyboardInterrupt:
-        pass
+    _run_client_command(ws_url, _reqrep_request(ws_url, service, data))
 
 
 async def _reqrep_request(
@@ -976,7 +1029,7 @@ def _cmd_check() -> None:
         print("  Check version compatibility with a running mkio server")
         print("  e.g. mkio check 8080")
         print("  e.g. mkio check 8080 version=2.0.0 protocol=1.0")
-        print("  e.g. mkio check 8080 mkio=0.1.46")
+        print("  e.g. mkio check 8080 mkio=0.1.47")
         sys.exit(1)
 
     url = args[0]
@@ -993,10 +1046,7 @@ def _cmd_check() -> None:
         data[k] = v
 
     ws_url = _normalize_ws_url(url)
-    try:
-        asyncio.run(_check_request(ws_url, data))
-    except KeyboardInterrupt:
-        pass
+    _run_client_command(ws_url, _check_request(ws_url, data))
 
 
 async def _check_request(ws_url: str, data: dict[str, Any]) -> None:
