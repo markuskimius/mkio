@@ -71,7 +71,7 @@ def main() -> None:
 
 def _usage() -> None:
     print("Usage:")
-    print("  mkio serve [mkio.toml]           Start a server (default: mkio.toml)")
+    print("  mkio serve [server.toml]           Start a server (default: server.toml)")
     print("  mkio services <url> [service]    List services, or show detail for one")
     print("  mkio monitor <url> [service] [--filter <expr>]")
     print("                                   Monitor messages (all services or one)")
@@ -100,7 +100,7 @@ def _cmd_serve() -> None:
         print(f"Error: 'serve' takes at most 1 argument (config path), got {len(args)}")
         print(f"Usage: {usage}")
         sys.exit(1)
-    config_path = args[0] if args else "mkio.toml"
+    config_path = args[0] if args else "server.toml"
     from pathlib import Path
     if not Path(config_path).exists():
         print(f"Config file not found: {config_path}")

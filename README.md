@@ -28,7 +28,7 @@ A single TCP port serves HTTP and WebSocket, backed by an embedded SQLite databa
 pip install mkio
 ```
 
-Create `mkio.toml`:
+Create `server.toml`:
 
 ```toml
 port = 8080
@@ -61,7 +61,7 @@ Or programmatically:
 
 ```python
 from mkio import serve
-serve("mkio.toml")
+serve("server.toml")
 serve({...})  # or pass a dict
 ```
 
@@ -592,8 +592,8 @@ The monitor protocol is a native framework feature — any mkio application supp
 All CLI commands show clean error messages instead of Python tracebacks. Common scenarios:
 
 - **Server not running** — `Error: could not connect to ... Is the mkio server running?`
-- **Port already in use** — `Error: address already in use ... Stop the other process or change the port in mkio.toml`
-- **Invalid TOML** — `Error: invalid TOML in mkio.toml ...`
+- **Port already in use** — `Error: address already in use ... Stop the other process or change the port in server.toml`
+- **Invalid TOML** — `Error: invalid TOML in server.toml ...`
 - **Invalid config** — `Error: invalid config: ...`
 
 Use `--traceback` (or `MKIO_TRACEBACK=1`) to show the full Python traceback for debugging.
