@@ -93,7 +93,7 @@ def _usage() -> None:
     print("                                   Check version compatibility with server")
     print("  mkio dbupdate [server.toml] [--allow-risky] [--allow-destructive]")
     print("                                   Apply pending schema migrations")
-    print("  mkio init [directory]            Create a new project with server.toml + static/")
+    print("  mkio init [directory] [--no-static]")
     print()
     print("  --traceback            Show full Python traceback on errors")
     sys.exit(1)
@@ -1149,8 +1149,10 @@ async def _check_request(ws_url: str, data: dict[str, Any]) -> None:
 
 
 def _cmd_init() -> None:
-    usage = "mkio init [directory]"
+    usage = "mkio init [directory] [--no-static]"
     args = sys.argv[2:]
+    no_static = "--no-static" in args
+    args = [a for a in args if a != "--no-static"]
     _check_unknown_flags(args, set(), usage)
     if len(args) > 1:
         print(f"Error: 'init' takes at most 1 argument (directory), got {len(args)}")
@@ -1167,22 +1169,25 @@ def _cmd_init() -> None:
         print(f"Error: {config_path} already exists")
         sys.exit(1)
 
-    static_dir = target / "static"
-    static_dir.mkdir(exist_ok=True)
-
-    config_path.write_text(_INIT_SERVER_TOML)
-    (static_dir / "index.html").write_text(_INIT_INDEX_HTML)
+    toml_content = _INIT_SERVER_TOML_BASE if no_static else _INIT_SERVER_TOML_BASE + _INIT_SERVER_TOML_STATIC
+    config_path.write_text(toml_content)
 
     try:
         rel = config_path.relative_to(Path.cwd())
     except ValueError:
         rel = config_path
     print(f"Created {rel}")
-    try:
-        rel_static = (static_dir / "index.html").relative_to(Path.cwd())
-    except ValueError:
-        rel_static = static_dir / "index.html"
-    print(f"Created {rel_static}")
+
+    if not no_static:
+        static_dir = target / "static"
+        static_dir.mkdir(exist_ok=True)
+        (static_dir / "index.html").write_text(_INIT_INDEX_HTML)
+        try:
+            rel_static = (static_dir / "index.html").relative_to(Path.cwd())
+        except ValueError:
+            rel_static = static_dir / "index.html"
+        print(f"Created {rel_static}")
+
     print()
     print("Start the server with:")
     if target.resolve() == Path.cwd().resolve():
@@ -1191,7 +1196,7 @@ def _cmd_init() -> None:
         print(f"  cd {target} && mkio serve")
 
 
-_INIT_SERVER_TOML = """\
+_INIT_SERVER_TOML_BASE = """\
 port = 8080
 host = "0.0.0.0"
 db_path = "data.db"
@@ -1322,6 +1327,9 @@ protocol = "reqrep"
 description = "Pure computation, no database"
 reply = { length = "LEN(value)", label = "UPPER(name)" }
 
+"""
+
+_INIT_SERVER_TOML_STATIC = """\
 # --- Static file serving ---
 
 [static]

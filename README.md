@@ -601,6 +601,7 @@ mkio dbupdate custom.toml           # Use a specific config file
 ```bash
 mkio init                           # Create server.toml + static/ in current directory
 mkio init ./my-project              # Create in a specific directory
+mkio init --no-static               # Config only, no static/index.html
 ```
 
 ### Error handling

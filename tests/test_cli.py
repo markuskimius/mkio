@@ -745,3 +745,153 @@ class TestNormalizeUrl:
 
     def test_ws_url_bare_port(self):
         assert self.normalize_ws("8080") == "ws://localhost:8080/ws"
+
+
+# ---- mkio init tests ---------------------------------------------------------
+
+
+def test_init_creates_config_and_static(tmp_path):
+    import subprocess, sys
+    target = tmp_path / "proj"
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "init", str(target)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert (target / "server.toml").exists()
+    assert (target / "static" / "index.html").exists()
+    config = (target / "server.toml").read_text()
+    assert "[static]" in config
+    assert 'port = 8080' in config
+
+
+def test_init_no_static_skips_static_dir(tmp_path):
+    import subprocess, sys
+    target = tmp_path / "proj"
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "init", "--no-static", str(target)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert (target / "server.toml").exists()
+    assert not (target / "static").exists()
+    config = (target / "server.toml").read_text()
+    assert "[static]" not in config
+
+
+def test_init_no_static_config_is_valid(tmp_path):
+    import subprocess, sys, tomllib
+    target = tmp_path / "proj"
+    subprocess.run(
+        [sys.executable, "-m", "mkio", "init", "--no-static", str(target)],
+        capture_output=True, text=True,
+    )
+    config = tomllib.loads((target / "server.toml").read_text())
+    assert config["port"] == 8080
+    assert "tables" in config
+    assert "services" in config
+    assert "static" not in config
+
+
+def test_init_default_config_is_valid(tmp_path):
+    import subprocess, sys, tomllib
+    target = tmp_path / "proj"
+    subprocess.run(
+        [sys.executable, "-m", "mkio", "init", str(target)],
+        capture_output=True, text=True,
+    )
+    config = tomllib.loads((target / "server.toml").read_text())
+    assert config["port"] == 8080
+    assert "static" in config
+
+
+def test_init_refuses_existing_config(tmp_path):
+    import subprocess, sys
+    target = tmp_path / "proj"
+    target.mkdir()
+    (target / "server.toml").write_text("port = 9999\n")
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "init", str(target)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "already exists" in result.stdout
+
+
+def test_init_current_dir(tmp_path, monkeypatch):
+    import subprocess, sys
+    monkeypatch.chdir(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "init"],
+        capture_output=True, text=True,
+        cwd=str(tmp_path),
+    )
+    assert result.returncode == 0
+    assert (tmp_path / "server.toml").exists()
+    assert (tmp_path / "static" / "index.html").exists()
+
+
+def test_init_no_static_flag_order(tmp_path):
+    import subprocess, sys
+    target = tmp_path / "proj"
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "init", str(target), "--no-static"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert not (target / "static").exists()
+
+
+def test_init_unknown_flag(tmp_path):
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "init", "--bogus", str(tmp_path / "proj")],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "Unknown option" in result.stdout
+
+
+def test_init_too_many_args(tmp_path):
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "init", "a", "b"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "takes at most 1 argument" in result.stdout
+
+
+def test_init_creates_parent_dirs(tmp_path):
+    import subprocess, sys
+    target = tmp_path / "deep" / "nested" / "proj"
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "init", str(target)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert (target / "server.toml").exists()
+
+
+def test_init_output_mentions_created_files(tmp_path):
+    import subprocess, sys
+    target = tmp_path / "proj"
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "init", str(target)],
+        capture_output=True, text=True,
+    )
+    assert "server.toml" in result.stdout
+    assert "index.html" in result.stdout
+    assert "mkio serve" in result.stdout
+
+
+def test_init_no_static_output_omits_index(tmp_path):
+    import subprocess, sys
+    target = tmp_path / "proj"
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "init", "--no-static", str(target)],
+        capture_output=True, text=True,
+    )
+    assert "server.toml" in result.stdout
+    assert "index.html" not in result.stdout
+    assert "mkio serve" in result.stdout
