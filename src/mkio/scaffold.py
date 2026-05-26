@@ -132,7 +132,7 @@ protocol = "stream"
 description = "Append-only activity log"
 primary_table = "audit"
 watch_tables = ["audit"]
-sql = "SELECT audit.id, audit.action, audit.name, audit.category FROM audit"
+sql = "SELECT audit.id, audit.action, audit.name, audit.category, audit._mkio_ref FROM audit"
 buffer_size = 5000
 filterable = ["action"]
 
@@ -141,6 +141,7 @@ id = "id"
 action = "action"
 name = "name"
 category = "category"
+_mkio_ref = "_mkio_ref"
 
 # --- Query service ---
 
