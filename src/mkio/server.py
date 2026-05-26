@@ -17,7 +17,6 @@ from aiohttp import web
 from mkio._json import dumps, loads
 from mkio._ref import next_ref
 from mkio.change_bus import ChangeBus
-from mkio.config import load_config
 from mkio.database import Database
 from mkio.services.base import Service
 from mkio.services.info import InfoService
@@ -45,71 +44,9 @@ def serve(config: str | Path | dict[str, Any]) -> None:
     Args:
         config: Path to TOML file, or config dict.
     """
-    cfg = load_config(config)
-
-    # Try uvloop
-    try:
-        import uvloop
-        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    except ImportError:
-        pass
-
-    app = web.Application()
-    app["config"] = cfg
-
-    app.on_startup.append(_on_startup)
-    app.on_shutdown.append(_on_shutdown)
-
-    # API routes
-    app.router.add_get("/api/services", _api_services)
-    app.router.add_get("/api/services/{service_name}", _api_service_detail)
-
-    # WebSocket routes
-    app.router.add_get("/ws", _ws_handler)
-    app.router.add_get("/ws/{service_name}", _ws_handler)
-
-    # Serve JS client library
-    js_path = Path(__file__).parent / "client" / "mkio.js"
-    if js_path.exists():
-        async def serve_js(request: web.Request) -> web.FileResponse:
-            return web.FileResponse(
-                js_path, headers={"Content-Type": "application/javascript"}
-            )
-        app.router.add_get("/mkio.js", serve_js)
-
-    # Config file routes (TOML-to-JSON conversion)
-    for route, directory in cfg.get("config", {}).items():
-        config_path = Path(directory).resolve()
-        route_pattern = route.rstrip("/") + "/{path:.*}"
-        app.router.add_get(route_pattern, _make_config_handler(config_path))
-
-    # Static file routes
-    for route, directory in cfg.get("static", {}).items():
-        path = Path(directory).resolve()
-        if route == "/":
-            app.router.add_get("/", _make_index_handler(path))
-            app.router.add_static("/static", path)
-        else:
-            app.router.add_static(route, path)
-
-    # Run migration before starting the event loop so SystemExit propagates cleanly
-    db_path = cfg.get("db_path", "mkio.db")
-    if db_path != ":memory:" and cfg.get("tables"):
-        from mkio.database import Database
-        db_pre = Database(path=db_path, tables=cfg["tables"], config=cfg)
-        db_pre._run_migration()
-
-    # Validate service startup before entering run_app's event loop.
-    # SystemExit raised inside asyncio tasks is swallowed by the event loop
-    # (Python issue #22429), so we pre-check here where it propagates normally.
-    asyncio.run(_preflight_services(cfg))
-
-    web.run_app(
-        app,
-        host=cfg.get("host", "0.0.0.0"),
-        port=cfg.get("port", 8080),
-        shutdown_timeout=cfg.get("shutdown_timeout", 0),
-    )
+    from mkio.app import create_app
+    app = create_app(config)
+    app.run()
 
 
 def _make_index_handler(static_path: Path):

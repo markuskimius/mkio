@@ -12,6 +12,7 @@ A single TCP port serves HTTP and WebSocket, backed by an embedded SQLite databa
 
 - [Quick Start](#quick-start)
 - [Features](#features)
+- [Programmatic API](#programmatic-api)
 - [Service Types](#service-types)
 - [WebSocket Protocol](#websocket-protocol)
 - [Client Libraries](#client-libraries)
@@ -65,6 +66,8 @@ serve("server.toml")
 serve({...})  # or pass a dict
 ```
 
+For programmatic control (custom routes, non-blocking lifecycle), see [Programmatic API](#programmatic-api).
+
 ## Features
 
 - **Single port** — HTTP pages and WebSocket messages on one port
@@ -86,6 +89,91 @@ serve({...})  # or pass a dict
 - **Connection identity** — built-in `_mkio` reqrep service reports server name, version, framework version, protocol version, services, tables, config hash, and uptime — lets clients verify they're connected to the correct session
 - **Config endpoint** — `/config` path serves TOML files as JSON (request `foo.json`, server reads `foo.toml` and returns JSON); falls back to literal `.json` files; other extensions served as-is
 - **CLI tools** — send transactions, subscribe to live data, monitor traffic, inspect services
+- **Programmatic API** — `create_app()` returns a controllable server handle with async `start()`/`stop()` lifecycle, custom HTTP route injection, and non-blocking operation for embedding in larger applications
+
+## Programmatic API
+
+For applications that embed mkio (e.g., adding custom HTTP routes or controlling server lifecycle), use `create_app()` instead of `serve()`.
+
+### `create_app(config, *, routes=None) -> MkioApp`
+
+Creates a server instance from a TOML file path or config dict.
+
+```python
+import asyncio
+from aiohttp import web
+from mkio import create_app
+
+async def health(request: web.Request) -> web.Response:
+    return web.json_response({"ok": True})
+
+app = create_app("server.toml", routes=[
+    ("GET", "/health", health),
+    ("POST", "/api/custom", my_handler),
+])
+
+# Blocking (like serve())
+app.run()
+
+# Or async for non-blocking control
+async def main():
+    await app.start()       # binds port, begins serving
+    # ... do other async work ...
+    await app.wait()        # blocks until stop() or signal
+
+asyncio.run(main())
+```
+
+### `MkioApp` methods
+
+| Method | Description |
+|--------|-------------|
+| `add_routes(routes)` | Add `(method, path, handler)` tuples before starting. Raises `RuntimeError` if already running. |
+| `async start()` | Non-blocking start — runs migration, preflight, binds the port. |
+| `async stop()` | Graceful shutdown — drains writes, closes WebSockets, checkpoints DB. Idempotent. |
+| `async wait()` | Blocks until `stop()` is called or a signal fires. |
+| `run()` | Blocking convenience: starts, installs signal handlers, waits. Tries uvloop if available. |
+| `.config` | The resolved config dict (read-only property). |
+
+Supported HTTP methods for routes: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`.
+
+### `get_default_config() -> dict`
+
+Returns the default scaffold config (what `mkio init` writes) as a Python dict. Modify it before passing to `create_app()`:
+
+```python
+from mkio import create_app, get_default_config
+
+cfg = get_default_config()
+cfg["port"] = 9090
+cfg["db_path"] = ":memory:"
+cfg["tables"]["widgets"] = {
+    "columns": {"id": "INTEGER PRIMARY KEY", "name": "TEXT"},
+}
+cfg["services"]["widgets"] = {
+    "protocol": "subpub",
+    "primary_table": "widgets",
+    "topic": "id",
+}
+app = create_app(cfg)
+app.run()
+```
+
+### `init(directory, *, no_static=False) -> list[Path]`
+
+Programmatic equivalent of `mkio init`. Creates project files and returns the list of paths created.
+
+```python
+from mkio import init
+
+created = init("./my-project")
+# [Path('my-project/server.toml'), Path('my-project/static/index.html')]
+
+created = init("./api-only", no_static=True)
+# [Path('api-only/server.toml')]
+```
+
+Raises `FileExistsError` if `server.toml` already exists in the target directory.
 
 ## Service Types
 

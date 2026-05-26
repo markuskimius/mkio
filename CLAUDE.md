@@ -7,7 +7,7 @@ Config-driven Python microservice framework. Single TCP port serves HTTP + WebSo
 ```bash
 pip install -e ".[dev]"        # Install with dev dependencies
 pip install -e ".[fast,dev]"   # With orjson + uvloop acceleration
-pytest tests/                  # Run all tests (266 tests)
+pytest tests/                  # Run all tests
 pytest tests/ -x -v            # Stop on first failure, verbose
 ```
 
@@ -15,6 +15,9 @@ pytest tests/ -x -v            # Stop on first failure, verbose
 
 ```
 src/mkio/
+├── __init__.py       # Public API: serve, create_app, MkioApp, init, get_default_config, Service, register_function
+├── app.py            # MkioApp class + create_app() factory — programmatic server lifecycle
+├── scaffold.py       # init() project scaffolding + get_default_config() + template strings
 ├── _json.py          # orjson-with-fallback (dumps -> bytes, loads)
 ├── _ref.py           # "YYYYMMDD HH:mm:ss.mmmuuunnnppp" ref strings
 ├── _expr.py          # Expression language: tokenizer, parser, evaluator, array/map/index/LET
@@ -57,6 +60,28 @@ src/mkio/
 - **Field projection** — Subscribe messages may include `"fields": ["col1", "col2"]` to receive only the specified columns in each row. Filtering still operates on the full row before projection. Both Query and SubPub preserve all `_mkio_` prefixed fields (`_mkio_row`, `_mkio_ref`, `_mkio_topic`, `_mkio_exists`) through projection. Stored on the subscriber dataclass and applied at output time.
 - **Stream pagination** — Stream subscribe messages may include `"maxcount": N` (positive integer) to paginate the snapshot. The server returns at most N rows with `"hasmore": true/false` and does **not** create a live subscription (returns 0). The snapshot `ref` is set to the ref of the last row in the page, serving as the cursor for the next request. The client pages forward by sending a new subscribe with the returned ref and the same maxcount. Once `hasmore` is `false`, the client can subscribe without maxcount (using the final ref) to go live. This is completely stateless on the server — the ring buffer is the only state. Stream subscribe no longer requires a `ref`; omitting it starts from the beginning of the buffer.
 - **Query pagination** — Query subscribe messages may include `"maxcount": N` (positive integer) to paginate the snapshot. The server sends at most N rows per snapshot message with `"hasmore": true/false`. All snapshots include `hasmore` (even without pagination, where it's always `false`). If no `subid` is provided with `maxcount`, the server auto-assigns one (prefixed `_mkio_q_`). The client sends `{"type": "getmore", "service": "...", "subid": "..."}` to fetch subsequent pages. Updates arriving during pagination are buffered and delivered as a burst after the final page. The effective buffer cap is `max(configured_max_buffer, snapshot_size + maxcount)`, guaranteeing at least one page worth of updates before overflow. On overflow, the subscriber is kept with an `overflowed` flag; the next `getmore` receives a nack (`"subscription reset: update buffer overflow"`). Paginating subscribers that go idle for 60s are cleaned up automatically.
+
+## Public API
+
+The `mkio` package exports a stable programmatic API for embedding mkio in other Python applications. These are the public symbols in `__init__.py`:
+
+- **`serve(config)`** — Blocking entry point. Takes `str | Path | dict`. Delegates to `create_app(config).run()`.
+- **`create_app(config, *, routes=None) -> MkioApp`** — Factory that loads config and returns a controllable server handle. `routes` is an optional list of `(method, path, handler)` tuples for custom HTTP endpoints.
+- **`MkioApp`** — Server lifecycle wrapper. Key methods:
+  - `add_routes(routes)` — Add HTTP routes before starting. Raises `RuntimeError` if already running.
+  - `async start()` — Non-blocking server start (binds port, begins serving).
+  - `async stop()` — Graceful shutdown (drains writes, closes connections, checkpoints DB). Idempotent.
+  - `async wait()` — Blocks until `stop()` is called or a signal is received.
+  - `run()` — Blocking convenience: `asyncio.run(start + wait)` with signal handling and optional uvloop.
+  - `.config` — Property returning the resolved config dict.
+- **`init(directory, *, no_static=False) -> list[Path]`** — Scaffold project files (server.toml, static/index.html). Raises `FileExistsError` if server.toml already exists.
+- **`get_default_config() -> dict`** — Returns the scaffold template config as a Python dict (includes static section). Callers can modify before passing to `create_app()`.
+- **`Service`** — Base class for custom service protocols.
+- **`register_function(name, fn)`** — Register a custom function for the expression language.
+
+**Stability**: From mkio 1.0, these exports follow semver — no removal or signature-breaking changes within a major version. New keyword arguments and new exports are allowed in minor versions.
+
+**Implementation**: `app.py` contains `MkioApp` and `create_app()`. `scaffold.py` contains `init()`, `get_default_config()`, and the template strings. `server.py` retains the internal aiohttp handlers (`_on_startup`, `_on_shutdown`, `_ws_handler`, etc.) imported by `app.py`.
 
 ## Conventions
 
