@@ -71,6 +71,16 @@ def load_config(source: str | Path | dict[str, Any]) -> dict[str, Any]:
     for key, default in _DEFAULTS.items():
         config.setdefault(key, default)
 
+    # Validate auto_migrate
+    am = config.get("auto_migrate", False)
+    if am is not False and am is not True:
+        if am not in ("safe", "risky", "destructive"):
+            raise ValueError(
+                f"auto_migrate must be false, \"safe\", \"risky\", or \"destructive\", got {am!r}"
+            )
+    if am is True:
+        config["auto_migrate"] = "safe"
+
     config.setdefault("tables", {})
     config.setdefault("services", {})
     config.setdefault("static", {})

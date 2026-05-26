@@ -11,6 +11,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 from aiohttp import web
 
 from mkio._json import dumps, loads
@@ -90,6 +91,18 @@ def serve(config: str | Path | dict[str, Any]) -> None:
             app.router.add_static("/static", path)
         else:
             app.router.add_static(route, path)
+
+    # Run migration before starting the event loop so SystemExit propagates cleanly
+    db_path = cfg.get("db_path", "mkio.db")
+    if db_path != ":memory:" and cfg.get("tables"):
+        from mkio.database import Database
+        db_pre = Database(path=db_path, tables=cfg["tables"], config=cfg)
+        db_pre._run_migration()
+
+    # Validate service startup before entering run_app's event loop.
+    # SystemExit raised inside asyncio tasks is swallowed by the event loop
+    # (Python issue #22429), so we pre-check here where it propagates normally.
+    asyncio.run(_preflight_services(cfg))
 
     web.run_app(
         app,
@@ -520,6 +533,46 @@ def _build_send_example(
     return f"mkio send <url> {svc_name}{op_flag} '{data_str}'"
 
 
+async def _preflight_services(cfg: dict[str, Any]) -> None:
+    """Validate service startup before entering the main event loop.
+
+    Opens a temporary DB connection and starts each service to surface
+    errors (e.g. bad SQL) that would otherwise be swallowed by asyncio.
+    """
+    db = Database(
+        path=cfg.get("db_path", "mkio.db"),
+        tables=cfg.get("tables", {}),
+        config=cfg,
+        skip_migration=True,
+    )
+    await db.start()
+    bus = ChangeBus()
+    writer = WriteBatcher(db=db, change_bus=bus, batch_max_size=1, batch_max_wait_ms=1000)
+    await writer.start()
+
+    services: list[Service] = []
+    try:
+        for svc_name, svc_config in cfg.get("services", {}).items():
+            svc_type = svc_config.get("protocol", "")
+            if svc_type not in SERVICE_TYPES:
+                continue
+            cls = SERVICE_TYPES[svc_type]
+            svc = cls(config=svc_config, db=db, change_bus=bus, writer=writer)
+            svc.name = svc_name
+            svc._monitor_notifier = lambda *a, **k: None
+            try:
+                await svc.start()
+            except Exception as exc:
+                print(f"Error starting service '{svc_name}': {exc}", file=sys.stderr)
+                raise SystemExit(1) from exc
+            services.append(svc)
+    finally:
+        for svc in services:
+            await svc.stop()
+        await writer.stop(drain=False)
+        await db.stop()
+
+
 async def _on_startup(app: web.Application) -> None:
     cfg = app["config"]
     started_ref = next_ref()
@@ -531,11 +584,12 @@ async def _on_startup(app: web.Application) -> None:
     # Track all active WebSocket connections for clean shutdown
     app.setdefault("websockets", set())
 
-    # Database
+    # Database (migration already ran in serve() before the event loop)
     db = Database(
         path=cfg.get("db_path", "mkio.db"),
         tables=cfg.get("tables", {}),
         config=cfg,
+        skip_migration=True,
     )
     await db.start()
     app["db"] = db
@@ -579,11 +633,7 @@ async def _on_startup(app: web.Application) -> None:
         svc = cls(config=svc_config, db=db, change_bus=bus, writer=writer)
         svc.name = svc_name
         svc._monitor_notifier = lambda sn, d, data, _app=app: _notify_monitors(_app, sn, d, data)
-        try:
-            await svc.start()
-        except Exception as exc:
-            print(f"Error starting service '{svc_name}': {exc}", file=sys.stderr)
-            raise SystemExit(1) from exc
+        await svc.start()
         services[svc_name] = svc
 
     # Built-in _mkio service
@@ -603,8 +653,12 @@ async def _on_startup(app: web.Application) -> None:
 
 async def _on_shutdown(app: web.Application) -> None:
     # 0. Close all WebSocket connections so handlers can exit
-    for ws in set(app.get("websockets", set())):
-        await ws.close()
+    wss = set(app.get("websockets", set()))
+    if wss:
+        await asyncio.wait(
+            [asyncio.create_task(ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"server shutdown")) for ws in wss],
+            timeout=2.0,
+        )
 
     # 1. Stop services
     for svc in app.get("services", {}).values():

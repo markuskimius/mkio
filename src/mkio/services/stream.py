@@ -76,7 +76,7 @@ class StreamService(Service):
             self._listener_task.cancel()
             try:
                 await self._listener_task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, Exception):
                 pass
         if self._bus_queue:
             watch = self.config.get("watch_tables", [self._table])

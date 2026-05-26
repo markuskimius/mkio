@@ -406,3 +406,36 @@ def test_filterable_shows_available_columns():
                 }
             },
         })
+
+
+# ---- auto_migrate validation ------------------------------------------------
+
+
+def test_auto_migrate_false():
+    config = load_config({"auto_migrate": False})
+    assert config["auto_migrate"] is False
+
+
+def test_auto_migrate_true_normalized_to_safe():
+    config = load_config({"auto_migrate": True})
+    assert config["auto_migrate"] == "safe"
+
+
+def test_auto_migrate_safe():
+    config = load_config({"auto_migrate": "safe"})
+    assert config["auto_migrate"] == "safe"
+
+
+def test_auto_migrate_risky():
+    config = load_config({"auto_migrate": "risky"})
+    assert config["auto_migrate"] == "risky"
+
+
+def test_auto_migrate_destructive():
+    config = load_config({"auto_migrate": "destructive"})
+    assert config["auto_migrate"] == "destructive"
+
+
+def test_auto_migrate_invalid_value():
+    with pytest.raises(ValueError, match="auto_migrate"):
+        load_config({"auto_migrate": "yolo"})

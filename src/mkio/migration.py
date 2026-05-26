@@ -83,6 +83,17 @@ def _get_pk_columns(parsed_cols: dict[str, dict]) -> list[str]:
     return [name for name, info in parsed_cols.items() if info["pk"]]
 
 
+def _build_col_defs(table_config: dict) -> str:
+    """Build column definitions string for CREATE TABLE, including composite PK."""
+    col_defs = ", ".join(
+        f"{col} {typ}" for col, typ in table_config["columns"].items()
+    )
+    pk = table_config.get("primary_key")
+    if pk:
+        col_defs += f", PRIMARY KEY({', '.join(pk)})"
+    return col_defs
+
+
 _NON_CONSTANT_DEFAULTS = {"CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"}
 
 
@@ -102,9 +113,7 @@ def diff_schema(
     # Tables in config but not in DB → new tables (safe)
     for table_name, table_config in config_tables.items():
         if table_name not in existing:
-            col_defs = ", ".join(
-                f"{col} {typ}" for col, typ in table_config["columns"].items()
-            )
+            col_defs = _build_col_defs(table_config)
             changes.append(SchemaChange(
                 table=table_name,
                 description=f"Create new table",
@@ -231,12 +240,12 @@ def _build_recreate_steps(
     config_cols = set(config_parsed.keys())
     shared = existing_cols & config_cols
 
-    col_defs = ", ".join(
-        f"{col} {typ}" for col, typ in config_table["columns"].items()
-    )
+    col_defs = _build_col_defs(config_table)
     shared_list = ", ".join(sorted(shared))
 
     config_pk = _get_pk_columns(config_parsed)
+    if not config_pk:
+        config_pk = list(config_table.get("primary_key", []))
     existing_pk = existing_table["pk_columns"]
     pk_changed = config_pk and existing_pk and config_pk != existing_pk
 
@@ -323,21 +332,45 @@ def apply_changes(
     return total_before, total_after
 
 
+_MIGRATE_LEVELS = ("safe", "risky", "destructive")
+
+
+def _allowed_levels(level: str) -> set[str]:
+    """Return the set of change levels permitted by the given migrate level."""
+    if level == "safe":
+        return {"safe"}
+    if level == "risky":
+        return {"safe", "potentially_destructive"}
+    if level == "destructive":
+        return {"safe", "potentially_destructive", "destructive"}
+    return set()
+
+
+def check_schema(
+    conn: sqlite3.Connection,
+    config_tables: dict[str, dict],
+) -> list[SchemaChange]:
+    """Return pending schema changes (empty list if schema is up to date)."""
+    existing = get_existing_schema(conn)
+    return diff_schema(existing, config_tables)
+
+
 def migrate_schema(
     conn: sqlite3.Connection,
     config_tables: dict[str, dict],
     db_path: str = "",
-    interactive: bool = True,
-    auto_migrate: bool = False,
+    level: str = "safe",
 ) -> bool:
-    """Run schema migration. Returns True if migration succeeded or no changes needed.
+    """Run schema migration at the given level.
 
     Args:
         conn: SQLite connection (write connection).
         config_tables: The "tables" section from config.
         db_path: Path to DB file (for display).
-        interactive: Whether a TTY is available for prompting.
-        auto_migrate: If True, apply all changes without prompting.
+        level: "safe", "risky", or "destructive".
+
+    Returns True if migration succeeded or no changes needed.
+    Returns False if there are changes beyond the allowed level.
     """
     existing = get_existing_schema(conn)
     changes = diff_schema(existing, config_tables)
@@ -345,39 +378,30 @@ def migrate_schema(
     if not changes:
         return True
 
-    safe_changes = [c for c in changes if c.level == "safe"]
-    risky_changes = [c for c in changes if c.level != "safe"]
+    allowed = _allowed_levels(level)
+    applicable = [c for c in changes if c.level in allowed]
+    blocked = [c for c in changes if c.level not in allowed]
 
-    if not risky_changes:
-        # All safe — apply automatically
-        apply_changes(conn, safe_changes)
-        for change in safe_changes:
-            print(f"  Applied (safe): {change.table} — {change.description}")
-        return True
-
-    # Has risky changes — need confirmation
-    print_change_summary(changes, db_path, conn)
-
-    if auto_migrate:
-        print("  auto_migrate=true, applying all changes...")
-        rows_before, rows_after = apply_changes(conn, changes)
+    if applicable:
+        rows_before, rows_after = apply_changes(conn, applicable)
+        for change in applicable:
+            print(f"  Applied ({change.level}): {change.table} — {change.description}")
         if rows_before > rows_after:
             print(f"  Note: {rows_before - rows_after} rows were deduplicated during migration")
-        return True
 
-    if not interactive or not sys.stdin.isatty():
-        print("  ERROR: Destructive/potentially destructive changes require confirmation.")
-        print("  Run interactively or set auto_migrate=true in config.")
+    if blocked:
+        print()
+        print("  Blocked changes (require higher migration level):")
+        for change in blocked:
+            print(f"    [{change.level}] {change.table} — {change.description}")
+            if change.data_impact:
+                print(f"      Impact: {change.data_impact}")
+        if level == "safe":
+            print()
+            print("  To apply: mkio dbupdate --allow-risky  or  mkio dbupdate --allow-destructive")
+        elif level == "risky":
+            print()
+            print("  To apply: mkio dbupdate --allow-destructive")
         return False
 
-    # Interactive prompt
-    response = input("  Apply these changes? [y/N] ").strip().lower()
-    if response != "y":
-        print("  Migration cancelled.")
-        return False
-
-    rows_before, rows_after = apply_changes(conn, changes)
-    if rows_before > rows_after:
-        print(f"  Note: {rows_before - rows_after} rows were deduplicated during migration")
-    print("  Schema changes applied successfully.")
     return True

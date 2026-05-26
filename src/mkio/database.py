@@ -10,14 +10,15 @@ from typing import Any
 
 import aiosqlite
 
-from mkio.migration import migrate_schema
+from mkio.migration import check_schema, migrate_schema
 
 
 class Database:
-    def __init__(self, path: str, tables: dict[str, dict], config: dict[str, Any] | None = None):
+    def __init__(self, path: str, tables: dict[str, dict], config: dict[str, Any] | None = None, *, skip_migration: bool = False):
         self._path = path
         self._tables = tables
         self._config = config or {}
+        self._skip_migration = skip_migration
         self._write_conn: aiosqlite.Connection | None = None
         self._read_conn: aiosqlite.Connection | None = None
         self._checkpoint_task: asyncio.Task[None] | None = None
@@ -26,9 +27,7 @@ class Database:
         """Open connections, run migration, set pragmas."""
         is_memory = self._path == ":memory:"
 
-        # Run migration synchronously before opening async connections
-        # (migration needs interactive prompting which doesn't work well with async)
-        if not is_memory:
+        if not is_memory and not self._skip_migration:
             self._run_migration()
 
         if is_memory:
@@ -51,10 +50,9 @@ class Database:
 
         # Create tables for :memory: databases (migration doesn't run for them)
         if is_memory:
+            from mkio.migration import _build_col_defs
             for name, spec in self._tables.items():
-                col_defs = ", ".join(
-                    f"{col} {typ}" for col, typ in spec["columns"].items()
-                )
+                col_defs = _build_col_defs(spec)
                 await (await self._write_conn.execute(
                     f"CREATE TABLE IF NOT EXISTS {name} ({col_defs})"
                 )).close()
@@ -83,24 +81,33 @@ class Database:
 
     def _run_migration(self) -> None:
         """Run schema migration synchronously."""
-        # Backup before migration if configured
         if self._config.get("backup_on_startup") and Path(self._path).exists():
             self._create_backup_sync()
 
         conn = sqlite3.connect(self._path)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
-            # Create tables that don't exist
-            success = migrate_schema(
-                conn=conn,
-                config_tables=self._tables,
-                db_path=self._path,
-                interactive=True,
-                auto_migrate=self._config.get("auto_migrate", False),
-            )
-            if not success:
-                conn.close()
-                raise SystemExit(1)
+            auto_migrate = self._config.get("auto_migrate", False)
+            if auto_migrate:
+                level = auto_migrate if isinstance(auto_migrate, str) else "safe"
+                success = migrate_schema(
+                    conn=conn,
+                    config_tables=self._tables,
+                    db_path=self._path,
+                    level=level,
+                )
+                if not success:
+                    conn.close()
+                    raise SystemExit(1)
+            else:
+                changes = check_schema(conn, self._tables)
+                if changes:
+                    from mkio.migration import print_change_summary
+                    print_change_summary(changes, self._path, conn)
+                    print("  Schema out of date. Run 'mkio dbupdate' to apply changes,")
+                    print("  or set auto_migrate in config to apply on startup.")
+                    conn.close()
+                    raise SystemExit(1)
         finally:
             conn.close()
 

@@ -587,6 +587,22 @@ The `--filter` flag accepts any expression from the [expression language](#expre
 
 The monitor protocol is a native framework feature — any mkio application supports it.
 
+### Schema management
+
+```bash
+mkio dbupdate                       # Apply safe schema changes
+mkio dbupdate --allow-risky         # Include potentially destructive changes
+mkio dbupdate --allow-destructive   # Include all changes
+mkio dbupdate custom.toml           # Use a specific config file
+```
+
+### Initialize a project
+
+```bash
+mkio init                           # Create server.toml + static/ in current directory
+mkio init ./my-project              # Create in a specific directory
+```
+
 ### Error handling
 
 All CLI commands show clean error messages instead of Python tracebacks. Common scenarios:
@@ -636,13 +652,29 @@ Runtime error messages include context to help debugging:
 
 ## Schema Migration
 
-When the config schema changes between restarts, mkio detects and classifies each difference:
+When the config schema changes, mkio detects and classifies each difference:
 
-- **Safe** (new table, nullable column) — applied automatically
-- **Potentially destructive** (type change, PK change) — requires confirmation
-- **Destructive** (remove column/table) — requires confirmation
+| Level | Examples | Risk |
+|-------|----------|------|
+| **Safe** | New table, nullable column, column with default | None |
+| **Potentially destructive** | Type change, PK change | Values may not convert; duplicates may be dropped |
+| **Destructive** | Remove column/table | Data loss |
 
-Set `auto_migrate = true` in config for non-interactive environments.
+By default, `mkio serve` refuses to start if the database schema differs from config. Use `mkio dbupdate` to apply changes explicitly:
+
+```bash
+mkio dbupdate                       # Apply safe changes only
+mkio dbupdate --allow-risky         # Also apply potentially destructive changes
+mkio dbupdate --allow-destructive   # Apply all changes (including data loss)
+```
+
+For automatic migration on startup, set `auto_migrate` in config:
+
+```toml
+auto_migrate = "safe"          # Apply safe changes on startup (same as true)
+auto_migrate = "risky"         # Also apply potentially destructive
+auto_migrate = "destructive"   # Apply all changes on startup
+```
 
 ## License
 

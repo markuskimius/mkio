@@ -83,7 +83,7 @@ class SubPubService(Service):
             self._listener_task.cancel()
             try:
                 await self._listener_task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, Exception):
                 pass
         if self._bus_queue:
             watch = self.config.get("watch_tables", [self._table])
@@ -187,6 +187,11 @@ class SubPubService(Service):
 
         Returns True (row exists), False (row removed), or None (no change).
         """
+        if event.op == "delete":
+            if topic_val in self._cache:
+                self._cache.pop(topic_val)
+                return False
+            return None
         passes_where = not self._where or self._where(event.row)
         if event.op in ("insert", "update", "upsert"):
             if passes_where:
@@ -194,11 +199,6 @@ class SubPubService(Service):
                 row["_mkio_ref"] = event.ref
                 self._cache[topic_val] = row
                 return True
-            return None
-        if event.op == "delete":
-            if topic_val in self._cache:
-                self._cache.pop(topic_val)
-                return False
             return None
         return None
 

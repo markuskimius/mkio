@@ -86,13 +86,13 @@ class QueryService(Service):
             self._listener_task.cancel()
             try:
                 await self._listener_task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, Exception):
                 pass
         if self._timeout_task:
             self._timeout_task.cancel()
             try:
                 await self._timeout_task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, Exception):
                 pass
         if self._bus_queue:
             watch = self.config.get("watch_tables", [self._table])
@@ -302,21 +302,28 @@ class QueryService(Service):
             dead: list[QuerySubscriber] = []
             notified_monitor = False
             rid = self._row_id(row)
+            is_delete = event.op == "delete"
 
             # Buffer for paginating subscribers
             for sub in self._pending.values():
                 if sub.overflowed:
                     continue
-                out_row = sub.formatter(row) if sub.formatter else row
-                if sub.filter_fn and not sub.filter_fn(out_row):
+                out_row = sub.formatter(row) if sub.formatter and not is_delete else row
+                if is_delete:
+                    if sub.sent_rows is not None and rid is not None and rid not in sub.sent_rows:
+                        continue
+                    if sub.sent_rows is not None and rid is not None:
+                        sub.sent_rows.discard(rid)
+                elif sub.filter_fn and not sub.filter_fn(out_row):
                     if sub.sent_rows is not None and rid is not None and rid in sub.sent_rows:
                         sub.sent_rows.discard(rid)
                         tagged = self._project(self._tag_row(row, out_row), sub.fields)
                         msg_bytes = make_update(self.name, ref=None, op="delete", row=tagged, subid=sub.subid)
                         sub.buffered_updates.append(msg_bytes)
                     continue
-                if sub.sent_rows is not None and rid is not None:
-                    sub.sent_rows.add(rid)
+                else:
+                    if sub.sent_rows is not None and rid is not None:
+                        sub.sent_rows.add(rid)
                 tagged = self._project(self._tag_row(row, out_row), sub.fields)
                 msg_bytes = make_update(self.name, ref=None, op=event.op, row=tagged, subid=sub.subid)
                 sub.buffered_updates.append(msg_bytes)
@@ -328,8 +335,13 @@ class QueryService(Service):
 
             # Fan out to live subscribers
             for sub in self._subscribers:
-                out_row = sub.formatter(row) if sub.formatter else row
-                if sub.filter_fn and not sub.filter_fn(out_row):
+                out_row = sub.formatter(row) if sub.formatter and not is_delete else row
+                if is_delete:
+                    if sub.sent_rows is not None and rid is not None and rid not in sub.sent_rows:
+                        continue
+                    if sub.sent_rows is not None and rid is not None:
+                        sub.sent_rows.discard(rid)
+                elif sub.filter_fn and not sub.filter_fn(out_row):
                     if sub.sent_rows is not None and rid is not None and rid in sub.sent_rows:
                         sub.sent_rows.discard(rid)
                         try:
@@ -342,8 +354,9 @@ class QueryService(Service):
                         except (ConnectionError, RuntimeError):
                             dead.append(sub)
                     continue
-                if sub.sent_rows is not None and rid is not None:
-                    sub.sent_rows.add(rid)
+                else:
+                    if sub.sent_rows is not None and rid is not None:
+                        sub.sent_rows.add(rid)
                 try:
                     tagged = self._project(self._tag_row(row, out_row), sub.fields)
                     msg_bytes = make_update(self.name, ref=None, op=event.op, row=tagged, subid=sub.subid)
