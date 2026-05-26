@@ -137,6 +137,7 @@ buffer_size = 5000
 filterable = ["action"]
 
 [services.feed.publish]
+id = "id"
 action = "action"
 name = "name"
 category = "category"
