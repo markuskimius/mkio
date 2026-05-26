@@ -594,6 +594,7 @@ const MKIO_HELP = [
   'mkio.query("<svc>", {filter, fields, subid,          subscribe to a query service',
   '                     snapshotOnly, updateOnly})',
   'mkio.reqrep("<service>", data, {reqid})              send a request-reply message',
+  'mkio.schema("<table>")                               show table schema (columns, types, keys)',
   'mkio.check({version, protocol, mkio})               check version compatibility',
   'mkio.instances()                                     list live MkioClient instances',
 ].join("\n");
@@ -945,6 +946,40 @@ const mkio = {
         for (const [k, v] of Object.entries(row.compatibility || {})) {
           lines.push(`    ${k}: ${row[k] || "?"} (${v ? "ok" : "MISMATCH"})`);
         }
+      }
+      console.log(lines.join("\n"));
+      return result;
+    });
+  },
+  schema(table) {
+    if (!table || typeof table !== "string") {
+      console.warn("mkio.schema: table name is required (string)");
+      return undefined;
+    }
+    const client = _mkioPickClient();
+    if (!client) return null;
+    return client.request("_mkio", { table }, {}).then(result => {
+      if (result.type === "error") {
+        console.warn(`Error: ${result.message}`);
+        return result;
+      }
+      const row = result.row || {};
+      const columns = row.columns || [];
+      if (columns.length === 0) {
+        console.log(`Table ${table}: no columns`);
+        return result;
+      }
+      const nameW = Math.max(6, ...columns.map(c => c.name.length));
+      const typeW = Math.max(4, ...columns.map(c => c.type.length));
+      const lines = [];
+      lines.push(`${"COLUMN".padEnd(nameW)}  ${"TYPE".padEnd(typeW)}  FLAGS`);
+      lines.push(`${"-".repeat(nameW)}  ${"-".repeat(typeW)}  ${"-".repeat(20)}`);
+      for (const col of columns) {
+        const flags = [];
+        if (col.pk) flags.push("pk");
+        if (col.notnull) flags.push("not null");
+        if (col.dflt_value != null) flags.push(`default=${col.dflt_value}`);
+        lines.push(`${col.name.padEnd(nameW)}  ${col.type.padEnd(typeW)}  ${flags.join(", ")}`);
       }
       console.log(lines.join("\n"));
       return result;

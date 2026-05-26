@@ -81,11 +81,47 @@ class InfoService(Service):
         await self.notify_monitors("out", resp)
         return 0
 
+    async def _handle_schema(
+        self, ws: WebSocketResponse, table: str, reqid: str | None
+    ) -> None:
+        config_tables = self._server_config.get("tables", {})
+        if table not in config_tables:
+            available = list(config_tables.keys())
+            resp = make_error(
+                self.name,
+                f"Unknown table: {table!r} (available: {', '.join(available)})",
+                reqid=reqid,
+            )
+            await ws.send_bytes(resp)
+            await self.notify_monitors("out", resp)
+            return
+
+        rows = await self.db.read(f"PRAGMA table_info({table})")
+        columns = [
+            {
+                "name": r["name"],
+                "type": r["type"],
+                "notnull": bool(r["notnull"]),
+                "pk": bool(r["pk"]),
+                "dflt_value": r["dflt_value"],
+            }
+            for r in rows
+        ]
+        resp = make_reply(self.name, row={"table": table, "columns": columns}, reqid=reqid)
+        await ws.send_bytes(resp)
+        await self.notify_monitors("out", resp)
+
     async def on_message(
         self, ws: WebSocketResponse, msg: dict[str, Any]
     ) -> None:
         reqid = msg.get("reqid")
         try:
+            data = msg.get("data")
+
+            if isinstance(data, dict) and "table" in data:
+                await self._handle_schema(ws, data["table"], reqid)
+                return
+
             services_map = {
                 name: svc.config.get("protocol", "unknown")
                 for name, svc in self._server_services.items()
@@ -110,7 +146,6 @@ class InfoService(Service):
                 "uptime": uptime,
                 "started": self._started_ref,
             }
-            data = msg.get("data")
             if isinstance(data, dict):
                 version_keys = ("version", "protocol", "mkio")
                 checks = {k: data[k] for k in version_keys if k in data}

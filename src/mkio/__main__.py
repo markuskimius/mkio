@@ -25,7 +25,7 @@ _PROTOCOL_CLI_HINT = {
 }
 
 
-_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep", "check", "dbupdate", "init")
+_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep", "check", "dbupdate", "init", "schema")
 
 
 def main() -> None:
@@ -63,6 +63,8 @@ def main() -> None:
         _cmd_check()
     elif cmd == "dbupdate":
         _cmd_dbupdate()
+    elif cmd == "schema":
+        _cmd_schema()
     elif cmd == "init":
         _cmd_init()
     else:
@@ -89,6 +91,7 @@ def _usage() -> None:
     print("                                   Subscribe to a query service")
     print("  mkio reqrep <url> <service> [data]")
     print("                                   Send a request-reply query (JSON or key=value)")
+    print("  mkio schema <url> <table>        Show table schema (columns, types, keys)")
     print("  mkio check <url> [version=... protocol=... mkio=...]")
     print("                                   Check version compatibility with server")
     print("  mkio dbupdate [server.toml] [--allow-risky] [--allow-destructive]")
@@ -1146,6 +1149,55 @@ async def _check_request(ws_url: str, data: dict[str, Any]) -> None:
                 label = "ok" if v else "MISMATCH"
                 print(f"    {k}: {row.get(k, '?')} ({label})")
             sys.exit(0 if row["compatible"] else 1)
+
+
+def _cmd_schema() -> None:
+    usage = "mkio schema <url> <table>"
+    args = sys.argv[2:]
+    _check_unknown_flags(args, set(), usage)
+    if len(args) < 2:
+        print(f"Usage: {usage}")
+        print("  e.g. mkio schema 8080 orders")
+        sys.exit(1)
+    if len(args) > 2:
+        print(f"Error: 'schema' takes exactly 2 arguments (url table), got {len(args)}")
+        print(f"Usage: {usage}")
+        sys.exit(1)
+
+    url = args[0]
+    table = args[1]
+    ws_url = _normalize_ws_url(url)
+    _run_client_command(ws_url, _schema_request(ws_url, table))
+
+
+async def _schema_request(ws_url: str, table: str) -> None:
+    from mkio.client import MkioClient
+
+    async with MkioClient(ws_url, reconnect=False) as client:
+        result = await client.request("_mkio", {"table": table})
+        if result.get("type") == "error":
+            print(f"Error: {result.get('message', 'unknown error')}")
+            sys.exit(1)
+        row = result.get("row", {})
+        columns = row.get("columns", [])
+        if not columns:
+            print(f"Table {table!r}: no columns")
+            return
+        name_w = max(len(c["name"]) for c in columns)
+        type_w = max(len(c["type"]) for c in columns)
+        name_w = max(name_w, 6)  # "COLUMN"
+        type_w = max(type_w, 4)  # "TYPE"
+        print(f"{'COLUMN':<{name_w}}  {'TYPE':<{type_w}}  FLAGS")
+        print(f"{'-' * name_w}  {'-' * type_w}  {'-' * 20}")
+        for col in columns:
+            flags = []
+            if col["pk"]:
+                flags.append("pk")
+            if col["notnull"]:
+                flags.append("not null")
+            if col["dflt_value"] is not None:
+                flags.append(f"default={col['dflt_value']}")
+            print(f"{col['name']:<{name_w}}  {col['type']:<{type_w}}  {', '.join(flags)}")
 
 
 def _cmd_init() -> None:

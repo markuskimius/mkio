@@ -574,3 +574,351 @@ async def test_mkio_version_compat_mismatch_integration(client):
     assert row["compatible"] is False
     assert row["compatibility"] == {"protocol": False}
     await ws.close()
+
+
+# ---- Schema query tests (unit) ---------------------------------------------
+
+async def test_schema_reply_shape(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "reqid": "s1", "data": {"table": "orders"}})
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 1
+    msg = msgs[0]
+    assert msg["type"] == "reply"
+    assert msg["service"] == "_mkio"
+    assert msg["reqid"] == "s1"
+    row = msg["row"]
+    assert row["table"] == "orders"
+    assert isinstance(row["columns"], list)
+    assert len(row["columns"]) >= 2
+
+
+async def test_schema_column_names(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "reqid": "s1", "data": {"table": "orders"}})
+
+    columns = ws.get_messages()[0]["row"]["columns"]
+    col_names = [c["name"] for c in columns]
+    assert "id" in col_names
+    assert "symbol" in col_names
+    assert "_mkio_ref" in col_names
+
+
+async def test_schema_column_fields(db, bus, writer):
+    """Every column object has all five expected fields."""
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "reqid": "s2", "data": {"table": "orders"}})
+
+    for col in ws.get_messages()[0]["row"]["columns"]:
+        assert set(col.keys()) == {"name", "type", "notnull", "pk", "dflt_value"}
+        assert isinstance(col["name"], str)
+        assert isinstance(col["type"], str)
+        assert isinstance(col["notnull"], bool)
+        assert isinstance(col["pk"], bool)
+
+
+async def test_schema_pk_column(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "reqid": "s2", "data": {"table": "orders"}})
+
+    columns = ws.get_messages()[0]["row"]["columns"]
+    by_name = {c["name"]: c for c in columns}
+
+    id_col = by_name["id"]
+    assert id_col["type"] == "TEXT"
+    assert id_col["pk"] is True
+
+
+async def test_schema_notnull_column(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "reqid": "s2", "data": {"table": "orders"}})
+
+    columns = ws.get_messages()[0]["row"]["columns"]
+    by_name = {c["name"]: c for c in columns}
+
+    symbol_col = by_name["symbol"]
+    assert symbol_col["type"] == "TEXT"
+    assert symbol_col["pk"] is False
+    assert symbol_col["notnull"] is True
+    assert symbol_col["dflt_value"] is None
+
+
+async def test_schema_mkio_ref_column(db, bus, writer):
+    """_mkio_ref is a framework-added column with a default."""
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "reqid": "s2", "data": {"table": "orders"}})
+
+    columns = ws.get_messages()[0]["row"]["columns"]
+    by_name = {c["name"]: c for c in columns}
+
+    ref_col = by_name["_mkio_ref"]
+    assert ref_col["type"] == "TEXT"
+    assert ref_col["pk"] is False
+    assert ref_col["dflt_value"] == "''"
+
+
+async def test_schema_column_order_matches_table(db, bus, writer):
+    """Columns are returned in table definition order."""
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "reqid": "s1", "data": {"table": "orders"}})
+
+    columns = ws.get_messages()[0]["row"]["columns"]
+    col_names = [c["name"] for c in columns]
+    assert col_names.index("id") < col_names.index("symbol")
+    assert col_names.index("symbol") < col_names.index("_mkio_ref")
+
+
+async def test_schema_unknown_table(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "reqid": "s3", "data": {"table": "nonexistent"}})
+
+    msg = ws.get_messages()[0]
+    assert msg["type"] == "error"
+    assert "nonexistent" in msg["message"]
+    assert "orders" in msg["message"]
+
+
+async def test_schema_unknown_table_lists_available(db, bus, writer):
+    """Error message includes all available table names."""
+    config = {
+        **TEST_CONFIG,
+        "tables": {
+            "orders": {"columns": {"id": "TEXT PRIMARY KEY"}},
+            "trades": {"columns": {"id": "TEXT PRIMARY KEY"}},
+        },
+    }
+    database = Database(":memory:", config.get("tables", {}))
+    await database.start()
+    svc = _make_info_svc(database, bus, writer, config=config)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "reqid": "s1", "data": {"table": "bogus"}})
+
+    msg = ws.get_messages()[0]
+    assert msg["type"] == "error"
+    assert "orders" in msg["message"]
+    assert "trades" in msg["message"]
+    await database.stop()
+
+
+async def test_schema_does_not_return_server_info(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "reqid": "s4", "data": {"table": "orders"}})
+
+    row = ws.get_messages()[0]["row"]
+    assert set(row.keys()) == {"table", "columns"}
+
+
+async def test_schema_reqid_echoed(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "reqid": "my-schema-req", "data": {"table": "orders"}})
+    assert ws.get_messages()[0]["reqid"] == "my-schema-req"
+
+
+async def test_schema_no_reqid(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "data": {"table": "orders"}})
+
+    msg = ws.get_messages()[0]
+    assert msg["type"] == "reply"
+    assert "reqid" not in msg
+
+
+async def test_schema_table_with_default_values():
+    """Columns with DEFAULT values are reported correctly."""
+    config = {
+        **TEST_CONFIG,
+        "tables": {
+            "items": {
+                "columns": {
+                    "id": "INTEGER PRIMARY KEY",
+                    "status": "TEXT DEFAULT 'pending'",
+                    "qty": "INTEGER DEFAULT 0",
+                },
+            },
+        },
+    }
+    database = Database(":memory:", config.get("tables", {}))
+    await database.start()
+    bus = ChangeBus()
+    writer = WriteBatcher(db=database, change_bus=bus, batch_max_size=100, batch_max_wait_ms=1.0)
+    await writer.start()
+
+    svc = _make_info_svc(database, bus, writer, config=config)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "reqid": "d1", "data": {"table": "items"}})
+
+    columns = ws.get_messages()[0]["row"]["columns"]
+    by_name = {c["name"]: c for c in columns}
+
+    assert by_name["id"]["type"] == "INTEGER"
+    assert by_name["id"]["pk"] is True
+    assert by_name["status"]["dflt_value"] == "'pending'"
+    assert by_name["qty"]["dflt_value"] == "0"
+
+    await writer.stop(drain=True)
+    await database.stop()
+
+
+async def test_schema_multi_table():
+    """Schema query works for each table in a multi-table config."""
+    config = {
+        **TEST_CONFIG,
+        "tables": {
+            "orders": {"columns": {"id": "TEXT PRIMARY KEY", "symbol": "TEXT NOT NULL"}},
+            "trades": {"columns": {"trade_id": "INTEGER PRIMARY KEY", "price": "REAL"}},
+        },
+    }
+    database = Database(":memory:", config.get("tables", {}))
+    await database.start()
+    bus = ChangeBus()
+    writer = WriteBatcher(db=database, change_bus=bus, batch_max_size=100, batch_max_wait_ms=1.0)
+    await writer.start()
+
+    svc = _make_info_svc(database, bus, writer, config=config)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "reqid": "m1", "data": {"table": "orders"}})
+    row1 = ws.get_messages()[0]["row"]
+    assert row1["table"] == "orders"
+    assert any(c["name"] == "id" for c in row1["columns"])
+
+    ws.sent.clear()
+    await svc.on_message(ws, {"type": "request", "reqid": "m2", "data": {"table": "trades"}})
+    row2 = ws.get_messages()[0]["row"]
+    assert row2["table"] == "trades"
+    by_name = {c["name"]: c for c in row2["columns"]}
+    assert by_name["trade_id"]["pk"] is True
+    assert by_name["price"]["type"] == "REAL"
+
+    await writer.stop(drain=True)
+    await database.stop()
+
+
+async def test_schema_with_extra_data_fields(db, bus, writer):
+    """Extra fields in data alongside 'table' don't break anything."""
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {
+        "type": "request",
+        "reqid": "e1",
+        "data": {"table": "orders", "extra": "ignored"},
+    })
+
+    msg = ws.get_messages()[0]
+    assert msg["type"] == "reply"
+    assert msg["row"]["table"] == "orders"
+
+
+async def test_schema_then_info_on_same_connection(db, bus, writer):
+    """Schema and server-info requests work independently on the same service."""
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {"table": "orders"}})
+    await svc.on_message(ws, {"type": "request", "reqid": "r2"})
+
+    msgs = ws.get_messages()
+    assert msgs[0]["type"] == "reply"
+    assert "columns" in msgs[0]["row"]
+    assert msgs[1]["type"] == "reply"
+    assert "services" in msgs[1]["row"]
+
+
+# ---- Schema query tests (integration) --------------------------------------
+
+async def test_schema_integration(client):
+    ws = await client.ws_connect("/ws")
+    reply = await ws_send_recv(ws, {
+        "type": "request",
+        "service": "_mkio",
+        "reqid": "si1",
+        "data": {"table": "orders"},
+    })
+    assert reply["type"] == "reply"
+    assert reply["service"] == "_mkio"
+    row = reply["row"]
+    assert row["table"] == "orders"
+    col_names = [c["name"] for c in row["columns"]]
+    assert "id" in col_names
+    assert "symbol" in col_names
+    assert "_mkio_ref" in col_names
+    await ws.close()
+
+
+async def test_schema_integration_column_details(client):
+    ws = await client.ws_connect("/ws")
+    reply = await ws_send_recv(ws, {
+        "type": "request",
+        "service": "_mkio",
+        "reqid": "si3",
+        "data": {"table": "orders"},
+    })
+    columns = reply["row"]["columns"]
+    by_name = {c["name"]: c for c in columns}
+    assert by_name["id"]["pk"] is True
+    assert by_name["id"]["type"] == "TEXT"
+    assert by_name["symbol"]["notnull"] is True
+    await ws.close()
+
+
+async def test_schema_unknown_table_integration(client):
+    ws = await client.ws_connect("/ws")
+    reply = await ws_send_recv(ws, {
+        "type": "request",
+        "service": "_mkio",
+        "reqid": "si2",
+        "data": {"table": "bogus"},
+    })
+    assert reply["type"] == "error"
+    assert "bogus" in reply["message"]
+    await ws.close()
+
+
+async def test_schema_and_info_same_ws(client):
+    """Schema and info requests on the same WebSocket work independently."""
+    ws = await client.ws_connect("/ws")
+
+    reply1 = await ws_send_recv(ws, {
+        "type": "request",
+        "service": "_mkio",
+        "reqid": "combo1",
+        "data": {"table": "orders"},
+    })
+    assert reply1["type"] == "reply"
+    assert "columns" in reply1["row"]
+
+    reply2 = await ws_send_recv(ws, {
+        "type": "request",
+        "service": "_mkio",
+        "reqid": "combo2",
+    })
+    assert reply2["type"] == "reply"
+    assert "services" in reply2["row"]
+
+    await ws.close()

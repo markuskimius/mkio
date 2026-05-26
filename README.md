@@ -86,7 +86,7 @@ For programmatic control (custom routes, non-blocking lifecycle), see [Programma
 - **Graceful shutdown** — drains pending writes, checkpoints WAL, clean close
 - **Service monitoring** — tap into any service's inbound/outbound message flow via CLI or WebSocket
 - **Service discovery** — `GET /api/services` list and `GET /api/services/<name>` detail endpoints, `mkio services` CLI
-- **Connection identity** — built-in `_mkio` reqrep service reports server name, version, framework version, protocol version, services, tables, config hash, and uptime — lets clients verify they're connected to the correct session
+- **Connection identity** — built-in `_mkio` reqrep service reports server name, version, framework version, protocol version, services, tables, config hash, and uptime — lets clients verify they're connected to the correct session. Also supports table schema introspection (columns, types, primary keys, defaults)
 - **Config endpoint** — `/config` path serves TOML files as JSON (request `foo.json`, server reads `foo.toml` and returns JSON); falls back to literal `.json` files; other extensions served as-is
 - **CLI tools** — send transactions, subscribe to live data, monitor traffic, inspect services
 - **Programmatic API** — `create_app()` returns a controllable server handle with async `start()`/`stop()` lifecycle, custom HTTP routes, custom service registration, lifecycle hooks, and a data facade (`execute`/`query`/`subscribe`) for server-side interaction without WebSocket
@@ -466,6 +466,34 @@ From the CLI: `mkio check 8080 version=2.0.0 protocol=1.0`. From the browser con
 
 The `_mkio` service is hidden from `/api/services` and error hints. Using the wrong protocol (e.g., `mkio subpub 8080 _mkio`) returns a nack with a hint suggesting the correct command.
 
+#### Table Schema
+
+Clients can query the schema of any table by sending `data` with a `"table"` key. The server returns column definitions from the live database:
+
+```json
+{"type": "request", "service": "_mkio", "reqid": "s1", "data": {"table": "orders"}}
+```
+
+Reply:
+
+```json
+{
+  "type": "reply", "service": "_mkio", "reqid": "s1",
+  "row": {
+    "table": "orders",
+    "columns": [
+      {"name": "id", "type": "TEXT", "notnull": false, "pk": true, "dflt_value": null},
+      {"name": "symbol", "type": "TEXT", "notnull": true, "pk": false, "dflt_value": null},
+      {"name": "qty", "type": "INTEGER", "notnull": false, "pk": false, "dflt_value": null},
+      {"name": "status", "type": "TEXT", "notnull": false, "pk": false, "dflt_value": "'pending'"},
+      {"name": "_mkio_ref", "type": "TEXT", "notnull": false, "pk": false, "dflt_value": "''"}
+    ]
+  }
+}
+```
+
+Unknown tables return an error listing available tables. From the CLI: `mkio schema 8080 orders`. From the browser console: `mkio.schema("orders")`.
+
 ## WebSocket Protocol
 
 Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
@@ -613,6 +641,7 @@ mkio.query("all_orders", {snapshotOnly: true})
 mkio.query("all_orders", {updateOnly: true, fields:["id","status"]})
 mkio.reqrep("tax", {qty: 10, price: 99.95, rate: 0.08})
 mkio.reqrep("search", {symbol: "AAPL"})
+mkio.schema("orders")                   // table schema (columns, types, keys)
 ```
 
 All subscribe methods return a `MkioSubscription` with `.stop()`. Nack responses are logged to the console by default. Console commands auto-generate `subid` (subscriptions) and `txnid` (sends) with a `_mkio_` prefix so they never intercept messages meant for the application.
@@ -765,6 +794,12 @@ mkio monitor localhost:8080 --filter "service == 'orders'"  # Filter by service
 The `--filter` flag accepts any expression from the [expression language](#expression-language), evaluated against each monitor envelope (`direction`, `service`, `message`).
 
 The monitor protocol is a native framework feature — any mkio application supports it.
+
+### Inspect table schema
+
+```bash
+mkio schema localhost:8080 orders          # Show columns, types, keys, defaults
+```
 
 ### Schema management
 
