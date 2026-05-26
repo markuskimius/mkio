@@ -15,7 +15,7 @@ pytest tests/ -x -v            # Stop on first failure, verbose
 
 ```
 src/mkio/
-├── __init__.py       # Public API: serve, create_app, MkioApp, init, get_default_config, Service, register_function
+├── __init__.py       # Public API: serve, create_app, MkioApp, init, get_default_config, Service, ChangeEvent, register_function
 ├── app.py            # MkioApp class + create_app() factory — programmatic server lifecycle
 ├── scaffold.py       # init() project scaffolding + get_default_config() + template strings
 ├── _json.py          # orjson-with-fallback (dumps -> bytes, loads)
@@ -67,21 +67,39 @@ The `mkio` package exports a stable programmatic API for embedding mkio in other
 
 - **`serve(config)`** — Blocking entry point. Takes `str | Path | dict`. Delegates to `create_app(config).run()`.
 - **`create_app(config, *, routes=None) -> MkioApp`** — Factory that loads config and returns a controllable server handle. `routes` is an optional list of `(method, path, handler)` tuples for custom HTTP endpoints.
-- **`MkioApp`** — Server lifecycle wrapper. Key methods:
-  - `add_routes(routes)` — Add HTTP routes before starting. Raises `RuntimeError` if already running.
-  - `async start()` — Non-blocking server start (binds port, begins serving).
-  - `async stop()` — Graceful shutdown (drains writes, closes connections, checkpoints DB). Idempotent.
-  - `async wait()` — Blocks until `stop()` is called or a signal is received.
-  - `run()` — Blocking convenience: `asyncio.run(start + wait)` with signal handling and optional uvloop.
-  - `.config` — Property returning the resolved config dict.
+- **`MkioApp`** — Server lifecycle wrapper. Methods grouped by category:
+  - *Pre-start registration* (raise `RuntimeError` if already running):
+    - `add_routes(routes)` — Add HTTP routes before starting.
+    - `add_service(name, cls, config=None)` — Register a custom `Service` subclass. Instantiated during `start()` with the same lifecycle as config-driven services (monitors, WS dispatch all work). `config` defaults to `{}`.
+  - *Lifecycle hooks* (append-only callback lists, multiple callbacks called in order):
+    - `on_startup(callback)` — Async callback invoked after all services start.
+    - `on_shutdown(callback)` — Async callback invoked before services stop.
+    - `on_connect(callback)` — Async callback `(ws) -> None` invoked when a WebSocket client connects.
+    - `on_disconnect(callback)` — Async callback `(ws) -> None` invoked when a WebSocket client disconnects.
+  - *Data facade* (raise `RuntimeError` if server not running):
+    - `async execute(service, data, *, op=None) -> {"ok": True, "ref": "..."}` — Submit a transaction through the normal write path (WriteBatcher → ChangeBus → subscribers). Same semantics as a WS client. Raises `KeyError` for unknown service, `ValueError` for non-transaction service or unknown op.
+    - `async query(sql, params=()) -> list[dict]` — Read query on the read connection via `Database.read()`.
+    - `async subscribe(tables, callback) -> unsub_fn` — Subscribe to `ChangeEvent`s on the given tables. `callback` is `async (ChangeEvent) -> None`. Returns an unsubscribe function that cancels the drain task and removes the ChangeBus subscription.
+  - *Server lifecycle*:
+    - `async start()` — Non-blocking server start (binds port, begins serving).
+    - `async stop()` — Graceful shutdown (drains writes, closes connections, checkpoints DB). Idempotent.
+    - `async wait()` — Blocks until `stop()` is called or a signal is received.
+    - `run()` — Blocking convenience: `asyncio.run(start + wait)` with signal handling and optional uvloop.
+  - *Properties*:
+    - `.config` — The resolved config dict (always available).
+    - `.db` — `Database` instance. `None` before `start()` / after `stop()`. **Unstable API.**
+    - `.writer` — `WriteBatcher` instance. `None` before `start()` / after `stop()`. **Unstable API.**
+    - `.change_bus` — `ChangeBus` instance. `None` before `start()` / after `stop()`. **Unstable API.**
+    - `.services` — `dict[str, Service]` map. Empty before `start()` / after `stop()`. **Unstable API.**
+- **`ChangeEvent`** — Dataclass for change bus events: `table`, `op`, `row`, `ref`, `raw_bytes`. Used as the callback argument for `MkioApp.subscribe()`.
 - **`init(directory, *, no_static=False) -> list[Path]`** — Scaffold project files (server.toml, static/index.html). Raises `FileExistsError` if server.toml already exists.
 - **`get_default_config() -> dict`** — Returns the scaffold template config as a Python dict (includes static section). Callers can modify before passing to `create_app()`.
-- **`Service`** — Base class for custom service protocols.
+- **`Service`** — Base class for custom service protocols. Constructor receives `(config, db, change_bus, writer)`. Override `start()`, `stop()`, `on_subscribe()`, `on_unsubscribe()`, `on_message()`.
 - **`register_function(name, fn)`** — Register a custom function for the expression language.
 
-**Stability**: From mkio 1.0, these exports follow semver — no removal or signature-breaking changes within a major version. New keyword arguments and new exports are allowed in minor versions.
+**Stability**: From mkio 1.0, exports follow semver — no removal or signature-breaking changes within a major version. New keyword arguments and new exports are allowed in minor versions. Properties marked **Unstable API** (`.db`, `.writer`, `.change_bus`, `.services`) are not covered by semver guarantees — their internal types may change. The data facade (`execute`, `query`, `subscribe`) is the stable interface for the same operations.
 
-**Implementation**: `app.py` contains `MkioApp` and `create_app()`. `scaffold.py` contains `init()`, `get_default_config()`, and the template strings. `server.py` retains the internal aiohttp handlers (`_on_startup`, `_on_shutdown`, `_ws_handler`, etc.) imported by `app.py`.
+**Implementation**: `app.py` contains `MkioApp` and `create_app()`. `scaffold.py` contains `init()`, `get_default_config()`, and the template strings. `server.py` retains the internal aiohttp handlers (`_on_startup`, `_on_shutdown`, `_ws_handler`, etc.) imported by `app.py`. Pending services and lifecycle hooks are stored on `MkioApp` and consumed by `server.py` via `app["mkio_app"]`.
 
 ## Conventions
 

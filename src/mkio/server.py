@@ -573,6 +573,16 @@ async def _on_startup(app: web.Application) -> None:
         await svc.start()
         services[svc_name] = svc
 
+    # Programmatically registered services
+    mkio_app = app.get("mkio_app")
+    if mkio_app is not None:
+        for svc_name, cls, svc_config in mkio_app._pending_services:
+            svc = cls(config=svc_config, db=db, change_bus=bus, writer=writer)
+            svc.name = svc_name
+            svc._monitor_notifier = lambda sn, d, data, _app=app: _notify_monitors(_app, sn, d, data)
+            await svc.start()
+            services[svc_name] = svc
+
     # Built-in _mkio service
     if "_mkio" in services:
         logging.getLogger("mkio").warning(
@@ -587,9 +597,20 @@ async def _on_startup(app: web.Application) -> None:
     info_svc._monitor_notifier = lambda sn, d, data, _app=app: _notify_monitors(_app, sn, d, data)
     services["_mkio"] = info_svc
 
+    # User startup hooks
+    if mkio_app is not None:
+        for hook in mkio_app._startup_hooks:
+            await hook()
+
 
 async def _on_shutdown(app: web.Application) -> None:
-    # 0. Close all WebSocket connections so handlers can exit
+    # 0. User shutdown hooks (before services stop)
+    mkio_app = app.get("mkio_app")
+    if mkio_app is not None:
+        for hook in mkio_app._shutdown_hooks:
+            await hook()
+
+    # 1. Close all WebSocket connections so handlers can exit
     wss = set(app.get("websockets", set()))
     if wss:
         await asyncio.wait(
@@ -643,6 +664,12 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     request.app["websockets"].add(ws)
+
+    # Connect hooks
+    mkio_app = request.app.get("mkio_app")
+    if mkio_app is not None:
+        for hook in mkio_app._connect_hooks:
+            await hook(ws)
 
     services: dict[str, Service] = request.app["services"]
     monitors: dict[str, set[web.WebSocketResponse]] = request.app["monitors"]
@@ -785,5 +812,12 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
         for svc_name in monitoring:
             monitors[svc_name].discard(ws)
         request.app["websockets"].discard(ws)
+        # Disconnect hooks
+        if mkio_app is not None:
+            for hook in mkio_app._disconnect_hooks:
+                try:
+                    await hook(ws)
+                except Exception:
+                    pass
 
     return ws

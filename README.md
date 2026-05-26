@@ -89,11 +89,11 @@ For programmatic control (custom routes, non-blocking lifecycle), see [Programma
 - **Connection identity** — built-in `_mkio` reqrep service reports server name, version, framework version, protocol version, services, tables, config hash, and uptime — lets clients verify they're connected to the correct session
 - **Config endpoint** — `/config` path serves TOML files as JSON (request `foo.json`, server reads `foo.toml` and returns JSON); falls back to literal `.json` files; other extensions served as-is
 - **CLI tools** — send transactions, subscribe to live data, monitor traffic, inspect services
-- **Programmatic API** — `create_app()` returns a controllable server handle with async `start()`/`stop()` lifecycle, custom HTTP route injection, and non-blocking operation for embedding in larger applications
+- **Programmatic API** — `create_app()` returns a controllable server handle with async `start()`/`stop()` lifecycle, custom HTTP routes, custom service registration, lifecycle hooks, and a data facade (`execute`/`query`/`subscribe`) for server-side interaction without WebSocket
 
 ## Programmatic API
 
-For applications that embed mkio (e.g., adding custom HTTP routes or controlling server lifecycle), use `create_app()` instead of `serve()`.
+For applications that embed mkio (e.g., adding custom HTTP routes, registering custom services, or controlling server lifecycle), use `create_app()` instead of `serve()`.
 
 ### `create_app(config, *, routes=None) -> MkioApp`
 
@@ -129,13 +129,104 @@ asyncio.run(main())
 | Method | Description |
 |--------|-------------|
 | `add_routes(routes)` | Add `(method, path, handler)` tuples before starting. Raises `RuntimeError` if already running. |
+| `add_service(name, cls, config=None)` | Register a custom `Service` subclass before starting. Same lifecycle as config-driven services. |
+| `on_startup(callback)` | Register an async callback invoked after all services start. |
+| `on_shutdown(callback)` | Register an async callback invoked before services stop. |
+| `on_connect(callback)` | Register an async `(ws) -> None` callback invoked when a WebSocket client connects. |
+| `on_disconnect(callback)` | Register an async `(ws) -> None` callback invoked when a WebSocket client disconnects. |
+| `async execute(service, data, *, op=None)` | Submit a transaction through the write path. Returns `{"ok": True, "ref": "..."}`. |
+| `async query(sql, params=())` | Read query on the read connection. Returns `list[dict]`. |
+| `async subscribe(tables, callback)` | Subscribe to `ChangeEvent`s. Returns an unsubscribe function. |
 | `async start()` | Non-blocking start — runs migration, preflight, binds the port. |
 | `async stop()` | Graceful shutdown — drains writes, closes WebSockets, checkpoints DB. Idempotent. |
 | `async wait()` | Blocks until `stop()` is called or a signal fires. |
 | `run()` | Blocking convenience: starts, installs signal handlers, waits. Tries uvloop if available. |
 | `.config` | The resolved config dict (read-only property). |
+| `.db` | `Database` instance (after start, `None` otherwise). **Unstable.** |
+| `.writer` | `WriteBatcher` instance (after start, `None` otherwise). **Unstable.** |
+| `.change_bus` | `ChangeBus` instance (after start, `None` otherwise). **Unstable.** |
+| `.services` | `dict[str, Service]` map (after start, empty otherwise). **Unstable.** |
 
 Supported HTTP methods for routes: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`.
+
+Properties marked **Unstable** expose internal types that may change across versions. The facade methods (`execute`, `query`, `subscribe`) are the stable interface for the same operations.
+
+### Custom services
+
+Register a `Service` subclass to add custom behavior reachable over WebSocket:
+
+```python
+from mkio import create_app, Service
+
+class AuditService(Service):
+    async def start(self):
+        self._q = self.bus.subscribe(["orders"])
+        import asyncio
+        asyncio.create_task(self._watch())
+
+    async def _watch(self):
+        while True:
+            event = await self._q.get()
+            print(f"order changed: {event.row}")
+
+app = create_app("server.toml")
+app.add_service("audit", AuditService)
+app.run()
+```
+
+Custom services go through the same lifecycle as config-driven services — `start()` is called at server startup, monitors work, and WS dispatch routes messages to `on_subscribe()` / `on_message()`.
+
+### Data facade
+
+Write data, read data, and react to changes without going through WebSocket:
+
+```python
+app = create_app(config)
+await app.start()
+
+# Write through the normal write path (WriteBatcher → ChangeBus → subscribers)
+result = await app.execute("orders", {"symbol": "AAPL", "qty": 100}, op="new")
+
+# Read
+rows = await app.query("SELECT * FROM orders WHERE symbol = ?", ("AAPL",))
+
+# React to changes
+from mkio import ChangeEvent
+
+async def on_change(event: ChangeEvent):
+    print(f"{event.table} {event.op}: {event.row}")
+
+unsub = await app.subscribe(["orders"], on_change)
+# later: unsub()
+```
+
+### Lifecycle hooks
+
+Register callbacks for server and connection events:
+
+```python
+app = create_app("server.toml")
+
+async def setup():
+    print("Server ready")
+
+async def teardown():
+    print("Server stopping")
+
+async def on_connect(ws):
+    print(f"Client connected")
+
+async def on_disconnect(ws):
+    print(f"Client disconnected")
+
+app.on_startup(setup)
+app.on_shutdown(teardown)
+app.on_connect(on_connect)
+app.on_disconnect(on_disconnect)
+app.run()
+```
+
+Multiple callbacks can be registered for each hook — they are called in registration order.
 
 ### `get_default_config() -> dict`
 

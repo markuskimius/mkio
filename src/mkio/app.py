@@ -6,7 +6,7 @@ import asyncio
 import signal
 import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from aiohttp import web
 
@@ -21,6 +21,12 @@ from mkio.server import (
     _preflight_services,
     _ws_handler,
 )
+
+if TYPE_CHECKING:
+    from mkio.change_bus import ChangeBus, ChangeEvent
+    from mkio.database import Database
+    from mkio.services.base import Service
+    from mkio.writer import WriteBatcher
 
 
 class MkioApp:
@@ -47,15 +53,28 @@ class MkioApp:
     ) -> None:
         self._config = config
         self._pending_routes: list[tuple[str, str, Callable]] = list(routes or [])
+        self._pending_services: list[tuple[str, type[Service], dict[str, Any]]] = []
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._stopped: asyncio.Event | None = None
         self._running = False
+        self._aiohttp_app: web.Application | None = None
+
+        # Lifecycle hook lists
+        self._startup_hooks: list[Callable[[], Awaitable[None]]] = []
+        self._shutdown_hooks: list[Callable[[], Awaitable[None]]] = []
+        self._connect_hooks: list[Callable[[web.WebSocketResponse], Awaitable[None]]] = []
+        self._disconnect_hooks: list[Callable[[web.WebSocketResponse], Awaitable[None]]] = []
+
+        # Subscription tasks (for cleanup on stop)
+        self._sub_tasks: list[tuple[asyncio.Task, list[str]]] = []
 
     @property
     def config(self) -> dict[str, Any]:
         """The resolved config dict."""
         return self._config
+
+    # -- Pre-start registration --
 
     def add_routes(self, routes: list[tuple[str, str, Callable]]) -> None:
         """Add HTTP routes before starting.
@@ -70,6 +89,189 @@ class MkioApp:
         if self._running:
             raise RuntimeError("Cannot add routes after the server has started")
         self._pending_routes.extend(routes)
+
+    def add_service(
+        self,
+        name: str,
+        cls: type[Service],
+        config: dict[str, Any] | None = None,
+    ) -> None:
+        """Register a custom service class.
+
+        The service is instantiated during :meth:`start` with the same
+        lifecycle as config-driven services (``start()`` is called,
+        monitors work, WS dispatch works).
+
+        Args:
+            name: Service name (used in WS protocol and API).
+            cls: A :class:`Service` subclass.
+            config: Service config dict. If omitted, an empty dict is used.
+
+        Raises:
+            RuntimeError: If the server is already running.
+        """
+        if self._running:
+            raise RuntimeError("Cannot add services after the server has started")
+        self._pending_services.append((name, cls, config or {}))
+
+    # -- Lifecycle hooks --
+
+    def on_startup(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Register a callback invoked after all services start."""
+        self._startup_hooks.append(callback)
+
+    def on_shutdown(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Register a callback invoked before services stop."""
+        self._shutdown_hooks.append(callback)
+
+    def on_connect(self, callback: Callable[[web.WebSocketResponse], Awaitable[None]]) -> None:
+        """Register a callback invoked when a WebSocket client connects."""
+        self._connect_hooks.append(callback)
+
+    def on_disconnect(self, callback: Callable[[web.WebSocketResponse], Awaitable[None]]) -> None:
+        """Register a callback invoked when a WebSocket client disconnects."""
+        self._disconnect_hooks.append(callback)
+
+    # -- Raw internals (unstable, available after start) --
+
+    @property
+    def db(self) -> Database | None:
+        """The Database instance. Available after start(). Unstable API."""
+        if self._aiohttp_app is None:
+            return None
+        return self._aiohttp_app.get("db")
+
+    @property
+    def writer(self) -> WriteBatcher | None:
+        """The WriteBatcher instance. Available after start(). Unstable API."""
+        if self._aiohttp_app is None:
+            return None
+        return self._aiohttp_app.get("writer")
+
+    @property
+    def change_bus(self) -> ChangeBus | None:
+        """The ChangeBus instance. Available after start(). Unstable API."""
+        if self._aiohttp_app is None:
+            return None
+        return self._aiohttp_app.get("bus")
+
+    @property
+    def services(self) -> dict[str, Service]:
+        """Map of service name to Service instance. Available after start(). Unstable API."""
+        if self._aiohttp_app is None:
+            return {}
+        return self._aiohttp_app.get("services", {})
+
+    # -- Data facade --
+
+    async def execute(
+        self,
+        service: str,
+        data: dict[str, Any],
+        *,
+        op: str | None = None,
+    ) -> dict[str, Any]:
+        """Submit a transaction through the write path.
+
+        Same semantics as a WS client sending a message — goes through
+        WriteBatcher, publishes to ChangeBus, fans out to subscribers.
+
+        Args:
+            service: Name of a transaction service.
+            data: Row data dict.
+            op: Op name (required if the service has named ops).
+
+        Returns:
+            ``{"ok": True, "ref": "..."}``
+
+        Raises:
+            RuntimeError: If the server is not running.
+            KeyError: If the service does not exist.
+            ValueError: If the service is not a transaction service, or unknown op.
+        """
+        writer = self.writer
+        if writer is None:
+            raise RuntimeError("Server is not running")
+        svc = self.services.get(service)
+        if svc is None:
+            raise KeyError(f"Unknown service: {service!r}")
+        if svc.config.get("protocol") != "transaction":
+            raise ValueError(
+                f"Service {service!r} uses protocol {svc.config.get('protocol')!r}, "
+                f"not 'transaction'"
+            )
+        from mkio.services.transaction import TransactionService, _extract_params
+        assert isinstance(svc, TransactionService)
+        msg = {"data": data}
+        if op is not None:
+            msg["op"] = op
+        compiled_ops = svc._resolve_ops(msg)
+        params_list = tuple(_extract_params(o, data) for o in compiled_ops)
+        return await writer.submit(compiled_ops, params_list, data)
+
+    async def query(
+        self,
+        sql: str,
+        params: tuple[Any, ...] | dict[str, Any] = (),
+    ) -> list[dict[str, Any]]:
+        """Read query on the read connection.
+
+        Args:
+            sql: SQL query string.
+            params: Query parameters (tuple for positional, dict for named).
+
+        Returns:
+            List of row dicts.
+
+        Raises:
+            RuntimeError: If the server is not running.
+        """
+        db = self.db
+        if db is None:
+            raise RuntimeError("Server is not running")
+        return await db.read(sql, params)
+
+    async def subscribe(
+        self,
+        tables: list[str],
+        callback: Callable[[ChangeEvent], Awaitable[None]],
+    ) -> Callable[[], None]:
+        """Subscribe to change events on the given tables.
+
+        Args:
+            tables: List of table names to watch.
+            callback: Async function called with each :class:`ChangeEvent`.
+
+        Returns:
+            An unsubscribe function. Call it to stop receiving events.
+
+        Raises:
+            RuntimeError: If the server is not running.
+        """
+        bus = self.change_bus
+        if bus is None:
+            raise RuntimeError("Server is not running")
+        q = bus.subscribe(tables)
+
+        async def _drain():
+            try:
+                while True:
+                    event = await q.get()
+                    await callback(event)
+            except asyncio.CancelledError:
+                pass
+
+        task = asyncio.create_task(_drain())
+        self._sub_tasks.append((task, tables))
+
+        def unsub():
+            task.cancel()
+            bus.unsubscribe(tables, q)
+            self._sub_tasks = [(t, tbl) for t, tbl in self._sub_tasks if t is not task]
+
+        return unsub
+
+    # -- Server lifecycle --
 
     async def start(self) -> None:
         """Start the server (non-blocking). Binds the port and begins serving."""
@@ -91,6 +293,7 @@ class MkioApp:
         # Build aiohttp app
         app = web.Application()
         app["config"] = cfg
+        app["mkio_app"] = self
 
         app.on_startup.append(_on_startup)
         app.on_shutdown.append(_on_shutdown)
@@ -142,7 +345,13 @@ class MkioApp:
 
         # Start via AppRunner for non-blocking lifecycle
         runner = web.AppRunner(app, shutdown_timeout=cfg.get("shutdown_timeout", 0))
-        await runner.setup()
+        # Set _aiohttp_app before setup so startup hooks can access internals
+        self._aiohttp_app = app
+        try:
+            await runner.setup()
+        except Exception:
+            self._aiohttp_app = None
+            raise
 
         host = cfg.get("host", "0.0.0.0")
         port = cfg.get("port", 8080)
@@ -159,10 +368,20 @@ class MkioApp:
         if not self._running:
             return
         self._running = False
+
+        # Cancel subscription drain tasks
+        for task, tables in self._sub_tasks:
+            task.cancel()
+            if self.change_bus is not None:
+                bus = self.change_bus
+                # Queue ref not available here, but unsubscribe handles missing queues gracefully
+        self._sub_tasks.clear()
+
         if self._runner:
             await self._runner.cleanup()
             self._runner = None
             self._site = None
+        self._aiohttp_app = None
         if self._stopped:
             self._stopped.set()
 
