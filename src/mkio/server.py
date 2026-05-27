@@ -399,6 +399,7 @@ def _build_listener_detail(
         )
         subscribe["response_types"] = ["snapshot", "update"]
         subscribe["buffer_size"] = config.get("buffer_size", 10000)
+        subscribe["message"]["before"] = "(optional, bool) return rows before ref instead of after"
     elif svc_type == "query":
         subscribe["response_types"] = ["snapshot", "update"]
 
@@ -425,6 +426,9 @@ def _build_listener_detail(
     if svc_type == "stream":
         example["subscribe_recover"] = (
             f"mkio {cli_cmd} <url> {name} --ref \"<ref from last message>\""
+        )
+        example["subscribe_before"] = (
+            f"mkio {cli_cmd} <url> {name} --before --ref \"<ref>\" --maxcount 20"
         )
     detail["example"] = example
 

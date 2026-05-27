@@ -128,6 +128,7 @@ class MkioClient:
         updates: bool = True,
         fields: list[str] | None = None,
         maxcount: int | None = None,
+        before: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
         """Subscribe to a service. Yields messages (snapshot, update).
 
@@ -142,6 +143,8 @@ class MkioClient:
         Pass ``maxcount`` to paginate the snapshot (query and stream).
         For stream, pagination is stateless: each page is a standalone
         subscribe with the ref from the previous response.
+        Pass ``before=True`` (stream only) to fetch rows before the ref
+        instead of after it. Never creates a live subscription.
         """
         sub = _Subscription(
             service=service,
@@ -155,6 +158,7 @@ class MkioClient:
             updates=updates,
             fields=fields,
             maxcount=maxcount,
+            before=before,
         )
         key = sub.subid or service
         self._subscriptions[key] = sub
@@ -182,7 +186,7 @@ class MkioClient:
                 if not updates and item.get("type") == "snapshot" and not item.get("hasmore"):
                     return
                 if protocol == "stream" and sub.maxcount and not item.get("hasmore"):
-                    if updates:
+                    if updates and not sub.before:
                         sub.ref = item.get("ref")
                         sub.maxcount = None
                         await self._send_subscribe(sub)
@@ -209,6 +213,8 @@ class MkioClient:
             msg["fields"] = sub.fields
         if sub.maxcount is not None and sub.maxcount > 0:
             msg["maxcount"] = sub.maxcount
+        if sub.before:
+            msg["before"] = True
         assert self._ws is not None
         await self._ws.send_bytes(dumps(msg))
 
@@ -352,6 +358,7 @@ class _Subscription:
         updates: bool = True,
         fields: list[str] | None = None,
         maxcount: int | None = None,
+        before: bool = False,
     ) -> None:
         self.service = service
         self.protocol = protocol
@@ -364,3 +371,4 @@ class _Subscription:
         self.updates = updates
         self.fields = fields
         self.maxcount = maxcount
+        self.before = before

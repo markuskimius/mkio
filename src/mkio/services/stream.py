@@ -87,6 +87,7 @@ class StreamService(Service):
         filter_expr = msg.get("filter")
         subid = msg.get("subid")
         fields = msg.get("fields")
+        before = msg.get("before") is True
         maxcount = msg.get("maxcount", 0)
         if not (isinstance(maxcount, int) and not isinstance(maxcount, bool) and maxcount > 0):
             maxcount = 0
@@ -100,7 +101,14 @@ class StreamService(Service):
         rows_to_send: list[tuple[str, dict[str, Any]]] = []
 
         if self._buffer:
-            if client_ref:
+            if before and client_ref:
+                for ver, row in self._buffer:
+                    if compare_refs(ver, client_ref) < 0:
+                        out_row = sub.formatter(row) if sub.formatter else row
+                        if sub.filter_fn and not sub.filter_fn(out_row):
+                            continue
+                        rows_to_send.append((ver, self._project(out_row, fields)))
+            elif client_ref:
                 buffer_start_ver = self._buffer[0][0]
                 if compare_refs(client_ref, buffer_start_ver) >= 0:
                     for ver, row in self._buffer:
@@ -123,10 +131,22 @@ class StreamService(Service):
                     rows_to_send.append((ver, self._project(out_row, fields)))
 
         if maxcount:
-            hasmore = len(rows_to_send) > maxcount
-            page = rows_to_send[:maxcount]
-            page_ref = page[-1][0] if page else ""
+            if before:
+                hasmore = len(rows_to_send) > maxcount
+                page = rows_to_send[-maxcount:]
+                page_ref = page[0][0] if page else ""
+            else:
+                hasmore = len(rows_to_send) > maxcount
+                page = rows_to_send[:maxcount]
+                page_ref = page[-1][0] if page else ""
             resp = make_snapshot(page_ref, self.name, [r for _, r in page], subid=subid, hasmore=hasmore)
+            await ws.send_bytes(resp)
+            await self.notify_monitors("out", resp)
+            return 0
+
+        if before:
+            page_ref = rows_to_send[0][0] if rows_to_send else ""
+            resp = make_snapshot(page_ref, self.name, [r for _, r in rows_to_send], subid=subid, hasmore=False)
             await ws.send_bytes(resp)
             await self.notify_monitors("out", resp)
             return 0

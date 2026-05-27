@@ -327,7 +327,7 @@ Clients subscribe with `topic: "AAPL:Buy"`. The `topic` must name a column in th
 
 ### Stream
 
-Append-only data with ring buffer and ref-based cursor reconnection.
+Append-only data with ring buffer and ref-based cursor reconnection. Supports forward and backward pagination through the buffer.
 
 ```toml
 [services.audit_feed]
@@ -540,6 +540,12 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 {"service": "audit_feed", "type": "subscribe", "protocol": "stream", "ref": "<last-row-ref>", "maxcount": 100}
 // Once hasmore is false, subscribe without maxcount to go live
 
+// Stream backward pagination (rows before a ref, newest N closest to the ref)
+{"service": "audit_feed", "type": "subscribe", "protocol": "stream", "ref": "<ref>", "before": true, "maxcount": 20}
+// → {"type": "snapshot", "ref": "<earliest-row-ref>", "rows": [...], "hasmore": true}
+// Next page backward: subscribe again with returned ref and before: true
+{"service": "audit_feed", "type": "subscribe", "protocol": "stream", "ref": "<earliest-row-ref>", "before": true, "maxcount": 20}
+
 // ReqRep — one-shot request-reply (reqid echoed on reply for correlation)
 {"service": "tax", "type": "request", "reqid": "r1", "data": {"qty": 10, "price": 99.95, "rate": 0.08}}
 // → {"type": "reply", "service": "tax", "reqid": "r1", "value": 79.96}
@@ -635,6 +641,7 @@ mkio.subpub("last_trade", ["AAPL","MSFT","GOOG"])
 mkio.subpub("last_trade", "AAPL", {fields:["bid","ask"], subid:"p1"})
 mkio.stream("audit_feed")                 // ref auto-generated
 mkio.stream("audit_feed", {ref:"...", filter:"qty > 100"})
+mkio.stream("audit_feed", {before: true, ref:"...", maxcount: 20})  // backward
 mkio.query("all_orders", {filter:"status == 'pending'"})
 mkio.query("all_orders", {maxcount: 50})     // paginated snapshot
 mkio.query("all_orders", {snapshotOnly: true})
@@ -760,7 +767,8 @@ mkio subpub localhost:8080 last_trade AAPL --fields symbol,price
 mkio stream localhost:8080 audit_feed
 mkio stream localhost:8080 audit_feed --ref "20260404 15:30:45.123456000000"
 mkio stream localhost:8080 audit_feed --fields event,order_id
-mkio stream localhost:8080 audit_feed --maxcount 100    # page from beginning of buffer
+mkio stream localhost:8080 audit_feed --maxcount 100    # page forward from beginning of buffer
+mkio stream localhost:8080 audit_feed --before --ref "<ref>" --maxcount 20  # page backward
 
 # Query — snapshot + live updates
 mkio query localhost:8080 all_orders

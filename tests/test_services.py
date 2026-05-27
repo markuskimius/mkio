@@ -2180,6 +2180,390 @@ async def test_stream_pagination_maxcount_non_integer(stream_svc):
         await stream_svc.on_unsubscribe(ws, {"type": "unsubscribe"})
 
 
+async def test_stream_before_basic(stream_svc):
+    """before + ref returns rows before that ref."""
+    ws = MockWebSocket()
+    # Get all refs by paginating forward one at a time
+    refs = []
+    ref = None
+    for _ in range(5):
+        msg = {"type": "subscribe", "maxcount": 1}
+        if ref:
+            msg["ref"] = ref
+        await stream_svc.on_subscribe(ws, msg)
+        snap = ws.get_messages()[0]
+        refs.append(snap["ref"])
+        ref = snap["ref"]
+        ws.clear()
+
+    # Get rows before the last ref (should return first 4 rows)
+    ws = MockWebSocket()
+    count = await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "ref": refs[-1], "before": True,
+    })
+    assert count == 0
+    snap = ws.get_messages()[0]
+    assert snap["type"] == "snapshot"
+    assert len(snap["rows"]) == 4
+    assert [r["event"] for r in snap["rows"]] == [f"event_{i}" for i in range(4)]
+    assert snap["hasmore"] is False
+
+
+async def test_stream_before_with_maxcount(stream_svc):
+    """before + ref + maxcount returns last N rows before ref."""
+    ws = MockWebSocket()
+    # Get the last ref
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 100})
+    all_snap = ws.get_messages()[0]
+    last_ref = all_snap["ref"]
+    ws.clear()
+
+    # Get last 2 rows before the final ref
+    ws = MockWebSocket()
+    count = await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "ref": last_ref, "before": True, "maxcount": 2,
+    })
+    assert count == 0
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 2
+    assert snap["hasmore"] is True
+    # Should be the 2 rows immediately before the last (event_2, event_3)
+    assert [r["event"] for r in snap["rows"]] == ["event_2", "event_3"]
+
+
+async def test_stream_before_pagination_full(stream_svc):
+    """Page backward through entire buffer using before + maxcount."""
+    ws = MockWebSocket()
+    # Get the last ref
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 100})
+    cursor_ref = ws.get_messages()[0]["ref"]
+    ws.clear()
+
+    all_rows = []
+    for _ in range(10):
+        ws = MockWebSocket()
+        await stream_svc.on_subscribe(ws, {
+            "type": "subscribe", "ref": cursor_ref, "before": True, "maxcount": 2,
+        })
+        snap = ws.get_messages()[0]
+        all_rows = snap["rows"] + all_rows  # prepend (older rows go first)
+        if not snap["hasmore"]:
+            break
+        cursor_ref = snap["ref"]
+
+    assert [r["event"] for r in all_rows] == [f"event_{i}" for i in range(4)]
+
+
+async def test_stream_before_no_ref_maxcount(stream_svc):
+    """before + maxcount without ref returns last N rows from buffer."""
+    ws = MockWebSocket()
+    count = await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "before": True, "maxcount": 2,
+    })
+    assert count == 0
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 2
+    assert snap["hasmore"] is True
+    assert [r["event"] for r in snap["rows"]] == ["event_3", "event_4"]
+
+
+async def test_stream_before_no_live(stream_svc, bus):
+    """before never creates a live subscription."""
+    ws = MockWebSocket()
+    count = await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "before": True,
+    })
+    assert count == 0
+    assert len(stream_svc._subscribers) == 0
+    ws.clear()
+
+    event = ChangeBus.make_event(
+        "audit_log", "insert",
+        {"id": 99, "event": "live_event", "order_id": "99"},
+        "20260404 00:00:01.000000000000",
+    )
+    bus.publish([event])
+    await asyncio.sleep(0.1)
+
+    msgs = ws.get_messages()
+    assert len(msgs) == 0
+
+
+async def test_stream_before_empty(stream_svc):
+    """before with ref at/before buffer start returns empty snapshot."""
+    ws = MockWebSocket()
+    # Use the first row's ref — nothing is before it
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 1})
+    first_ref = ws.get_messages()[0]["ref"]
+    ws.clear()
+
+    ws = MockWebSocket()
+    count = await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "ref": first_ref, "before": True,
+    })
+    assert count == 0
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 0
+    assert snap["hasmore"] is False
+
+
+async def test_stream_before_with_filter(stream_svc, db):
+    """Filter + before work together."""
+    config = {
+        "protocol": "stream",
+        "primary_table": "audit_log",
+        "watch_tables": ["audit_log"],
+        "buffer_size": 100,
+        "filterable": ["event"],
+    }
+    svc = StreamService(config=config, db=db, change_bus=stream_svc.bus, writer=stream_svc.writer)
+    svc.name = "audit_filtered"
+    await svc.start()
+
+    ws = MockWebSocket()
+    # Get last ref
+    await svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 100})
+    last_ref = ws.get_messages()[0]["ref"]
+    ws.clear()
+
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {
+        "type": "subscribe", "ref": last_ref, "before": True, "maxcount": 10,
+        "filter": "event == 'event_1' OR event == 'event_3'",
+    })
+    snap = ws.get_messages()[0]
+    assert [r["event"] for r in snap["rows"]] == ["event_1", "event_3"]
+    assert snap["hasmore"] is False
+
+    await svc.stop()
+
+
+async def test_stream_before_with_fields(stream_svc):
+    """Field projection + before work together."""
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 100})
+    last_ref = ws.get_messages()[0]["ref"]
+    ws.clear()
+
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "ref": last_ref, "before": True,
+        "maxcount": 2, "fields": ["event"],
+    })
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 2
+    for row in snap["rows"]:
+        assert list(row.keys()) == ["event"]
+
+
+async def test_stream_before_no_maxcount(stream_svc):
+    """before + ref without maxcount returns all rows before ref, no live."""
+    ws = MockWebSocket()
+    # Get all refs
+    refs = []
+    ref = None
+    for _ in range(5):
+        msg = {"type": "subscribe", "maxcount": 1}
+        if ref:
+            msg["ref"] = ref
+        await stream_svc.on_subscribe(ws, msg)
+        snap = ws.get_messages()[0]
+        refs.append(snap["ref"])
+        ref = snap["ref"]
+        ws.clear()
+
+    # Get all rows before the 4th ref (should return first 3)
+    ws = MockWebSocket()
+    count = await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "ref": refs[3], "before": True,
+    })
+    assert count == 0
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 3
+    assert [r["event"] for r in snap["rows"]] == ["event_0", "event_1", "event_2"]
+    assert snap["hasmore"] is False
+
+
+async def test_stream_before_with_subid(stream_svc):
+    """subid is echoed on backward-paginated snapshots."""
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 100})
+    last_ref = ws.get_messages()[0]["ref"]
+    ws.clear()
+
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "ref": last_ref, "before": True,
+        "maxcount": 2, "subid": "back1",
+    })
+    snap = ws.get_messages()[0]
+    assert snap["subid"] == "back1"
+    assert len(snap["rows"]) == 2
+    assert snap["hasmore"] is True
+
+
+async def test_stream_before_empty_buffer(db, bus, writer):
+    """before with empty buffer returns empty snapshot."""
+    config = {
+        "protocol": "stream",
+        "primary_table": "audit_log",
+        "watch_tables": ["audit_log"],
+        "buffer_size": 100,
+    }
+    await db.write_conn.execute("DELETE FROM audit_log")
+    await db.write_conn.commit()
+
+    svc = StreamService(config=config, db=db, change_bus=bus, writer=writer)
+    svc.name = "empty_stream"
+    await svc.start()
+
+    ws = MockWebSocket()
+    count = await svc.on_subscribe(ws, {
+        "type": "subscribe", "before": True, "maxcount": 10,
+    })
+    assert count == 0
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 0
+    assert snap["hasmore"] is False
+
+    await svc.stop()
+
+
+async def test_stream_before_non_bool_ignored(stream_svc):
+    """Non-True before values are treated as False (forward)."""
+    for bad_value in ["yes", 1, "true", []]:
+        ws = MockWebSocket()
+        count = await stream_svc.on_subscribe(ws, {
+            "type": "subscribe", "ref": "00000000 00:00:00.000000000000",
+            "before": bad_value,
+        })
+        assert count == 1
+        snap = ws.get_messages()[0]
+        assert len(snap["rows"]) == 5
+        await stream_svc.on_unsubscribe(ws, {"type": "unsubscribe"})
+
+
+async def test_stream_before_ref_after_buffer(stream_svc):
+    """before with ref after all buffer entries returns all rows."""
+    ws = MockWebSocket()
+    count = await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "ref": "99999999 99:99:99.999999999999",
+        "before": True,
+    })
+    assert count == 0
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 5
+    assert [r["event"] for r in snap["rows"]] == [f"event_{i}" for i in range(5)]
+
+
+async def test_stream_before_cursor_ref_is_earliest(stream_svc):
+    """Backward pagination cursor ref is the earliest row in the page."""
+    ws = MockWebSocket()
+    # Get all refs forward
+    refs = []
+    ref = None
+    for _ in range(5):
+        msg = {"type": "subscribe", "maxcount": 1}
+        if ref:
+            msg["ref"] = ref
+        await stream_svc.on_subscribe(ws, msg)
+        snap = ws.get_messages()[0]
+        refs.append(snap["ref"])
+        ref = snap["ref"]
+        ws.clear()
+
+    # Backward page of 2 from the last ref
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "ref": refs[-1], "before": True, "maxcount": 2,
+    })
+    snap = ws.get_messages()[0]
+    # Page contains event_2 and event_3, cursor should be event_2's ref
+    assert snap["ref"] == refs[2]
+    assert [r["event"] for r in snap["rows"]] == ["event_2", "event_3"]
+
+
+async def test_stream_before_maxcount_one(stream_svc):
+    """before + maxcount=1 returns one row at a time, paging backward."""
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 100})
+    cursor_ref = ws.get_messages()[0]["ref"]
+    ws.clear()
+
+    all_events = []
+    for _ in range(10):
+        ws = MockWebSocket()
+        await stream_svc.on_subscribe(ws, {
+            "type": "subscribe", "ref": cursor_ref, "before": True, "maxcount": 1,
+        })
+        snap = ws.get_messages()[0]
+        assert len(snap["rows"]) <= 1
+        all_events = [r["event"] for r in snap["rows"]] + all_events
+        if not snap["hasmore"]:
+            break
+        cursor_ref = snap["ref"]
+
+    assert all_events == [f"event_{i}" for i in range(4)]
+
+
+async def test_stream_before_maxcount_exact_fit(stream_svc):
+    """before + maxcount == number of rows before ref: all returned, hasmore=false."""
+    ws = MockWebSocket()
+    # Get all refs
+    refs = []
+    ref = None
+    for _ in range(5):
+        msg = {"type": "subscribe", "maxcount": 1}
+        if ref:
+            msg["ref"] = ref
+        await stream_svc.on_subscribe(ws, msg)
+        snap = ws.get_messages()[0]
+        refs.append(snap["ref"])
+        ref = snap["ref"]
+        ws.clear()
+
+    # 3 rows before refs[3] (event_0, event_1, event_2), request exactly 3
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "ref": refs[3], "before": True, "maxcount": 3,
+    })
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 3
+    assert snap["hasmore"] is False
+
+
+async def test_stream_before_maxcount_larger_than_available(stream_svc):
+    """before + maxcount larger than available rows returns all, hasmore=false."""
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 100})
+    last_ref = ws.get_messages()[0]["ref"]
+    ws.clear()
+
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "ref": last_ref, "before": True, "maxcount": 100,
+    })
+    snap = ws.get_messages()[0]
+    assert len(snap["rows"]) == 4
+    assert snap["hasmore"] is False
+
+
+async def test_stream_before_rows_chronological(stream_svc):
+    """Rows returned by before are always in chronological (oldest-first) order."""
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "maxcount": 100})
+    last_ref = ws.get_messages()[0]["ref"]
+    ws.clear()
+
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {
+        "type": "subscribe", "ref": last_ref, "before": True, "maxcount": 10,
+    })
+    snap = ws.get_messages()[0]
+    events = [r["event"] for r in snap["rows"]]
+    assert events == sorted(events)
+
+
 async def test_query_pagination_basic(query_svc_many):
     """maxcount=2 returns first 2 rows with hasmore=true."""
     ws = MockWebSocket()

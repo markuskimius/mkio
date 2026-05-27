@@ -274,7 +274,7 @@ def test_js_client_query_mutual_exclusion():
 def test_js_client_stream_auto_ref():
     """Verify mkio.stream auto-generates a ref if not provided."""
     src = JS_CLIENT_PATH.read_text()
-    assert "if (!o.ref) o.ref = makeRef()" in src
+    assert "if (!o.ref && !o.before) o.ref = makeRef()" in src
 
 
 def test_js_client_default_nack_handler():

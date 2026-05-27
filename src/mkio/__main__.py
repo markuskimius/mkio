@@ -697,7 +697,7 @@ def _cmd_subpub() -> None:
 
 def _cmd_stream() -> None:
     args = sys.argv[2:]
-    usage = "mkio stream <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--ref <ref>] [--maxcount <n>]"
+    usage = "mkio stream <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--ref <ref>] [--maxcount <n>] [--before]"
     if len(args) < 2:
         print(f"Usage: {usage}")
         sys.exit(1)
@@ -705,13 +705,16 @@ def _cmd_stream() -> None:
     url = args[0].rstrip("/")
     service = args[1]
     rest = args[2:]
-    _check_unknown_flags(rest, {"--filter", "--fields", "--ref", "--subid", "--maxcount"}, usage)
+    _check_unknown_flags(rest, {"--filter", "--fields", "--ref", "--subid", "--maxcount", "--before"}, usage)
     filter_expr = _extract_flag(rest, "--filter")
     fields = _extract_fields(rest)
     ref = _extract_flag(rest, "--ref")
     maxcount_str = _extract_flag(rest, "--maxcount")
     maxcount = int(maxcount_str) if maxcount_str else None
-    if ref is None and not maxcount:
+    before = "--before" in rest
+    if before:
+        rest.remove("--before")
+    if ref is None and not maxcount and not before:
         from mkio._ref import next_ref
         ref = next_ref()
     subid = _extract_flag(rest, "--subid")
@@ -720,7 +723,7 @@ def _cmd_stream() -> None:
 
     _run_client_command(
         ws_url,
-        _subscribe_service(ws_url, service, "stream", filter_expr, ref, subid, fields=fields, maxcount=maxcount),
+        _subscribe_service(ws_url, service, "stream", filter_expr, ref, subid, fields=fields, maxcount=maxcount, before=before),
         "\nSubscription stopped.",
     )
 
@@ -796,11 +799,12 @@ async def _subscribe_service(
     fields: list[str] | None = None,
     topic: str | list[str] | None = None,
     maxcount: int | None = None,
+    before: bool = False,
 ) -> None:
     from mkio.client import MkioClient
 
     async with MkioClient(ws_url, reconnect=True) as client:
-        async for msg in client.subscribe(service, protocol, topic=topic, filter=filter_expr, ref=ref, subid=subid, snapshot=snapshot, updates=updates, fields=fields, maxcount=maxcount):
+        async for msg in client.subscribe(service, protocol, topic=topic, filter=filter_expr, ref=ref, subid=subid, snapshot=snapshot, updates=updates, fields=fields, maxcount=maxcount, before=before):
             if msg.get("type") == "nack":
                 message = msg.get("message", "subscription rejected")
                 print(f"Error: {message}")

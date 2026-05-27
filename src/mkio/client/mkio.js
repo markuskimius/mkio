@@ -299,6 +299,7 @@ class MkioClient {
       updates: opts.updates !== false,
       fields: opts.fields || null,
       maxcount: opts.maxcount || null,
+      before: !!opts.before,
       onSnapshot: opts.onSnapshot || (() => {}),
       onDelta: opts.onDelta || (() => {}),
       onUpdate: opts.onUpdate || (() => {}),
@@ -319,6 +320,7 @@ class MkioClient {
     if (!sub.updates) msg.updates = false;
     if (sub.fields) msg.fields = sub.fields;
     if (sub.maxcount) msg.maxcount = sub.maxcount;
+    if (sub.before) msg.before = true;
 
     this._sendRaw(msg);
   }
@@ -521,7 +523,7 @@ class MkioClient {
           } else {
             sub.onSnapshot(data.rows);
           }
-          if (sub.updates) {
+          if (sub.updates && !sub.before) {
             sub.maxcount = null;
             this._sendSubscribe(sub);
           }
@@ -549,6 +551,7 @@ class MkioClient {
     if (!sub.updates) msg.updates = false;
     if (sub.fields) msg.fields = sub.fields;
     if (sub.maxcount) msg.maxcount = sub.maxcount;
+    if (sub.before) msg.before = true;
     this._sendRaw(msg);
   }
 
@@ -886,7 +889,7 @@ const mkio = {
   },
   stream(service, opts) {
     const o = { ...(opts || {}) };
-    if (!o.ref) o.ref = makeRef();
+    if (!o.ref && !o.before) o.ref = makeRef();
     return _mkioSubscribe(service, "stream", o);
   },
   query(service, opts) {
