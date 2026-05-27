@@ -85,7 +85,7 @@ def _usage() -> None:
     print("                                   Send transaction(s) from JSON/CSV/inline")
     print("  mkio subpub <url> <service> <topic> [--subid <id>] [--fields <f1,f2,...>]")
     print("                                   Subscribe to a subpub service")
-    print("  mkio stream <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--ref <ref>] [--maxcount <n>]")
+    print("  mkio stream <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--ref <ref>] [--maxcount <n>] [--before]")
     print("                                   Subscribe to a stream service")
     print("  mkio query <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--snapshotOnly] [--updateOnly]")
     print("                                   Subscribe to a query service")
