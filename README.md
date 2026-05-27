@@ -577,6 +577,10 @@ async with MkioClient("ws://localhost:8080/ws") as client:
     async for msg in client.subscribe("all_orders", "query", maxcount=50):
         print(msg)
 
+    # Stream — backward pagination (last 20 rows before a ref)
+    async for msg in client.subscribe("audit_feed", "stream", before=True, ref=some_ref, maxcount=20):
+        print(msg)
+
     # ReqRep — one-shot request-reply (auto-generates reqid)
     result = await client.request("tax", {"qty": 10, "price": 99.95, "rate": 0.08})
     print(result)  # {"type": "reply", "value": 79.96, ...}

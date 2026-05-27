@@ -280,6 +280,7 @@ class MkioClient {
    * @param {string} [opts.ref] - Ref from last received message for recovery (stream only)
    * @param {string} [opts.subid] - Subscription ID echoed on all responses
    * @param {string} protocol - Expected protocol ("subpub", "stream", "query"); server rejects on mismatch
+   * @param {boolean} [opts.before=false] - Return rows before ref instead of after (stream only, never goes live)
    * @param {boolean} [opts.snapshot=true] - Whether to receive the initial snapshot
    * @param {boolean} [opts.updates=true] - Whether to receive live updates
    * @param {string[]} [opts.fields] - Restrict rows to these fields only
@@ -593,7 +594,8 @@ const MKIO_HELP = [
   'mkio.monitor("off")                                  stop tapping',
   'mkio.send("<service>", data, {op, ref, txnid})       send a transaction',
   'mkio.subpub("<svc>", "<topic>"|["t1","t2"], {fields, subid})  subscribe to a subpub service',
-  'mkio.stream("<svc>", {ref, filter, fields, subid})   subscribe to a stream service',
+  'mkio.stream("<svc>", {ref, filter, fields, subid,    subscribe to a stream service',
+  '                     before, maxcount})',
   'mkio.query("<svc>", {filter, fields, subid,          subscribe to a query service',
   '                     snapshotOnly, updateOnly})',
   'mkio.reqrep("<service>", data, {reqid})              send a request-reply message',

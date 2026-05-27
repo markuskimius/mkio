@@ -485,6 +485,41 @@ async def test_subscribe_with_filter_stream(client):
     assert update["row"]["event"] == "order_placed"
 
 
+async def test_subscribe_stream_before(client):
+    """Subscribe to stream with before=True returns rows before a ref."""
+    from mkio.client import MkioClient
+
+    await _insert_order(client, "Buy", "AAPL", 100, 150.0)
+    await _insert_order(client, "Sell", "GOOG", 50, 2800.0)
+    await _insert_order(client, "Buy", "MSFT", 200, 300.0)
+
+    ws_url = _ws_url(client)
+
+    # First, get all rows to find a ref in the middle
+    all_rows = []
+    async with MkioClient(ws_url, reconnect=False) as mk:
+        async for msg in mk.subscribe("audit_feed", "stream", ref="00000000 00:00:00.000000000000", updates=False):
+            all_rows = msg["rows"]
+            break
+
+    assert len(all_rows) >= 3
+    # Use the ref from the last row as anchor
+    last_ref = msg["ref"]
+
+    # Now subscribe with before=True + maxcount to get the last 2 rows before the end
+    received = []
+    async with MkioClient(ws_url, reconnect=False) as mk:
+        async for msg in mk.subscribe("audit_feed", "stream", before=True, ref=last_ref, maxcount=2, updates=False):
+            received.append(msg)
+            if not msg.get("hasmore"):
+                break
+
+    assert len(received) >= 1
+    snap = received[-1]
+    assert snap["type"] == "snapshot"
+    assert len(snap["rows"]) <= 2
+
+
 # ---- CLI argument validation tests -------------------------------------------
 
 
@@ -557,6 +592,17 @@ def test_stream_unknown_flag():
     )
     assert result.returncode != 0
     assert "Unknown option" in result.stdout
+
+
+def test_stream_before_flag_accepted():
+    """--before is a recognized flag for mkio stream (not rejected as unknown)."""
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "stream", "url", "svc", "--before"],
+        capture_output=True, text=True,
+    )
+    # It will fail to connect, but should NOT say "Unknown option"
+    assert "Unknown option" not in result.stdout
 
 
 def test_query_mutually_exclusive_flags():

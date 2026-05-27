@@ -272,9 +272,15 @@ def test_js_client_query_mutual_exclusion():
 
 
 def test_js_client_stream_auto_ref():
-    """Verify mkio.stream auto-generates a ref if not provided."""
+    """Verify mkio.stream auto-generates a ref if not provided, unless before is set."""
     src = JS_CLIENT_PATH.read_text()
     assert "if (!o.ref && !o.before) o.ref = makeRef()" in src
+
+
+def test_js_client_subscribe_sends_before():
+    """Verify subscribe includes before flag in message when set."""
+    src = JS_CLIENT_PATH.read_text()
+    assert "if (sub.before) msg.before = true;" in src
 
 
 def test_js_client_default_nack_handler():
@@ -323,6 +329,17 @@ results.streamHasRef = typeof FakeWS.sent[0].ref === "string" && FakeWS.sent[0].
 FakeWS.sent = [];
 mkio.stream("trades", { ref: "custom-ref" });
 results.streamExplicitRef = FakeWS.sent[0].ref;
+
+// stream with before — should not auto-generate ref
+FakeWS.sent = [];
+mkio.stream("trades", { before: true, maxcount: 10 });
+results.streamBeforeSent = FakeWS.sent[0];
+results.streamBeforeNoAutoRef = !FakeWS.sent[0].ref;
+
+// stream with before + explicit ref
+FakeWS.sent = [];
+mkio.stream("trades", { before: true, ref: "some-ref", maxcount: 5 });
+results.streamBeforeRefSent = FakeWS.sent[0];
 
 // query basic
 FakeWS.sent = [];
@@ -402,6 +419,17 @@ console.log(JSON.stringify(results));
 
     # stream with explicit ref
     assert out["streamExplicitRef"] == "custom-ref"
+
+    # stream with before — no auto-ref, before=true in message
+    assert out["streamBeforeNoAutoRef"] is True
+    assert out["streamBeforeSent"]["before"] is True
+    assert out["streamBeforeSent"]["maxcount"] == 10
+    assert out["streamBeforeSent"]["protocol"] == "stream"
+
+    # stream with before + explicit ref
+    assert out["streamBeforeRefSent"]["before"] is True
+    assert out["streamBeforeRefSent"]["ref"] == "some-ref"
+    assert out["streamBeforeRefSent"]["maxcount"] == 5
 
     # query with filter and auto-generated subid
     assert out["querySent"]["protocol"] == "query"
