@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import csv
+import json
 import sqlite3
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -297,7 +300,9 @@ def print_change_summary(
 
 
 def apply_changes(
-    conn: sqlite3.Connection, changes: list[SchemaChange]
+    conn: sqlite3.Connection,
+    changes: list[SchemaChange],
+    config_tables: dict[str, dict] | None = None,
 ) -> tuple[int, int]:
     """Apply schema changes within a transaction.
 
@@ -306,13 +311,17 @@ def apply_changes(
     """
     total_before = 0
     total_after = 0
+    created_tables: list[str] = []
 
     for change in changes:
         if not change.sql_steps or change.sql_steps == ["-- handled by prior recreation"]:
             continue
+        is_create = False
         for sql in change.sql_steps:
             if sql.startswith("--"):
                 continue
+            if sql.startswith("CREATE TABLE"):
+                is_create = True
             # Track row counts for recreation
             if sql.startswith("ALTER TABLE") and sql.endswith("_old"):
                 table = change.table
@@ -327,6 +336,19 @@ def apply_changes(
                     total_after += count_table_rows(conn, table)
                 except Exception:
                     pass
+        if is_create:
+            created_tables.append(change.table)
+
+    # Seed newly created tables
+    if config_tables and created_tables:
+        for table_name in created_tables:
+            tbl_cfg = config_tables.get(table_name, {})
+            seed_path = tbl_cfg.get("_seed_path")
+            if seed_path:
+                table_columns = set(tbl_cfg.get("columns", {}).keys())
+                count = seed_table(conn, table_name, seed_path, table_columns)
+                if count:
+                    print(f"  Seeded {table_name}: {count} rows from {Path(seed_path).name}")
 
     conn.commit()
     return total_before, total_after
@@ -383,7 +405,7 @@ def migrate_schema(
     blocked = [c for c in changes if c.level not in allowed]
 
     if applicable:
-        rows_before, rows_after = apply_changes(conn, applicable)
+        rows_before, rows_after = apply_changes(conn, applicable, config_tables)
         for change in applicable:
             print(f"  Applied ({change.level}): {change.table} — {change.description}")
         if rows_before > rows_after:
@@ -405,3 +427,149 @@ def migrate_schema(
         return False
 
     return True
+
+
+# ---------------------------------------------------------------------------
+# Table seeding
+# ---------------------------------------------------------------------------
+
+
+def _auto_convert(value: str):
+    """Convert string values to int/float if possible."""
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    return value
+
+
+def _load_seed_rows(seed_path: str) -> list[dict]:
+    """Load rows from a CSV, JSON, or JSONL file."""
+    ext = Path(seed_path).suffix.lower()
+    if ext == ".csv":
+        with open(seed_path, newline="") as f:
+            reader = csv.DictReader(f)
+            return [{k: _auto_convert(v) for k, v in row.items()} for row in reader]
+    elif ext == ".json":
+        with open(seed_path) as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            raise ValueError(f"seed file {seed_path}: expected a JSON array, got {type(data).__name__}")
+        return data
+    elif ext == ".jsonl":
+        rows = []
+        with open(seed_path) as f:
+            for lineno, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"seed file {seed_path}, line {lineno}: {exc}") from None
+        return rows
+    else:
+        raise ValueError(f"seed file {seed_path}: unsupported extension {ext!r}")
+
+
+def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    for row in conn.execute(f"PRAGMA table_info({table})").fetchall():
+        if row[1] == column:
+            return True
+    return False
+
+
+def seed_table(
+    conn: sqlite3.Connection,
+    table_name: str,
+    seed_path: str,
+    table_columns: set[str],
+) -> int:
+    """Load seed data into a newly created table (sync, for on-disk DBs).
+
+    Returns the number of rows inserted.
+    """
+    rows = _load_seed_rows(seed_path)
+    if not rows:
+        return 0
+
+    for row in rows:
+        unknown = set(row.keys()) - table_columns
+        if unknown:
+            available = ", ".join(sorted(table_columns))
+            raise ValueError(
+                f"seed file {seed_path}: unknown column(s) {', '.join(sorted(unknown))}. "
+                f"Available columns: {available}"
+            )
+
+    has_ref = _table_has_column(conn, table_name, "_mkio_ref")
+    cols = list(rows[0].keys())
+    if has_ref:
+        from mkio._ref import next_ref
+        ref = next_ref()
+        cols.append("_mkio_ref")
+
+    placeholders = ", ".join("?" for _ in cols)
+    col_names = ", ".join(cols)
+    sql = f"INSERT INTO {table_name} ({col_names}) VALUES ({placeholders})"
+
+    for row in rows:
+        vals = tuple(row.get(c) for c in rows[0].keys())
+        if has_ref:
+            vals += (ref,)
+        conn.execute(sql, vals)
+
+    return len(rows)
+
+
+async def async_seed_table(
+    conn,
+    table_name: str,
+    seed_path: str,
+    table_columns: set[str],
+) -> int:
+    """Load seed data into a newly created table (async, for in-memory DBs).
+
+    Returns the number of rows inserted.
+    """
+    rows = _load_seed_rows(seed_path)
+    if not rows:
+        return 0
+
+    for row in rows:
+        unknown = set(row.keys()) - table_columns
+        if unknown:
+            available = ", ".join(sorted(table_columns))
+            raise ValueError(
+                f"seed file {seed_path}: unknown column(s) {', '.join(sorted(unknown))}. "
+                f"Available columns: {available}"
+            )
+
+    has_ref = False
+    async with conn.execute(f"PRAGMA table_info({table_name})") as cursor:
+        async for row_info in cursor:
+            if row_info[1] == "_mkio_ref":
+                has_ref = True
+                break
+
+    cols = list(rows[0].keys())
+    if has_ref:
+        from mkio._ref import next_ref
+        ref = next_ref()
+        cols.append("_mkio_ref")
+
+    placeholders = ", ".join("?" for _ in cols)
+    col_names = ", ".join(cols)
+    sql = f"INSERT INTO {table_name} ({col_names}) VALUES ({placeholders})"
+
+    for row in rows:
+        vals = tuple(row.get(c) for c in rows[0].keys())
+        if has_ref:
+            vals += (ref,)
+        await (await conn.execute(sql, vals)).close()
+
+    return len(rows)

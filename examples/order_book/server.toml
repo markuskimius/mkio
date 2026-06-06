@@ -3,6 +3,7 @@ host = "0.0.0.0"
 db_path = "orders.db"
 batch_max_size = 500
 batch_max_wait_ms = 2.0
+auto_migrate = "safe"
 
 # --- Database schema ---
 
@@ -12,10 +13,24 @@ columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", side = "TEXT NOT NULL", sy
 [tables.audit_log]
 columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", event = "TEXT", order_id = "INTEGER", status = "TEXT" }
 
+# --- Authentication ---
+# Presence of _mkio_rights enables auth; all services locked by default.
+# Default users seeded on first run: alice/password (trader), bob/password (viewer)
+# Add more users with: mkio adduser <username> <role>
+
+[tables._mkio_users]
+columns = { username = "TEXT PRIMARY KEY", password = "TEXT NOT NULL", role = "TEXT NOT NULL" }
+seed = "data/users.csv"
+
+[tables._mkio_rights]
+columns = { role = "TEXT", right = "TEXT" }
+seed = "data/rights.csv"
+
 # --- Transaction service (all order operations at one endpoint) ---
 
 [services.orders]
 protocol = "transaction"
+access = "trade"
 
 [services.orders.ops]
 new = [
@@ -47,6 +62,7 @@ primary_table = "orders"
 topic = "symbol"
 where = "status == 'filled'"
 change_log_size = 10000
+access = "open"
 
 [services.last_trade.defaults]
 symbol = "_mkio_topic"
@@ -65,6 +81,7 @@ primary_table = "orders"
 topic = "topic_key"
 sql = "SELECT *, symbol || ':' || side AS topic_key FROM orders"
 where = "status == 'filled'"
+access = "open"
 
 [services.last_trade_by_side.publish]
 symbol = "symbol"
@@ -76,12 +93,14 @@ qty = "qty"
 protocol = "stream"
 primary_table = "audit_log"
 buffer_size = 10000
+access = "view"
 
 [services.all_orders]
 protocol = "query"
 primary_table = "orders"
 filterable = ["status", "symbol"]
 change_log_size = 10000
+access = "view"
 
 # --- Request-reply services ---
 
@@ -89,23 +108,27 @@ change_log_size = 10000
 [services.order_lookup]
 protocol = "reqrep"
 sql = "SELECT * FROM orders WHERE id = :id"
+access = "view"
 
 # Summary stats for a symbol
 [services.symbol_summary]
 protocol = "reqrep"
 params = { symbol = "UPPER(symbol)" }
 sql = "SELECT symbol, COUNT(*) as total_orders, SUM(CASE WHEN status = 'filled' THEN 1 ELSE 0 END) as filled, SUM(CASE WHEN status = 'filled' THEN qty ELSE 0 END) as filled_qty, ROUND(AVG(CASE WHEN status = 'filled' THEN price END), 2) as avg_fill_price FROM orders WHERE symbol = :symbol GROUP BY symbol"
+access = "view"
 
 # Compute order total from client-supplied data (no DB)
 [services.order_total]
 protocol = "reqrep"
 reply = { subtotal = "qty * price", fee = "ROUND(qty * price * 0.001, 2)", total = "ROUND(qty * price * 1.001, 2)" }
+access = "open"
 
 # Count orders by status (scalar)
 [services.order_count]
 protocol = "reqrep"
 sql = "SELECT COUNT(*) as n FROM orders WHERE status = :status"
 reply = "COALESCE(n, 0)"
+access = "view"
 
 # --- Static file serving ---
 

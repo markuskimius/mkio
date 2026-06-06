@@ -29,6 +29,8 @@ from mkio.writer import WriteBatcher
 from mkio.migration import _parse_config_columns
 from mkio.ws_protocol import make_error, make_nack, parse_message
 
+log = logging.getLogger("mkio.server")
+
 SERVICE_TYPES: dict[str, type[Service]] = {
     "transaction": TransactionService,
     "subpub": SubPubService,
@@ -601,6 +603,24 @@ async def _on_startup(app: web.Application) -> None:
     info_svc._monitor_notifier = lambda sn, d, data, _app=app: _notify_monitors(_app, sn, d, data)
     services["_mkio"] = info_svc
 
+    # Auth: load rights cache if auth is enabled
+    if cfg.get("auth"):
+        from mkio.auth import load_rights_cache
+        rights_cache = await load_rights_cache(db)
+        app["rights_cache"] = rights_cache
+
+        async def _rights_listener():
+            try:
+                while True:
+                    await rights_q.get()
+                    new_cache = await load_rights_cache(db)
+                    rights_cache._rights = new_cache._rights
+            except asyncio.CancelledError:
+                pass
+
+        rights_q = bus.subscribe(["_mkio_rights"])
+        app["_rights_listener"] = asyncio.create_task(_rights_listener())
+
     # User startup hooks
     if mkio_app is not None:
         for hook in mkio_app._startup_hooks:
@@ -613,6 +633,15 @@ async def _on_shutdown(app: web.Application) -> None:
     if mkio_app is not None:
         for hook in mkio_app._shutdown_hooks:
             await hook()
+
+    # 0b. Stop rights cache listener
+    rights_task = app.get("_rights_listener")
+    if rights_task is not None:
+        rights_task.cancel()
+        try:
+            await rights_task
+        except asyncio.CancelledError:
+            pass
 
     # 1. Close all WebSocket connections so handlers can exit
     wss = set(app.get("websockets", set()))
@@ -664,6 +693,97 @@ async def _notify_monitors(
         all_monitors.get("*", set()).discard(d)
 
 
+async def _handle_auth(
+    app: web.Application, ws: web.WebSocketResponse, msg: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Handle an auth message. Returns auth info dict on success, None on failure."""
+    data = msg.get("data", {})
+    mkio_app = app.get("mkio_app")
+    await _notify_monitors(app, "_auth", "in", msg)
+    try:
+        if mkio_app is not None and mkio_app._auth_handler is not None:
+            auth_info = await mkio_app._auth_handler(data)
+        elif app["config"].get("auth_builtin"):
+            from mkio.auth import authenticate_builtin
+            auth_info = await authenticate_builtin(app["db"], data)
+        else:
+            resp = {"type": "auth", "ok": False, "message": "no auth provider configured"}
+            await ws.send_bytes(dumps(resp))
+            await _notify_monitors(app, "_auth", "out", resp)
+            return None
+        resp = {"type": "auth", "ok": True, "user": auth_info.get("user", ""), "role": auth_info.get("role", "")}
+        await ws.send_bytes(dumps(resp))
+        await _notify_monitors(app, "_auth", "out", resp)
+        return auth_info
+    except Exception as exc:
+        resp = {"type": "auth", "ok": False, "message": str(exc) if str(exc) else "authentication failed"}
+        await ws.send_bytes(dumps(resp))
+        await _notify_monitors(app, "_auth", "out", resp)
+        return None
+
+
+async def _check_service_access(
+    app: web.Application,
+    ws: web.WebSocketResponse,
+    service_name: str,
+    msg: dict[str, Any],
+    msg_type: str,
+) -> bytes | None:
+    """Check access control. Returns nack bytes if denied, None if allowed."""
+    from mkio.auth import check_access, build_when_params, execute_when_check
+
+    rights_cache = app.get("rights_cache")
+    if rights_cache is None:
+        return None
+
+    auth_info = getattr(ws, "_mkio_auth", None)
+    services = app["services"]
+    svc = services.get(service_name)
+    if svc is None:
+        return None
+
+    svc_config = svc.config
+    ref = msg.get("ref")
+    txnid = msg.get("txnid")
+    subid = msg.get("subid")
+
+    # Determine the access config: op-level overrides service-level for transactions
+    access_config = svc_config.get("access")
+    op_name = msg.get("op")
+    if svc_config.get("protocol") == "transaction" and op_name:
+        op_access = svc_config.get("_op_access", {})
+        if op_name in op_access:
+            access_config = op_access[op_name]
+
+    def _deny(message: str) -> bytes:
+        if msg_type == "subscribe":
+            return make_nack(service_name, message, ref=ref, txnid=txnid, subid=subid)
+        return make_error(ref, message, txnid=txnid)
+
+    if access_config is None:
+        if auth_info is None:
+            return _deny("authentication required")
+        return _deny("permission denied")
+
+    allowed, when_sql = check_access(access_config, auth_info, rights_cache)
+    if not allowed:
+        message = "authentication required" if auth_info is None else "permission denied"
+        return _deny(message)
+
+    if when_sql is not None:
+        params = build_when_params(auth_info, msg)
+        db = app["db"]
+        try:
+            passed = await execute_when_check(db, when_sql, params)
+        except Exception as exc:
+            log.warning(f"Auth when check failed for {service_name}: {exc}")
+            return _deny("permission denied")
+        if not passed:
+            return _deny("permission denied")
+
+    return None
+
+
 async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse()
     await ws.prepare(request)
@@ -702,6 +822,13 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
             ref = msg.get("ref")
             txnid = msg.get("txnid")
             msg_type = msg.get("type", "")
+
+            # Handle auth messages
+            if msg_type == "auth":
+                auth_info = await _handle_auth(request.app, ws, msg)
+                if auth_info is not None:
+                    ws._mkio_auth = auth_info
+                continue
 
             # Handle monitor requests — omit service to monitor all
             if msg_type == "monitor":
@@ -743,6 +870,16 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             # Notify monitors of inbound message
             await _notify_monitors(request.app, service_name, "in", msg)
+
+            # Access control check
+            if request.app["config"].get("auth"):
+                denied = await _check_service_access(
+                    request.app, ws, service_name, msg, msg_type,
+                )
+                if denied:
+                    await ws.send_bytes(denied)
+                    await _notify_monitors(request.app, service_name, "out", denied)
+                    continue
 
             if msg_type == "subscribe":
                 req_protocol = msg.get("protocol")

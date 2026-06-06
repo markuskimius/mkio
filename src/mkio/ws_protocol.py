@@ -11,7 +11,7 @@ _UNSET = object()
 
 _VALID_MSG_TYPES = frozenset({
     "subscribe", "unsubscribe", "monitor", "check", "transaction", "getmore",
-    "request", "",
+    "request", "auth", "",
 })
 
 

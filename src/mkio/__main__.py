@@ -25,7 +25,7 @@ _PROTOCOL_CLI_HINT = {
 }
 
 
-_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep", "check", "dbupdate", "init", "schema")
+_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep", "check", "dbupdate", "init", "schema", "adduser")
 
 
 def main() -> None:
@@ -67,6 +67,8 @@ def main() -> None:
         _cmd_schema()
     elif cmd == "init":
         _cmd_init()
+    elif cmd == "adduser":
+        _cmd_adduser()
     else:
         import difflib
         close = difflib.get_close_matches(cmd, _VALID_COMMANDS, n=1, cutoff=0.5)
@@ -97,6 +99,8 @@ def _usage() -> None:
     print("  mkio dbupdate [server.toml] [--allow-risky] [--allow-destructive]")
     print("                                   Apply pending schema migrations")
     print("  mkio init [directory] [--no-static]")
+    print("  mkio adduser <username> <role> [server.toml]")
+    print("                                   Add a user to _mkio_users (prompts for password)")
     print()
     print("  --traceback            Show full Python traceback on errors")
     sys.exit(1)
@@ -1240,6 +1244,79 @@ def _cmd_init() -> None:
         print("  mkio serve")
     else:
         print(f"  cd {target_path} && mkio serve")
+
+
+def _cmd_adduser() -> None:
+    usage = "mkio adduser <username> <role> [server.toml]"
+    args = sys.argv[2:]
+    _check_unknown_flags(args, set(), usage)
+    if len(args) < 2:
+        print(f"Usage: {usage}")
+        print("  Adds a user to the _mkio_users table (prompts for password)")
+        sys.exit(1)
+    if len(args) > 3:
+        print(f"Error: 'adduser' takes 2-3 arguments, got {len(args)}")
+        print(f"Usage: {usage}")
+        sys.exit(1)
+
+    username = args[0]
+    role = args[1]
+    config_path = args[2] if len(args) >= 3 else "server.toml"
+
+    from pathlib import Path
+    if not Path(config_path).exists():
+        print(f"Config file not found: {config_path}")
+        sys.exit(1)
+
+    from mkio.config import load_config
+    try:
+        config = load_config(config_path)
+    except Exception as exc:
+        if _TRACEBACK:
+            raise
+        print(f"Error loading config: {exc}")
+        sys.exit(1)
+
+    if "_mkio_users" not in config.get("tables", {}):
+        print("Error: _mkio_users table not defined in config")
+        sys.exit(1)
+
+    import getpass
+    password = getpass.getpass("Password: ")
+    if not password:
+        print("Error: password cannot be empty")
+        sys.exit(1)
+    confirm = getpass.getpass("Confirm: ")
+    if password != confirm:
+        print("Error: passwords do not match")
+        sys.exit(1)
+
+    from mkio.auth import hash_password
+    hashed = hash_password(password)
+
+    import sqlite3
+    db_path = config.get("db_path", "mkio.db")
+    if db_path == ":memory:":
+        print("Error: adduser does not work with in-memory databases")
+        sys.exit(1)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "INSERT OR REPLACE INTO _mkio_users (username, password, role) VALUES (?, ?, ?)",
+            (username, hashed, role),
+        )
+        conn.commit()
+        print(f"User '{username}' added with role '{role}'")
+    except sqlite3.OperationalError as exc:
+        if _TRACEBACK:
+            raise
+        print(f"Error: {exc}")
+        print("  Make sure the database and _mkio_users table exist (run 'mkio serve' or 'mkio dbupdate' first)")
+        sys.exit(1)
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

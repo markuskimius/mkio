@@ -164,6 +164,8 @@ class MkioClient {
     this._backoff = this.backoffBase;
     this._closed = false;
     this._reconnectTimer = null;
+    this._authData = null;
+    this._authResolve = null;
 
     // Debugging: monitor hook and service-usage tracking.
     this._monitor = null; // null | {services: Set|null, fn}
@@ -250,6 +252,20 @@ class MkioClient {
 
     return new Promise((resolve, reject) => {
       this._pending.set(ref, { resolve, reject, service });
+      this._sendRaw(msg);
+    });
+  }
+
+  /**
+   * Authenticate with the server. Stores credentials for auto-re-auth on reconnect.
+   * @param {Object} data - Credentials (e.g., {username, password})
+   * @returns {Promise<Object>}
+   */
+  auth(data) {
+    this._authData = data;
+    const msg = { type: "auth", data };
+    return new Promise((resolve, reject) => {
+      this._authResolve = { resolve, reject };
       this._sendRaw(msg);
     });
   }
@@ -453,6 +469,19 @@ class MkioClient {
     this._emitMonitor("in", data);
 
     const { type, ref, service } = data;
+
+    // Route auth responses
+    if (type === "auth" && this._authResolve) {
+      const { resolve, reject } = this._authResolve;
+      this._authResolve = null;
+      if (data.ok) {
+        resolve(data);
+      } else {
+        reject(new Error(data.message || "authentication failed"));
+      }
+      return;
+    }
+
     if (service) {
       this._seenServices.add(service);
     } else if (ref && this._pending.has(ref)) {
@@ -557,9 +586,17 @@ class MkioClient {
   }
 
   _resubscribe() {
-    for (const [, sub] of this._subscriptions) {
-      sub._snapshotRows = [];
-      this._sendSubscribe(sub);
+    const doSubscribe = () => {
+      for (const [, sub] of this._subscriptions) {
+        sub._snapshotRows = [];
+        this._sendSubscribe(sub);
+      }
+    };
+
+    if (this._authData) {
+      this.auth(this._authData).then(doSubscribe).catch(() => {});
+    } else {
+      doSubscribe();
     }
   }
 
@@ -586,6 +623,7 @@ class MkioClient {
 
 const MKIO_HELP = [
   'mkio.help()                                          show this help',
+  'mkio.auth({username, password})                      authenticate (stored for reconnect)',
   'mkio.services()                                      list every service on the server',
   'mkio.services("<name>")                              show detail for one service',
   'mkio.monitor()                                       tap every service (this tab)',
@@ -871,6 +909,11 @@ const mkio = {
     // eslint-disable-next-line no-console
     console.log(MKIO_HELP);
     return undefined;
+  },
+  auth(data) {
+    const client = _mkioPickClient();
+    if (!client) return null;
+    return client.auth(data);
   },
   services(name) {
     return _mkioServices(name);

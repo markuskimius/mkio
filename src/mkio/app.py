@@ -66,6 +66,9 @@ class MkioApp:
         self._connect_hooks: list[Callable[[web.WebSocketResponse], Awaitable[None]]] = []
         self._disconnect_hooks: list[Callable[[web.WebSocketResponse], Awaitable[None]]] = []
 
+        # Auth handler (overrides table-backed auth)
+        self._auth_handler: Callable[[dict], Awaitable[dict]] | None = None
+
         # Subscription tasks (for cleanup on stop)
         self._sub_tasks: list[tuple[asyncio.Task, list[str]]] = []
 
@@ -131,6 +134,15 @@ class MkioApp:
     def on_disconnect(self, callback: Callable[[web.WebSocketResponse], Awaitable[None]]) -> None:
         """Register a callback invoked when a WebSocket client disconnects."""
         self._disconnect_hooks.append(callback)
+
+    def on_auth(self, callback: Callable[[dict], Awaitable[dict]]) -> None:
+        """Register a custom auth handler, overriding table-backed auth.
+
+        The callback receives the raw ``data`` dict from the client's auth
+        message and must return a dict with at least ``"user"`` and ``"role"``
+        keys. Raise any exception to reject the auth attempt.
+        """
+        self._auth_handler = callback
 
     # -- Raw internals (unstable, available after start) --
 

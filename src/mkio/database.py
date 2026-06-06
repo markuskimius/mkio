@@ -72,6 +72,16 @@ class Database:
             )).close()
         await self._write_conn.commit()
 
+        # Seed tables with initial data (after _mkio_ref column exists)
+        if is_memory:
+            from mkio.migration import async_seed_table
+            for name, spec in self._tables.items():
+                seed_path = spec.get("_seed_path")
+                if seed_path:
+                    table_columns = set(spec.get("columns", {}).keys())
+                    await async_seed_table(self._write_conn, name, seed_path, table_columns)
+            await self._write_conn.commit()
+
         # Start periodic WAL checkpoint
         interval = self._config.get("wal_checkpoint_interval_s", 300)
         if interval > 0 and not is_memory:

@@ -42,33 +42,75 @@
     .error-toast { background: #7f1d1d; color: #fca5a5; border: 1px solid #dc2626; border-radius: 6px; padding: 10px 14px; margin-bottom: 8px; font-size: 0.875rem; animation: fadeIn 0.2s; cursor: pointer; }
     .error-toast:hover { background: #991b1b; }
     @keyframes fadeIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+
+    /* Login overlay */
+    #login-overlay { position: fixed; inset: 0; background: #0f172a; display: flex; align-items: center; justify-content: center; z-index: 200; }
+    #login-box { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 2rem; width: 320px; }
+    #login-box h2 { margin-top: 0; text-align: center; }
+    #login-box form { flex-direction: column; }
+    #login-box input { width: 100%; box-sizing: border-box; }
+    #login-box button { width: 100%; padding: 10px; font-size: 1rem; }
+    #login-error { color: #fca5a5; font-size: 0.875rem; margin-top: 0.5rem; min-height: 1.25rem; }
+    .user-bar { display: flex; align-items: center; gap: 1rem; }
+    .user-bar .role { color: #94a3b8; font-size: 0.875rem; }
+    .btn-logout { background: #475569; font-size: 0.75rem; padding: 3px 10px; }
+    .btn-logout:hover { background: #64748b; }
+    #app { display: none; }
   </style>
 </head>
 <body>
   <div id="errors"></div>
-  <h1>Order Book</h1>
-  <p>Status: <span id="status" class="disconnected">Disconnected</span></p>
 
-  <h2>Place Order</h2>
-  <form id="order-form">
-    <select name="side" required onchange="this.className = this.value === 'Buy' ? 'side-buy' : this.value === 'Sell' ? 'side-sell' : ''">
-      <option value="">Side</option>
-      <option value="Buy">Buy</option>
-      <option value="Sell">Sell</option>
-    </select>
-    <input name="symbol" placeholder="Symbol" required autocomplete="off">
-    <input name="qty" type="number" placeholder="Qty" required autocomplete="off">
-    <input name="price" type="number" step="0.01" placeholder="Price" required autocomplete="off">
-    <button class="btn-place" type="submit">Place Order</button>
-  </form>
+  <!-- Login overlay -->
+  <div id="login-overlay">
+    <div id="login-box">
+      <h2>Order Book</h2>
+      <form id="login-form">
+        <input name="username" placeholder="Username" required autocomplete="username">
+        <input name="password" type="password" placeholder="Password" required autocomplete="current-password">
+        <button type="submit">Log In</button>
+      </form>
+      <div id="login-error"></div>
+      <div style="margin-top: 1rem; color: #64748b; font-size: 0.8rem;">
+        <div style="margin-bottom: 0.25rem;">Demo accounts (password is <strong style="color:#94a3b8">password</strong>):</div>
+        <div><strong style="color:#94a3b8">alice</strong> — trader role</div>
+        <div><strong style="color:#94a3b8">bob</strong> — viewer role</div>
+      </div>
+    </div>
+  </div>
 
-  <h2>Live Orders</h2>
-  <table>
-    <thead>
-      <tr><th>ID</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Status</th><th>Actions</th></tr>
-    </thead>
-    <tbody id="orders-body"></tbody>
-  </table>
+  <!-- Main app (hidden until authenticated) -->
+  <div id="app">
+    <h1>Order Book</h1>
+    <div class="user-bar">
+      <span>Status: <span id="status" class="disconnected">Disconnected</span></span>
+      <span>User: <strong id="user-name"></strong> <span class="role" id="user-role"></span></span>
+      <button class="btn-logout" onclick="logout()">Log Out</button>
+    </div>
+
+    <div id="trade-section">
+      <h2>Place Order</h2>
+      <form id="order-form">
+        <select name="side" required onchange="this.className = this.value === 'Buy' ? 'side-buy' : this.value === 'Sell' ? 'side-sell' : ''">
+          <option value="">Side</option>
+          <option value="Buy">Buy</option>
+          <option value="Sell">Sell</option>
+        </select>
+        <input name="symbol" placeholder="Symbol" required autocomplete="off">
+        <input name="qty" type="number" placeholder="Qty" required autocomplete="off">
+        <input name="price" type="number" step="0.01" placeholder="Price" required autocomplete="off">
+        <button class="btn-place" type="submit">Place Order</button>
+      </form>
+    </div>
+
+    <h2>Live Orders</h2>
+    <table>
+      <thead>
+        <tr><th>ID</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Status</th><th id="actions-header">Actions</th></tr>
+      </thead>
+      <tbody id="orders-body"></tbody>
+    </table>
+  </div>
 
   <script>
     const errorsEl = document.getElementById('errors');
@@ -81,6 +123,7 @@
       setTimeout(() => el.remove(), 8000);
     }
 
+    let currentUser = null;
     const statusEl = document.getElementById('status');
     const client = new MkioClient(`ws://${location.host}/ws`, {
       onConnect() {
@@ -95,7 +138,6 @@
     const ordersMap = new Map();
     const tbody = document.getElementById('orders-body');
 
-    // Which actions are available for each status
     const STATUS_ACTIONS = {
       pending:   ['accept', 'reject', 'cancel'],
       accepted:  ['fill', 'cancel'],
@@ -128,8 +170,7 @@
       }
     }
 
-
-    client.connect().then(() => {
+    function subscribeToOrders() {
       client.subscribe('all_orders', 'query', {
         onSnapshot(rows) {
           ordersMap.clear();
@@ -148,8 +189,59 @@
           else ordersMap.set(row.id, row);
           renderOrders();
         },
+        onNack(msg) {
+          showError('Orders: ' + msg);
+        },
       });
+    }
+
+    // --- Login ---
+
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const errorEl = document.getElementById('login-error');
+      errorEl.textContent = '';
+
+      try {
+        await client.connect();
+        const result = await client.auth({
+          username: form.username.value,
+          password: form.password.value,
+        });
+        currentUser = { user: result.user, role: result.role };
+
+        document.getElementById('login-overlay').style.display = 'none';
+        document.getElementById('app').style.display = 'block';
+        document.getElementById('user-name').textContent = currentUser.user;
+        document.getElementById('user-role').textContent = `(${currentUser.role})`;
+
+        // Show/hide trade UI based on role having trade right
+        // (We don't know rights client-side, but we can try and handle nack)
+        subscribeToOrders();
+      } catch (err) {
+        errorEl.textContent = err.message || 'Login failed';
+        client.close();
+        client._closed = false;
+        client._authData = null;
+      }
     });
+
+    function logout() {
+      client.close();
+      currentUser = null;
+      ordersMap.clear();
+      tbody.innerHTML = '';
+      document.getElementById('app').style.display = 'none';
+      document.getElementById('login-overlay').style.display = 'flex';
+      document.getElementById('login-error').textContent = '';
+      document.getElementById('login-form').reset();
+      // Recreate client internals for next login
+      client._closed = false;
+      client._authData = null;
+      client._subscriptions.clear();
+      client._pending.clear();
+    }
 
     document.getElementById('order-form').addEventListener('submit', async (e) => {
       e.preventDefault();

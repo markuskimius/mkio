@@ -28,28 +28,34 @@ _DEFAULTS = {
 
 _VALID_TOP_LEVEL_KEYS = frozenset(
     set(_DEFAULTS.keys())
-    | {"tables", "services", "static", "config", "shutdown_timeout", "name", "version"}
+    | {"tables", "services", "static", "config", "shutdown_timeout", "name", "version",
+       "auth", "auth_builtin"}
 )
 
 _VALID_SERVICE_KEYS: dict[str, frozenset[str]] = {
     "transaction": frozenset({
         "protocol", "ops", "table", "op_type", "key", "fields",
         "defaults", "change_log_size", "description", "descriptions",
+        "access",
     }),
     "subpub": frozenset({
         "protocol", "primary_table", "watch_tables", "topic", "sql",
         "where", "publish", "defaults", "change_log_size", "description",
+        "access",
     }),
     "stream": frozenset({
         "protocol", "primary_table", "watch_tables", "sql",
         "publish", "filterable", "buffer_size", "description",
+        "access",
     }),
     "query": frozenset({
         "protocol", "primary_table", "watch_tables", "sql",
         "publish", "filterable", "where", "change_log_size", "description",
+        "access",
     }),
     "reqrep": frozenset({
         "protocol", "sql", "reply", "params", "description",
+        "access",
     }),
 }
 
@@ -62,6 +68,7 @@ def load_config(source: str | Path | dict[str, Any]) -> dict[str, Any]:
         path = Path(source)
         with open(path, "rb") as f:
             config = tomllib.load(f)
+        config["_config_dir"] = str(path.resolve().parent)
     elif isinstance(source, dict):
         config = dict(source)  # shallow copy
     else:
@@ -84,6 +91,17 @@ def load_config(source: str | Path | dict[str, Any]) -> dict[str, Any]:
     config.setdefault("tables", {})
     config.setdefault("services", {})
     config.setdefault("static", {})
+
+    # Detect auth tables
+    tables = config["tables"]
+    config["auth"] = "_mkio_rights" in tables
+    config["auth_builtin"] = "_mkio_users" in tables
+
+    # Validate and resolve seed file paths on tables
+    config_dir = config.get("_config_dir")
+    for tbl_name, tbl_config in tables.items():
+        if "seed" in tbl_config:
+            _validate_seed(tbl_name, tbl_config, config_dir)
 
     # Warn about unknown top-level keys
     _warn_unknown_keys(
@@ -151,6 +169,24 @@ def _normalize_service(
                 "key": svc.pop("key", []),
                 "fields": svc.pop("fields", []),
             }]
+        # Normalize dict-form ops (single-step shorthand with access)
+        elif "ops" in svc and isinstance(svc["ops"], dict):
+            ops = svc["ops"]
+            op_access: dict[str, Any] = {}
+            normalized: dict[str, list] = {}
+            for op_name, op_val in ops.items():
+                if isinstance(op_val, dict) and "op_type" in op_val:
+                    op_val = dict(op_val)
+                    access = op_val.pop("access", None)
+                    if access is not None:
+                        _validate_access(f"service '{name}', op '{op_name}'", access)
+                        op_access[op_name] = access
+                    normalized[op_name] = [op_val]
+                else:
+                    normalized[op_name] = op_val
+            svc["ops"] = normalized
+            if op_access:
+                svc["_op_access"] = op_access
 
     # Validate required fields per protocol
     if svc_type in ("subpub", "query", "stream"):
@@ -248,6 +284,10 @@ def _normalize_service(
     # Validate filterable fields (query only — subpub uses topic instead)
     if "filterable" in svc and svc_type != "subpub":
         _validate_filterable(name, svc, config)
+
+    # Validate access config
+    if "access" in svc:
+        _validate_access(f"service '{name}'", svc["access"])
 
 
 def _validate_table_refs(
@@ -410,6 +450,70 @@ def _validate_transaction_ops(
                     f"{step_label}: op_type {op_type!r} requires a 'key' "
                     f"field to identify which rows to {op_type}"
                 )
+
+
+_VALID_ACCESS_STRINGS = frozenset({"open", "auth"})
+
+
+def _validate_access(context: str, access: Any) -> None:
+    """Validate an access config value (string or dict)."""
+    if isinstance(access, str):
+        return  # "open", "auth", or a right name — all valid strings
+    if isinstance(access, dict):
+        for right_name, when_val in access.items():
+            if not isinstance(right_name, str):
+                raise ValueError(
+                    f"{context}: access key must be a string, got {type(right_name).__name__}"
+                )
+            if when_val is not True and not isinstance(when_val, str):
+                raise ValueError(
+                    f"{context}: access value for {right_name!r} must be true "
+                    f"or a SQL condition string, got {type(when_val).__name__}"
+                )
+        return
+    raise ValueError(
+        f"{context}: 'access' must be a string or dict, got {type(access).__name__}"
+    )
+
+
+_VALID_SEED_EXTENSIONS = frozenset({".csv", ".json", ".jsonl"})
+
+
+def _validate_seed(
+    table_name: str, table_config: dict[str, Any], config_dir: str | None,
+) -> None:
+    """Validate and resolve a seed file path on a table config."""
+    seed = table_config["seed"]
+    if not isinstance(seed, str):
+        raise ValueError(
+            f"Table '{table_name}': 'seed' must be a file path string, "
+            f"got {type(seed).__name__}"
+        )
+
+    ext = Path(seed).suffix.lower()
+    if ext not in _VALID_SEED_EXTENSIONS:
+        raise ValueError(
+            f"Table '{table_name}': seed file must be .csv, .json, or .jsonl, "
+            f"got {ext!r}"
+        )
+
+    seed_path = Path(seed)
+    if seed.startswith("/"):
+        resolved = seed_path
+    elif seed.startswith("./"):
+        resolved = Path.cwd() / seed_path
+    elif config_dir:
+        resolved = Path(config_dir) / seed_path
+    else:
+        resolved = Path.cwd() / seed_path
+
+    resolved = resolved.resolve()
+    if not resolved.is_file():
+        raise ValueError(
+            f"Table '{table_name}': seed file not found: {resolved}"
+        )
+
+    table_config["_seed_path"] = str(resolved)
 
 
 def _validate_filterable(

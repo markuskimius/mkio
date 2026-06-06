@@ -40,6 +40,8 @@ class MkioClient:
         self._pending_reqid: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._subscriptions: dict[str, _Subscription] = {}
         self._receive_task: asyncio.Task[None] | None = None
+        self._auth_data: dict[str, Any] | None = None
+        self._auth_future: asyncio.Future[dict[str, Any]] | None = None
 
     async def connect(self) -> None:
         self._session = aiohttp.ClientSession()
@@ -91,6 +93,23 @@ class MkioClient:
         assert self._ws is not None
         await self._ws.send_bytes(dumps(msg))
         return await future
+
+    async def auth(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Authenticate with the server. Stores credentials for auto-re-auth on reconnect."""
+        self._auth_data = data
+        msg = {"type": "auth", "data": data}
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._auth_future = future
+
+        assert self._ws is not None
+        await self._ws.send_bytes(dumps(msg))
+        result = await future
+        self._auth_future = None
+        if not result.get("ok"):
+            raise ValueError(result.get("message", "authentication failed"))
+        return result
 
     async def request(
         self,
@@ -274,6 +293,11 @@ class MkioClient:
         ref = data.get("ref")
         service = data.get("service", "")
 
+        # Route auth responses
+        if msg_type == "auth" and self._auth_future and not self._auth_future.done():
+            self._auth_future.set_result(data)
+            return
+
         # Route to pending future (transaction results, check results)
         if ref and ref in self._pending:
             future = self._pending.pop(ref)
@@ -332,12 +356,20 @@ class MkioClient:
                 self._session = aiohttp.ClientSession()
                 self._ws = await self._session.ws_connect(self.url)
 
+                # Restart receive loop first (to handle auth response)
+                self._receive_task = asyncio.create_task(self._receive_loop())
+
+                # Re-auth before re-subscribe
+                if self._auth_data is not None:
+                    try:
+                        await self.auth(self._auth_data)
+                    except ValueError:
+                        continue  # Auth failed, retry connection
+
                 # Re-subscribe with stored state
                 for _key, sub in self._subscriptions.items():
                     await self._send_subscribe(sub)
 
-                # Restart receive loop
-                self._receive_task = asyncio.create_task(self._receive_loop())
                 return
 
             except (aiohttp.ClientError, OSError):

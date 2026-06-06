@@ -12,6 +12,7 @@ A single TCP port serves HTTP and WebSocket, backed by an embedded SQLite databa
 
 - [Quick Start](#quick-start)
 - [Features](#features)
+- [Authentication & Access Control](#authentication--access-control)
 - [Programmatic API](#programmatic-api)
 - [Service Types](#service-types)
 - [WebSocket Protocol](#websocket-protocol)
@@ -89,7 +90,104 @@ For programmatic control (custom routes, non-blocking lifecycle), see [Programma
 - **Connection identity** — built-in `_mkio` reqrep service reports server name, version, framework version, protocol version, services, tables, config hash, and uptime — lets clients verify they're connected to the correct session. Also supports table schema introspection (columns, types, primary keys, defaults)
 - **Config endpoint** — `/config` path serves TOML files as JSON (request `foo.json`, server reads `foo.toml` and returns JSON); falls back to literal `.json` files; other extensions served as-is
 - **CLI tools** — send transactions, subscribe to live data, monitor traffic, inspect services
+- **Authentication & access control** — table-driven roles (`_mkio_rights`) with config-driven per-service/per-op access. Supports SQL pre-check conditions (`when`), built-in username/password auth (`_mkio_users` with bcrypt), or custom auth via `app.on_auth()` (JWT, LDAP, etc.)
 - **Programmatic API** — `create_app()` returns a controllable server handle with async `start()`/`stop()` lifecycle, custom HTTP routes, custom service registration, lifecycle hooks, and a data facade (`execute`/`query`/`subscribe`) for server-side interaction without WebSocket
+
+## Authentication & Access Control
+
+Enable auth by adding the `_mkio_rights` table to your config. When it exists, all services are locked by default — each service must declare its `access`.
+
+### Setup
+
+```toml
+# Auth tables
+[tables._mkio_users]
+columns = { username = "TEXT PRIMARY KEY", password = "TEXT NOT NULL", role = "TEXT NOT NULL" }
+
+[tables._mkio_rights]
+columns = { role = "TEXT", right = "TEXT" }
+
+# Service access control
+[services.prices]
+protocol = "subpub"
+primary_table = "prices"
+topic = "symbol"
+access = "open"               # anyone, no auth needed
+
+[services.positions]
+protocol = "query"
+primary_table = "positions"
+access = "market"             # role must have "market" right
+
+[services.orders]
+protocol = "transaction"
+access = "auth"               # any logged-in user (service-level default)
+
+[services.orders.ops.place]
+table = "orders"
+op_type = "insert"
+fields = ["symbol", "qty"]
+
+[services.orders.ops.place.access]
+trade_limited = "accounts WHERE username = :user AND balance >= :qty * :price"
+trade_full = true
+```
+
+`access` values: `"open"` (no auth), `"auth"` (any logged-in user), `"right_name"` (role must have this right), or a dict mapping rights to SQL pre-check conditions.
+
+### Rights table
+
+The `_mkio_rights` table maps roles to rights. Adding a new role is a table insert — no config change:
+
+```
+role       right
+trader     market
+trader     trade_limited
+senior     market
+senior     trade_full
+admin      admin
+```
+
+### Auth protocol
+
+Clients authenticate after connecting:
+
+```json
+{"type": "auth", "data": {"username": "alice", "password": "secret"}}
+→ {"type": "auth", "ok": true, "user": "alice", "role": "trader"}
+```
+
+### SQL pre-checks (`when`)
+
+Dict-form `access` maps rights to SQL conditions. The condition is executed as `SELECT 1 FROM <condition> LIMIT 1` — if it returns a row, access is granted. Bind parameters available: `:user`, `:role`, `:topic` (subpub), submitted data fields (`:symbol`, `:qty`, etc.), and any extra columns from the user's `_mkio_users` row.
+
+For transaction ops, pre-checks run inside the same SAVEPOINT as the write — ACID-safe.
+
+### Custom auth
+
+For JWT, LDAP, or other auth backends, use `on_auth()` instead of `_mkio_users`:
+
+```python
+app = create_app(config)
+
+async def my_auth(data):
+    user = verify_jwt(data["token"])
+    return {"user": user.name, "role": user.role}
+
+app.on_auth(my_auth)
+app.run()
+```
+
+Rights enforcement still uses the `_mkio_rights` table regardless of auth method.
+
+### Bootstrap
+
+```bash
+mkio adduser alice trader              # prompts for password
+mkio adduser admin1 admin my.toml      # use a specific config file
+```
+
+Install bcrypt for strong password hashing: `pip install mkio[auth]`. Without it, PBKDF2 is used as a fallback.
 
 ## Programmatic API
 
@@ -134,6 +232,7 @@ asyncio.run(main())
 | `on_shutdown(callback)` | Register an async callback invoked before services stop. |
 | `on_connect(callback)` | Register an async `(ws) -> None` callback invoked when a WebSocket client connects. |
 | `on_disconnect(callback)` | Register an async `(ws) -> None` callback invoked when a WebSocket client disconnects. |
+| `on_auth(callback)` | Register a custom async auth handler `(data) -> {"user", "role", ...}`. Overrides table-backed auth. Raise to reject. |
 | `async execute(service, data, *, op=None)` | Submit a transaction through the write path. Returns `{"ok": True, "ref": "..."}`. |
 | `async query(sql, params=())` | Read query on the read connection. Returns `list[dict]`. |
 | `async subscribe(tables, callback)` | Subscribe to `ChangeEvent`s. Returns an unsubscribe function. |
@@ -499,6 +598,10 @@ Unknown tables return an error listing available tables. From the CLI: `mkio sch
 Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 
 ```json
+// Authenticate (before sending other messages to auth-protected services)
+{"type": "auth", "data": {"username": "alice", "password": "secret"}}
+// → {"type": "auth", "ok": true, "user": "alice", "role": "trader"}
+
 // Transaction
 {"service": "add_order", "ref": "...", "data": {"id": "1", "symbol": "AAPL", "qty": 100}}
 
@@ -562,6 +665,9 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 from mkio.client import MkioClient
 
 async with MkioClient("ws://localhost:8080/ws") as client:
+    # Authenticate (credentials stored for auto-re-auth on reconnect)
+    await client.auth({"username": "alice", "password": "secret"})
+
     result = await client.send("add_order", {"id": "1", "symbol": "AAPL", "qty": 100})
 
     async for msg in client.subscribe("last_trade", "subpub", topic="AAPL"):
@@ -595,6 +701,9 @@ Auto-served at `/mkio.js` — no CDN or bundler needed.
 <script>
 const client = new MkioClient("ws://localhost:8080/ws");
 await client.connect();
+
+// Authenticate (credentials stored for auto-re-auth on reconnect)
+await client.auth({username: "alice", password: "secret"});
 
 client.subscribe("last_trade", "subpub", {
     topic: "AAPL",
@@ -633,6 +742,7 @@ Once `/mkio.js` is loaded, a `mkio` object is available in DevTools with methods
 
 ```js
 mkio.help()                                // show help
+mkio.auth({username: "alice", password: "secret"})  // authenticate
 mkio.services()                            // list every service on the server
 mkio.services("orders")                    // detail for one service
 mkio.monitor()                             // log every frame to/from any service
@@ -822,6 +932,13 @@ mkio dbupdate --allow-destructive   # Include all changes
 mkio dbupdate custom.toml           # Use a specific config file
 ```
 
+### Manage users
+
+```bash
+mkio adduser alice trader               # Add user, prompts for password
+mkio adduser admin1 admin custom.toml   # Use a specific config file
+```
+
 ### Initialize a project
 
 ```bash
@@ -876,6 +993,30 @@ Runtime error messages include context to help debugging:
 - Missing transaction fields show the op name and list provided fields
 - Expression errors list available fields
 - Requests to unknown services return `nack` (not generic errors), with the service name echoed back
+
+## Table Seeding
+
+Tables can be populated with initial data from a file when first created. Add `seed` to any table config:
+
+```toml
+[tables.products]
+columns = { id = "TEXT PRIMARY KEY", name = "TEXT NOT NULL", price = "REAL" }
+seed = "data/products.csv"
+```
+
+Supported formats: `.csv`, `.json` (array of objects), `.jsonl` (one JSON object per line).
+
+Seed data is loaded **only when the table is first created** — not on every restart. If a user deletes rows, they stay deleted.
+
+**Path resolution:**
+
+| Path starts with | Resolved relative to |
+|------------------|---------------------|
+| `/` | Absolute path |
+| `./` | Current working directory |
+| anything else | Directory containing the config file |
+
+**Error handling:** Seed errors are fatal. Missing files, bad format, or unknown column names prevent the server from starting — same behavior as other config errors.
 
 ## Schema Migration
 
