@@ -1040,7 +1040,7 @@ seed = "data/products.csv"
 
 Supported formats: `.csv`, `.json` (array of objects), `.jsonl` (one JSON object per line).
 
-Seed data is loaded **only when the table is first created** — not on every restart. If a user deletes rows, they stay deleted.
+Seed data is loaded **only when the table is first created** — not on every restart. If a user deletes rows, they stay deleted. Each seeded row gets its own unique `_mkio_ref` timestamp.
 
 **Path resolution:**
 

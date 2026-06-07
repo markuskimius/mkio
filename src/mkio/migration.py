@@ -345,6 +345,13 @@ def apply_changes(
             tbl_cfg = config_tables.get(table_name, {})
             seed_path = tbl_cfg.get("_seed_path")
             if seed_path:
+                # Add _mkio_ref column now so seed_table can populate it
+                try:
+                    conn.execute(
+                        f"ALTER TABLE {table_name} ADD COLUMN _mkio_ref TEXT DEFAULT ''"
+                    )
+                except Exception:
+                    pass
                 table_columns = set(tbl_cfg.get("columns", {}).keys())
                 count = seed_table(conn, table_name, seed_path, table_columns)
                 if count:
@@ -510,7 +517,6 @@ def seed_table(
     cols = list(rows[0].keys())
     if has_ref:
         from mkio._ref import next_ref
-        ref = next_ref()
         cols.append("_mkio_ref")
 
     placeholders = ", ".join("?" for _ in cols)
@@ -520,7 +526,7 @@ def seed_table(
     for row in rows:
         vals = tuple(row.get(c) for c in rows[0].keys())
         if has_ref:
-            vals += (ref,)
+            vals += (next_ref(),)
         conn.execute(sql, vals)
 
     return len(rows)
@@ -559,7 +565,6 @@ async def async_seed_table(
     cols = list(rows[0].keys())
     if has_ref:
         from mkio._ref import next_ref
-        ref = next_ref()
         cols.append("_mkio_ref")
 
     placeholders = ", ".join("?" for _ in cols)
@@ -569,7 +574,7 @@ async def async_seed_table(
     for row in rows:
         vals = tuple(row.get(c) for c in rows[0].keys())
         if has_ref:
-            vals += (ref,)
+            vals += (next_ref(),)
         await (await conn.execute(sql, vals)).close()
 
     return len(rows)
