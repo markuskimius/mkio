@@ -25,7 +25,7 @@ _PROTOCOL_CLI_HINT = {
 }
 
 
-_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep", "check", "dbupdate", "init", "schema", "adduser")
+_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep", "check", "dbupdate", "init", "schema", "adduser", "hashpass")
 
 
 def main() -> None:
@@ -69,6 +69,8 @@ def main() -> None:
         _cmd_init()
     elif cmd == "adduser":
         _cmd_adduser()
+    elif cmd == "hashpass":
+        _cmd_hashpass()
     else:
         import difflib
         close = difflib.get_close_matches(cmd, _VALID_COMMANDS, n=1, cutoff=0.5)
@@ -101,6 +103,9 @@ def _usage() -> None:
     print("  mkio init [directory] [--no-static]")
     print("  mkio adduser <username> <role> [server.toml]")
     print("                                   Add a user to _mkio_users (prompts for password)")
+    print("  mkio hashpass                    Generate a hashed password for seed files")
+    print()
+    print("  All WS commands accept --username <user> (password via MKIO_PASSWORD or prompt)")
     print()
     print("  --traceback            Show full Python traceback on errors")
     sys.exit(1)
@@ -376,7 +381,7 @@ def _print_listener_detail(detail: dict[str, Any]) -> None:
 
 
 def _cmd_monitor() -> None:
-    usage = "mkio monitor <url> [service] [--filter <expr>] [--username <user>] [--password <pass>]"
+    usage = "mkio monitor <url> [service] [--filter <expr>] [--username <user>]"
     args = sys.argv[2:]
     if len(args) < 1:
         print(f"Usage: {usage}")
@@ -384,7 +389,7 @@ def _cmd_monitor() -> None:
         print("  e.g. mkio monitor ws://localhost:8080 orders")
         print("  e.g. mkio monitor ws://localhost:8080 --filter \"direction == 'in'\"")
         sys.exit(1)
-    _check_unknown_flags(args, {"--filter", "--username", "--password"}, usage)
+    _check_unknown_flags(args, {"--filter", "--username"}, usage)
     filter_expr = _extract_flag(args, "--filter")
     username, password = _extract_auth(args)
     _check_extra_positional(args[2:] if len(args) > 2 else [], usage)
@@ -494,7 +499,7 @@ def _print_monitor_message(data: dict[str, Any]) -> None:
 # ---- send command -----------------------------------------------------------
 
 def _cmd_send() -> None:
-    usage = "mkio send <url> <service> [--op <name>] [--username <user>] [--password <pass>] <data>"
+    usage = "mkio send <url> <service> [--op <name>] [--username <user>] <data>"
     args = sys.argv[2:]
     if len(args) < 3:
         print(f"Usage: {usage}")
@@ -505,7 +510,7 @@ def _cmd_send() -> None:
     service = args[1]
     rest = args[2:]
 
-    _check_unknown_flags(rest, {"--op", "--username", "--password"}, usage)
+    _check_unknown_flags(rest, {"--op", "--username"}, usage)
     username, password = _extract_auth(rest)
 
     op_name = None
@@ -684,7 +689,7 @@ async def _send_messages(
 
 def _cmd_subpub() -> None:
     args = sys.argv[2:]
-    usage = "mkio subpub <url> <service> <topic> [<topic2> ...] [--subid <id>] [--fields <f1,f2,...>] [--username <user>] [--password <pass>]"
+    usage = "mkio subpub <url> <service> <topic> [<topic2> ...] [--subid <id>] [--fields <f1,f2,...>] [--username <user>]"
     if len(args) < 3:
         print(f"Usage: {usage}")
         sys.exit(1)
@@ -702,7 +707,7 @@ def _cmd_subpub() -> None:
         sys.exit(1)
 
     rest = list(args[i:])
-    _check_unknown_flags(rest, {"--fields", "--subid", "--username", "--password"}, usage)
+    _check_unknown_flags(rest, {"--fields", "--subid", "--username"}, usage)
     username, password = _extract_auth(rest)
     fields = _extract_fields(rest)
     subid = _extract_flag(rest, "--subid")
@@ -720,7 +725,7 @@ def _cmd_subpub() -> None:
 
 def _cmd_stream() -> None:
     args = sys.argv[2:]
-    usage = "mkio stream <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--ref <ref>] [--maxcount <n>] [--before] [--username <user>] [--password <pass>]"
+    usage = "mkio stream <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--ref <ref>] [--maxcount <n>] [--before] [--username <user>]"
     if len(args) < 2:
         print(f"Usage: {usage}")
         sys.exit(1)
@@ -728,7 +733,7 @@ def _cmd_stream() -> None:
     url = args[0].rstrip("/")
     service = args[1]
     rest = args[2:]
-    _check_unknown_flags(rest, {"--filter", "--fields", "--ref", "--subid", "--maxcount", "--before", "--username", "--password"}, usage)
+    _check_unknown_flags(rest, {"--filter", "--fields", "--ref", "--subid", "--maxcount", "--before", "--username"}, usage)
     username, password = _extract_auth(rest)
     filter_expr = _extract_flag(rest, "--filter")
     fields = _extract_fields(rest)
@@ -754,7 +759,7 @@ def _cmd_stream() -> None:
 
 def _cmd_query() -> None:
     args = sys.argv[2:]
-    usage = "mkio query <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--snapshotOnly] [--updateOnly] [--username <user>] [--password <pass>]"
+    usage = "mkio query <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--snapshotOnly] [--updateOnly] [--username <user>]"
     if len(args) < 2:
         print(f"Usage: {usage}")
         sys.exit(1)
@@ -762,7 +767,7 @@ def _cmd_query() -> None:
     url = args[0].rstrip("/")
     service = args[1]
     rest = args[2:]
-    _check_unknown_flags(rest, {"--filter", "--fields", "--subid", "--snapshotOnly", "--updateOnly", "--username", "--password"}, usage)
+    _check_unknown_flags(rest, {"--filter", "--fields", "--subid", "--snapshotOnly", "--updateOnly", "--username"}, usage)
     username, password = _extract_auth(rest)
     filter_expr = _extract_flag(rest, "--filter")
     fields = _extract_fields(rest)
@@ -813,9 +818,15 @@ def _extract_flag(args: list[str], flag: str) -> str | None:
 
 
 def _extract_auth(args: list[str]) -> tuple[str | None, str | None]:
+    if "--password" in args:
+        print("Error: --password is not supported (visible in process list)")
+        print("  Use the MKIO_PASSWORD environment variable instead")
+        sys.exit(1)
     username = _extract_flag(args, "--username")
-    password = _extract_flag(args, "--password")
-    if username and not password:
+    if not username:
+        return None, None
+    password = os.environ.get("MKIO_PASSWORD")
+    if not password:
         import getpass
         password = getpass.getpass(f"Password for {username}: ")
     return username, password
@@ -909,6 +920,10 @@ def _check_unknown_flags(args: list[str], known: set[str], usage: str) -> None:
     """Error and exit if args contain any unrecognised --flags."""
     for arg in args:
         if arg.startswith("--") and arg not in known:
+            if arg == "--password":
+                print("Error: --password is not supported (visible in process list)")
+                print("  Use the MKIO_PASSWORD environment variable instead")
+                sys.exit(1)
             if known:
                 import difflib
                 close = difflib.get_close_matches(arg, known, n=1, cutoff=0.5)
@@ -1023,7 +1038,7 @@ def _normalize_ws_url(url: str) -> str:
 
 
 def _cmd_reqrep() -> None:
-    usage = "mkio reqrep <url> <service> [--username <user>] [--password <pass>] [data]"
+    usage = "mkio reqrep <url> <service> [--username <user>] [data]"
     args = sys.argv[2:]
     if len(args) < 2:
         print(f"Usage: {usage}")
@@ -1158,7 +1173,7 @@ def _cmd_dbupdate() -> None:
 
 
 def _cmd_check() -> None:
-    usage = "mkio check <url> [--username <user>] [--password <pass>] [version=... protocol=... mkio=...]"
+    usage = "mkio check <url> [--username <user>] [version=... protocol=... mkio=...]"
     args = sys.argv[2:]
     if len(args) < 1:
         print(f"Usage: {usage}")
@@ -1215,9 +1230,9 @@ async def _check_request(
 
 
 def _cmd_schema() -> None:
-    usage = "mkio schema <url> <table> [--username <user>] [--password <pass>]"
+    usage = "mkio schema <url> <table> [--username <user>]"
     args = sys.argv[2:]
-    _check_unknown_flags(args, {"--username", "--password"}, usage)
+    _check_unknown_flags(args, {"--username"}, usage)
     username, password = _extract_auth(args)
     if len(args) < 2:
         print(f"Usage: {usage}")
@@ -1342,14 +1357,19 @@ def _cmd_adduser() -> None:
         print("Error: _mkio_users table not defined in config")
         sys.exit(1)
 
-    import getpass
-    password = getpass.getpass("Password: ")
-    if not password:
-        print("Error: password cannot be empty")
-        sys.exit(1)
-    confirm = getpass.getpass("Confirm: ")
-    if password != confirm:
-        print("Error: passwords do not match")
+    password = os.environ.get("MKIO_PASSWORD")
+    if password is None:
+        import getpass
+        password = getpass.getpass("Password: ")
+        if not password:
+            print("Error: password cannot be empty")
+            sys.exit(1)
+        confirm = getpass.getpass("Confirm: ")
+        if password != confirm:
+            print("Error: passwords do not match")
+            sys.exit(1)
+    elif not password:
+        print("Error: MKIO_PASSWORD is set but empty")
         sys.exit(1)
 
     from mkio.auth import hash_password
@@ -1378,6 +1398,34 @@ def _cmd_adduser() -> None:
         sys.exit(1)
     finally:
         conn.close()
+
+
+def _cmd_hashpass() -> None:
+    usage = "mkio hashpass"
+    args = sys.argv[2:]
+    _check_unknown_flags(args, set(), usage)
+    if args:
+        print("Error: 'hashpass' takes no arguments")
+        print(f"Usage: {usage}")
+        sys.exit(1)
+
+    password = os.environ.get("MKIO_PASSWORD")
+    if password is None:
+        import getpass
+        password = getpass.getpass("Password: ")
+        if not password:
+            print("Error: password cannot be empty")
+            sys.exit(1)
+        confirm = getpass.getpass("Confirm: ")
+        if password != confirm:
+            print("Error: passwords do not match")
+            sys.exit(1)
+    elif not password:
+        print("Error: MKIO_PASSWORD is set but empty")
+        sys.exit(1)
+
+    from mkio.auth import hash_password
+    print(hash_password(password))
 
 
 if __name__ == "__main__":

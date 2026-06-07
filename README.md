@@ -192,26 +192,31 @@ monitor_access = "admin"    # role must have "admin" right
 
 ### CLI authentication
 
-All WebSocket-based CLI commands accept `--username` and `--password` for authentication:
+All WebSocket-based CLI commands accept `--username` for authentication. The password is read from the `MKIO_PASSWORD` environment variable, or prompted interactively if not set:
 
 ```bash
-mkio monitor 8080 --username alice --password secret
-mkio send 8080 orders --op new '{"symbol":"AAPL"}' --username alice --password secret
-mkio subpub 8080 prices AAPL --username bob --password secret
-mkio query 8080 all_orders --username bob --password secret
-mkio stream 8080 audit_feed --username bob --password secret
-mkio reqrep 8080 lookup name=test --username bob --password secret
-mkio schema 8080 orders --username bob --password secret
-mkio check 8080 --username bob --password secret
+mkio monitor 8080 --username alice
+mkio send 8080 orders --op new '{"symbol":"AAPL"}' --username alice
+mkio subpub 8080 prices AAPL --username bob
+mkio query 8080 all_orders --username bob
+mkio stream 8080 audit_feed --username bob
+mkio reqrep 8080 lookup name=test --username bob
+mkio schema 8080 orders --username bob
+mkio check 8080 --username bob
 ```
 
-If `--username` is given without `--password`, the CLI prompts interactively.
+For scripted/CI use, set the `MKIO_PASSWORD` environment variable:
+
+```bash
+MKIO_PASSWORD=secret mkio send 8080 orders --op new '{"symbol":"AAPL"}' --username alice
+```
 
 ### Bootstrap
 
 ```bash
-mkio adduser alice trader              # prompts for password
+mkio adduser alice trader              # prompts for password (or reads MKIO_PASSWORD)
 mkio adduser admin1 admin my.toml      # use a specific config file
+mkio hashpass                          # generate a hashed password for seed files
 ```
 
 Install bcrypt for strong password hashing: `pip install mkio[auth]`. Without it, PBKDF2 is used as a fallback.
@@ -964,6 +969,8 @@ mkio dbupdate custom.toml           # Use a specific config file
 ```bash
 mkio adduser alice trader               # Add user, prompts for password
 mkio adduser admin1 admin custom.toml   # Use a specific config file
+mkio hashpass                           # Generate a hashed password for seed files
+MKIO_PASSWORD=secret mkio adduser bob viewer  # Non-interactive (CI/scripts)
 ```
 
 ### Initialize a project

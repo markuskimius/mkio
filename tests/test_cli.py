@@ -944,7 +944,7 @@ def test_init_no_static_output_omits_index(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Auth flag acceptance (--username/--password not rejected as unknown)
+# Auth flag acceptance (--username recognized, --password rejected)
 # ---------------------------------------------------------------------------
 
 
@@ -959,10 +959,136 @@ def test_init_no_static_output_omits_index(tmp_path):
     ("check", ["url"]),
 ])
 def test_auth_flags_accepted(cmd, extra_args):
-    """--username and --password are recognized flags (not rejected as unknown)."""
-    import subprocess, sys
+    """--username is a recognized flag (not rejected as unknown)."""
+    import os, subprocess, sys
     result = subprocess.run(
-        [sys.executable, "-m", "mkio", cmd, *extra_args, "--username", "user", "--password", "pass"],
+        [sys.executable, "-m", "mkio", cmd, *extra_args, "--username", "user"],
         capture_output=True, text=True,
+        env={**os.environ, "MKIO_PASSWORD": "testpass"},
     )
     assert "Unknown option" not in result.stdout
+
+
+@pytest.mark.parametrize("cmd,extra_args", [
+    ("monitor", ["url", "--username", "user"]),
+    ("send", ["url", "svc", "{}", "--username", "user"]),
+    ("subpub", ["url", "svc", "topic", "--username", "user"]),
+    ("stream", ["url", "svc", "--username", "user"]),
+    ("query", ["url", "svc", "--username", "user"]),
+    ("reqrep", ["url", "svc", "--username", "user"]),
+    ("schema", ["url", "tbl", "--username", "user"]),
+    ("check", ["url", "--username", "user"]),
+])
+def test_password_flag_rejected(cmd, extra_args):
+    """--password flag is rejected with a message pointing to MKIO_PASSWORD."""
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", cmd, *extra_args, "--password", "pass"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "MKIO_PASSWORD" in result.stdout
+
+
+def test_password_flag_rejected_without_username():
+    """--password alone (no --username) is also rejected."""
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "monitor", "url", "--password", "pass"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "MKIO_PASSWORD" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# hashpass command
+# ---------------------------------------------------------------------------
+
+
+def test_hashpass_with_env_var():
+    """mkio hashpass uses MKIO_PASSWORD env var and produces a verifiable hash."""
+    import os, subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "hashpass"],
+        capture_output=True, text=True,
+        env={**os.environ, "MKIO_PASSWORD": "testpassword"},
+    )
+    assert result.returncode == 0
+    hashed = result.stdout.strip()
+    assert hashed
+    from mkio.auth import verify_password
+    assert verify_password("testpassword", hashed)
+    assert not verify_password("wrongpassword", hashed)
+
+
+def test_hashpass_rejects_args():
+    """mkio hashpass rejects extra arguments."""
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "hashpass", "extra"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "takes no arguments" in result.stdout
+
+
+def test_hashpass_empty_env_var():
+    """mkio hashpass rejects empty MKIO_PASSWORD."""
+    import os, subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "hashpass"],
+        capture_output=True, text=True,
+        env={**os.environ, "MKIO_PASSWORD": ""},
+        timeout=5,
+    )
+    assert result.returncode != 0
+    assert "empty" in result.stdout
+
+
+def test_hashpass_unknown_flag():
+    """mkio hashpass rejects unknown flags."""
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "hashpass", "--verbose"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+
+
+# ---------------------------------------------------------------------------
+# adduser MKIO_PASSWORD support
+# ---------------------------------------------------------------------------
+
+
+def test_adduser_respects_env_var(tmp_path):
+    """mkio adduser reads MKIO_PASSWORD instead of prompting."""
+    import os, subprocess, sys
+    config = tmp_path / "server.toml"
+    db_path = tmp_path / "test.db"
+    config.write_text(
+        f'db_path = "{db_path}"\n'
+        '[tables._mkio_users]\n'
+        'columns = { username = "TEXT PRIMARY KEY", password = "TEXT NOT NULL", role = "TEXT NOT NULL" }\n'
+    )
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE _mkio_users (username TEXT PRIMARY KEY, password TEXT NOT NULL, role TEXT NOT NULL)")
+    conn.commit()
+    conn.close()
+
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "adduser", "alice", "admin", str(config)],
+        capture_output=True, text=True,
+        env={**os.environ, "MKIO_PASSWORD": "secret123"},
+        timeout=10,
+    )
+    assert result.returncode == 0
+    assert "alice" in result.stdout
+
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute("SELECT password FROM _mkio_users WHERE username = 'alice'").fetchone()
+    conn.close()
+    assert row is not None
+    from mkio.auth import verify_password
+    assert verify_password("secret123", row[0])
