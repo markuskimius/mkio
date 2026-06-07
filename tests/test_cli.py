@@ -941,3 +941,28 @@ def test_init_no_static_output_omits_index(tmp_path):
     assert "server.toml" in result.stdout
     assert "index.html" not in result.stdout
     assert "mkio serve" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Auth flag acceptance (--username/--password not rejected as unknown)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("cmd,extra_args", [
+    ("monitor", ["url"]),
+    ("send", ["url", "svc", "{}"]),
+    ("subpub", ["url", "svc", "topic"]),
+    ("stream", ["url", "svc"]),
+    ("query", ["url", "svc"]),
+    ("reqrep", ["url", "svc"]),
+    ("schema", ["url", "tbl"]),
+    ("check", ["url"]),
+])
+def test_auth_flags_accepted(cmd, extra_args):
+    """--username and --password are recognized flags (not rejected as unknown)."""
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", cmd, *extra_args, "--username", "user", "--password", "pass"],
+        capture_output=True, text=True,
+    )
+    assert "Unknown option" not in result.stdout

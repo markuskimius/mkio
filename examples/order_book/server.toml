@@ -4,6 +4,7 @@ db_path = "orders.db"
 batch_max_size = 500
 batch_max_wait_ms = 2.0
 auto_migrate = "safe"
+monitor_access = "trade"
 
 # --- Database schema ---
 

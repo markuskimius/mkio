@@ -218,6 +218,28 @@ def test_config_access_invalid():
         })
 
 
+def test_config_monitor_access():
+    from mkio.config import load_config
+    config = load_config({
+        "tables": {
+            "_mkio_rights": {"columns": {"role": "TEXT", "right": "TEXT"}},
+        },
+        "services": {},
+        "monitor_access": "admin",
+    })
+    assert config["monitor_access"] == "admin"
+
+
+def test_config_monitor_access_invalid():
+    from mkio.config import load_config
+    with pytest.raises(ValueError, match="access.*must be"):
+        load_config({
+            "tables": {},
+            "services": {},
+            "monitor_access": 42,
+        })
+
+
 def test_config_op_access():
     from mkio.config import load_config
     config = load_config({
@@ -531,5 +553,244 @@ async def test_custom_on_auth():
         async with MkioClient(f"ws://localhost:{port}/ws", reconnect=False) as client:
             with pytest.raises(ValueError, match="bad token"):
                 await client.auth({"token": "invalid"})
+    finally:
+        await app.stop()
+
+
+# ---------------------------------------------------------------------------
+# Monitor access control
+# ---------------------------------------------------------------------------
+
+
+async def _send_monitor(ws_url: str, service: str | None = None) -> dict:
+    """Send a monitor message and return the response."""
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(ws_url) as ws:
+            msg: dict[str, Any] = {"type": "monitor"}
+            if service:
+                msg["service"] = service
+            await ws.send_bytes(dumps(msg))
+            resp = await ws.receive()
+            return loads(resp.data)
+
+
+async def _send_monitor_with_auth(
+    ws_url: str, username: str, password: str, service: str | None = None,
+) -> dict:
+    """Authenticate then send a monitor message, return the monitor response."""
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(ws_url) as ws:
+            auth_msg = {"type": "auth", "data": {"username": username, "password": password}}
+            await ws.send_bytes(dumps(auth_msg))
+            auth_resp = await ws.receive()
+            auth_data = loads(auth_resp.data)
+            assert auth_data["ok"] is True
+
+            msg: dict[str, Any] = {"type": "monitor"}
+            if service:
+                msg["service"] = service
+            await ws.send_bytes(dumps(msg))
+            resp = await ws.receive()
+            return loads(resp.data)
+
+
+async def test_monitor_disabled_by_default(auth_app, auth_url):
+    """Monitor disabled when auth enabled and no monitor_access configured."""
+    resp = await _send_monitor(auth_url)
+    assert resp["type"] == "error"
+    assert "monitoring disabled" in resp["message"]
+
+
+async def test_monitor_disabled_even_after_auth(auth_app, auth_url):
+    """Monitor still disabled after auth when no monitor_access configured."""
+    resp = await _send_monitor_with_auth(auth_url, "alice", "secret")
+    assert resp["type"] == "error"
+    assert "monitoring disabled" in resp["message"]
+
+
+async def test_monitor_denied_wrong_right():
+    """Monitor denied when user lacks required right."""
+    config = {
+        **AUTH_CONFIG,
+        "monitor_access": "admin",
+    }
+    app = create_app(config)
+    await app.start()
+    port = _get_port(app)
+    ws_url = f"ws://localhost:{port}/ws"
+
+    db = app.db
+    pw = hash_password("secret")
+    await db.write_conn.execute(
+        "INSERT INTO _mkio_users (username, password, role) VALUES (?, ?, ?)",
+        ("alice", pw, "trader"),
+    )
+    await db.write_conn.execute(
+        "INSERT INTO _mkio_rights (role, right) VALUES (?, ?)",
+        ("trader", "market"),
+    )
+    await db.write_conn.commit()
+    from mkio.auth import load_rights_cache
+    app._aiohttp_app["rights_cache"]._rights = (await load_rights_cache(db))._rights
+
+    try:
+        resp = await _send_monitor_with_auth(ws_url, "alice", "secret")
+        assert resp["type"] == "error"
+        assert "permission denied" in resp["message"]
+    finally:
+        await app.stop()
+
+
+async def test_monitor_allowed_correct_right():
+    """Monitor allowed when user has the required right."""
+    config = {
+        **AUTH_CONFIG,
+        "monitor_access": "market",
+    }
+    app = create_app(config)
+    await app.start()
+    port = _get_port(app)
+    ws_url = f"ws://localhost:{port}/ws"
+
+    db = app.db
+    pw = hash_password("secret")
+    await db.write_conn.execute(
+        "INSERT INTO _mkio_users (username, password, role) VALUES (?, ?, ?)",
+        ("alice", pw, "trader"),
+    )
+    await db.write_conn.execute(
+        "INSERT INTO _mkio_rights (role, right) VALUES (?, ?)",
+        ("trader", "market"),
+    )
+    await db.write_conn.commit()
+    from mkio.auth import load_rights_cache
+    app._aiohttp_app["rights_cache"]._rights = (await load_rights_cache(db))._rights
+
+    try:
+        resp = await _send_monitor_with_auth(ws_url, "alice", "secret")
+        assert resp["type"] == "monitor_ack"
+    finally:
+        await app.stop()
+
+
+async def test_monitor_open_access():
+    """monitor_access='open' allows monitoring without auth even when auth is enabled."""
+    config = {
+        **AUTH_CONFIG,
+        "monitor_access": "open",
+    }
+    app = create_app(config)
+    await app.start()
+    port = _get_port(app)
+    ws_url = f"ws://localhost:{port}/ws"
+    try:
+        resp = await _send_monitor(ws_url)
+        assert resp["type"] == "monitor_ack"
+    finally:
+        await app.stop()
+
+
+async def test_monitor_no_auth_system():
+    """Without auth (no _mkio_rights table), monitor works without restriction."""
+    from mkio.app import create_app as ca
+    config = {
+        "db_path": ":memory:",
+        "port": 0,
+        "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+        "services": {"s": {"protocol": "subpub", "primary_table": "t", "topic": "id"}},
+    }
+    app = ca(config)
+    await app.start()
+    port = _get_port(app)
+    ws_url = f"ws://localhost:{port}/ws"
+    try:
+        resp = await _send_monitor(ws_url)
+        assert resp["type"] == "monitor_ack"
+    finally:
+        await app.stop()
+
+
+async def test_monitor_specific_service_disabled(auth_app, auth_url):
+    """Monitor on a specific service is also disabled without monitor_access."""
+    resp = await _send_monitor(auth_url, service="prices")
+    assert resp["type"] == "error"
+    assert "monitoring disabled" in resp["message"]
+
+
+async def test_monitor_specific_service_allowed():
+    """Monitor on a specific service is allowed after auth with monitor_access configured."""
+    config = {
+        **AUTH_CONFIG,
+        "monitor_access": "market",
+    }
+    app = create_app(config)
+    await app.start()
+    port = _get_port(app)
+    ws_url = f"ws://localhost:{port}/ws"
+
+    db = app.db
+    pw = hash_password("secret")
+    await db.write_conn.execute(
+        "INSERT INTO _mkio_users (username, password, role) VALUES (?, ?, ?)",
+        ("alice", pw, "trader"),
+    )
+    await db.write_conn.execute(
+        "INSERT INTO _mkio_rights (role, right) VALUES (?, ?)",
+        ("trader", "market"),
+    )
+    await db.write_conn.commit()
+    from mkio.auth import load_rights_cache
+    app._aiohttp_app["rights_cache"]._rights = (await load_rights_cache(db))._rights
+
+    try:
+        resp = await _send_monitor_with_auth(ws_url, "alice", "secret", service="prices")
+        assert resp["type"] == "monitor_ack"
+        assert resp["service"] == "prices"
+    finally:
+        await app.stop()
+
+
+async def test_monitor_auth_any_user():
+    """monitor_access='auth' allows any authenticated user."""
+    config = {
+        **AUTH_CONFIG,
+        "monitor_access": "auth",
+    }
+    app = create_app(config)
+    await app.start()
+    port = _get_port(app)
+    ws_url = f"ws://localhost:{port}/ws"
+
+    db = app.db
+    pw = hash_password("secret")
+    await db.write_conn.execute(
+        "INSERT INTO _mkio_users (username, password, role) VALUES (?, ?, ?)",
+        ("alice", pw, "trader"),
+    )
+    await db.write_conn.commit()
+
+    try:
+        resp = await _send_monitor_with_auth(ws_url, "alice", "secret")
+        assert resp["type"] == "monitor_ack"
+    finally:
+        await app.stop()
+
+
+async def test_monitor_unauthenticated_denied():
+    """Unauthenticated user denied when monitor_access requires a right."""
+    config = {
+        **AUTH_CONFIG,
+        "monitor_access": "admin",
+    }
+    app = create_app(config)
+    await app.start()
+    port = _get_port(app)
+    ws_url = f"ws://localhost:{port}/ws"
+    try:
+        resp = await _send_monitor(ws_url)
+        assert resp["type"] == "error"
+        assert "authentication required" in resp["message"]
     finally:
         await app.stop()

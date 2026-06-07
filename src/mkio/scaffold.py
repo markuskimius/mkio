@@ -31,6 +31,15 @@ def init(directory: str | Path = ".", *, no_static: bool = False) -> list[Path]:
     config_path.write_text(toml_content)
     created = [config_path]
 
+    data_dir = target / "data"
+    data_dir.mkdir(exist_ok=True)
+    users_path = data_dir / "users.csv"
+    users_path.write_text(_INIT_USERS_CSV)
+    created.append(users_path)
+    rights_path = data_dir / "rights.csv"
+    rights_path.write_text(_INIT_RIGHTS_CSV)
+    created.append(rights_path)
+
     if not no_static:
         static_dir = target / "static"
         static_dir.mkdir(exist_ok=True)
@@ -46,10 +55,14 @@ def get_default_config() -> dict[str, Any]:
 
     This is the same config that ``init()`` writes as server.toml,
     parsed into a dict so callers can modify it before passing to
-    ``create_app()``.
+    ``create_app()``.  Seed file references are stripped since there
+    are no seed files in a programmatic context.
     """
     toml_bytes = (_INIT_SERVER_TOML_BASE + _INIT_SERVER_TOML_STATIC).encode()
-    return tomllib.loads(toml_bytes.decode())
+    cfg = tomllib.loads(toml_bytes.decode())
+    for tbl in cfg.get("tables", {}).values():
+        tbl.pop("seed", None)
+    return cfg
 
 
 _INIT_SERVER_TOML_BASE = """\
@@ -65,6 +78,22 @@ shutdown_timeout = 5
 auto_migrate = "safe"
 wal_checkpoint_interval_s = 300
 
+# --- Authentication ---
+# Auth is enabled by the _mkio_rights table. All services are locked by
+# default — each service must declare access. Default users seeded on first
+# run: admin/password (admin), user/password (user).
+# Add more users with: mkio adduser <username> <role>
+
+monitor_access = "admin"
+
+[tables._mkio_users]
+columns = { username = "TEXT PRIMARY KEY", password = "TEXT NOT NULL", role = "TEXT NOT NULL" }
+seed = "data/users.csv"
+
+[tables._mkio_rights]
+columns = { role = "TEXT", right = "TEXT" }
+seed = "data/rights.csv"
+
 # --- Database schema ---
 
 [tables.items]
@@ -79,6 +108,7 @@ columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", category = "TEXT", name = 
 [services.items]
 protocol = "transaction"
 description = "CRUD operations on items"
+access = "edit"
 change_log_size = 5000
 
 [services.items.descriptions]
@@ -109,6 +139,7 @@ remove = [
 [services.item]
 protocol = "subpub"
 description = "Subscribe to a single item by name"
+access = "open"
 primary_table = "items"
 watch_tables = ["items"]
 topic = "name"
@@ -130,6 +161,7 @@ value = "''"
 [services.feed]
 protocol = "stream"
 description = "Append-only activity log"
+access = "view"
 primary_table = "audit"
 watch_tables = ["audit"]
 sql = "SELECT audit.id, audit.action, audit.name, audit.category, audit._mkio_ref FROM audit"
@@ -148,6 +180,7 @@ _mkio_ref = "_mkio_ref"
 [services.all_items]
 protocol = "query"
 description = "Live query of all items"
+access = "view"
 primary_table = "items"
 watch_tables = ["items"]
 sql = "SELECT * FROM items WHERE category != 'hidden'"
@@ -165,11 +198,13 @@ value = "value"
 [services.lookup]
 protocol = "reqrep"
 description = "Look up a single item by name"
+access = "view"
 sql = "SELECT * FROM items WHERE name = :name"
 
 [services.summary]
 protocol = "reqrep"
 description = "Count items in a category"
+access = "view"
 params = { cat = "LOWER(category)" }
 sql = "SELECT category, COUNT(*) as count FROM items WHERE category = :cat GROUP BY category"
 reply = { category = "category", count = "count" }
@@ -177,14 +212,31 @@ reply = { category = "category", count = "count" }
 [services.item_count]
 protocol = "reqrep"
 description = "Total number of items"
+access = "view"
 sql = "SELECT COUNT(*) as n FROM items"
 reply = "COALESCE(n, 0)"
 
 [services.calculate]
 protocol = "reqrep"
 description = "Pure computation, no database"
+access = "open"
 reply = { length = "LEN(value)", label = "UPPER(name)" }
 
+"""
+
+_INIT_USERS_CSV = """\
+username,password,role
+admin,pbkdf2:e2c1cec54fdbc92d8c44c53769fe475024a32590cf48b3e0d200e8dbfdf262e7,admin
+user,pbkdf2:e2c1cec54fdbc92d8c44c53769fe475024a32590cf48b3e0d200e8dbfdf262e7,user
+"""
+
+_INIT_RIGHTS_CSV = """\
+role,right
+admin,admin
+admin,edit
+admin,view
+user,edit
+user,view
 """
 
 _INIT_SERVER_TOML_STATIC = """\
@@ -219,34 +271,58 @@ _INIT_INDEX_HTML = """\
     .connected { color: #6ee7b7; }
     .disconnected { color: #fca5a5; }
     .error { background: #450a0a; color: #fca5a5; border: 1px solid #dc2626; border-radius: 4px; padding: 8px 12px; margin: 0.5rem 0; font-size: 0.875rem; }
+    .hint { color: #94a3b8; font-size: 0.75rem; margin-top: 0.25rem; }
+    .user-info { display: flex; align-items: center; gap: 0.75rem; font-size: 0.875rem; }
+    .user-info span { color: #94a3b8; }
+    .btn-logout { background: #475569; font-size: 0.75rem; padding: 3px 8px; }
+    .btn-logout:hover { background: #64748b; }
   </style>
 </head>
 <body>
   <h1>mkio</h1>
   <p id="status" class="disconnected">Disconnected</p>
-
   <div id="error"></div>
-  <form id="add-form">
-    <input name="category" list="categories" placeholder="Category" autocomplete="off">
-    <datalist id="categories"></datalist>
-    <input name="name" placeholder="Name" required autocomplete="off">
-    <input name="value" placeholder="Value" autocomplete="off">
-    <button type="submit">Add</button>
-  </form>
 
-  <table>
-    <thead><tr><th>Category</th><th>Name</th><th>Value</th><th></th></tr></thead>
-    <tbody id="items"></tbody>
-  </table>
+  <div id="login-view">
+    <form id="login-form">
+      <input name="username" placeholder="Username" required autocomplete="username">
+      <input name="password" type="password" placeholder="Password" required autocomplete="current-password">
+      <button type="submit">Log in</button>
+    </form>
+    <p class="hint">Default accounts: admin / password, user / password</p>
+  </div>
+
+  <div id="app-view" style="display:none">
+    <div class="user-info">
+      <span>Logged in as <strong id="user-name"></strong> (<span id="user-role"></span>)</span>
+      <button class="btn-logout" onclick="logout()">Log out</button>
+    </div>
+
+    <form id="add-form">
+      <input name="category" list="categories" placeholder="Category" autocomplete="off">
+      <datalist id="categories"></datalist>
+      <input name="name" placeholder="Name" required autocomplete="off">
+      <input name="value" placeholder="Value" autocomplete="off">
+      <button type="submit">Add</button>
+    </form>
+
+    <table>
+      <thead><tr><th>Category</th><th>Name</th><th>Value</th><th></th></tr></thead>
+      <tbody id="items"></tbody>
+    </table>
+  </div>
 
   <script>
     const statusEl = document.getElementById('status');
+    const errorEl = document.getElementById('error');
+    const loginView = document.getElementById('login-view');
+    const appView = document.getElementById('app-view');
+
     const client = new MkioClient(`ws://${location.host}/ws`, {
       onConnect() { statusEl.textContent = 'Connected'; statusEl.className = 'connected'; },
       onDisconnect() { statusEl.textContent = 'Disconnected'; statusEl.className = 'disconnected'; },
     });
 
-    const errorEl = document.getElementById('error');
     function showError(msg) { errorEl.textContent = msg; errorEl.className = 'error'; setTimeout(() => { errorEl.textContent = ''; errorEl.className = ''; }, 5000); }
 
     const items = new Map();
@@ -268,17 +344,39 @@ _INIT_INDEX_HTML = """\
       catList.innerHTML = cats.map(c => `<option value="${c}">`).join('');
     }
 
-    async function removeItem(category, name) {
-      const res = await client.send('items', { category, name }, { op: 'remove' });
-      if (res.type === 'error') showError(res.message);
-    }
-
-    client.connect().then(() => {
+    function subscribe() {
       client.subscribe('all_items', 'query', {
         onSnapshot(rows) { items.clear(); rows.forEach(r => items.set(rowKey(r), r)); render(); },
         onDelta(changes) { changes.forEach(c => { if (c.op === 'delete') items.delete(rowKey(c.row)); else items.set(rowKey(c.row), c.row); }); render(); },
         onUpdate(op, row) { if (op === 'delete') items.delete(rowKey(row)); else items.set(rowKey(row), row); render(); },
       });
+    }
+
+    async function removeItem(category, name) {
+      const res = await client.send('items', { category, name }, { op: 'remove' });
+      if (res.type === 'error') showError(res.message);
+    }
+
+    function logout() {
+      client.close();
+      location.reload();
+    }
+
+    client.connect();
+
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      try {
+        const result = await client.auth({ username: form.username.value, password: form.password.value });
+        document.getElementById('user-name').textContent = result.user;
+        document.getElementById('user-role').textContent = result.role;
+        loginView.style.display = 'none';
+        appView.style.display = '';
+        subscribe();
+      } catch (err) {
+        showError(err.message);
+      }
     });
 
     document.getElementById('add-form').addEventListener('submit', async (e) => {

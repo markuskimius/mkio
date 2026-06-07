@@ -180,6 +180,33 @@ app.run()
 
 Rights enforcement still uses the `_mkio_rights` table regardless of auth method.
 
+### Monitor access
+
+When auth is enabled, monitoring is **disabled by default**. Set the top-level `monitor_access` key to control who can use `mkio monitor`:
+
+```toml
+monitor_access = "admin"    # role must have "admin" right
+```
+
+`monitor_access` accepts the same values as service `access`: `"open"` (no auth needed), `"auth"` (any logged-in user), a right name, or a dict with SQL pre-checks. Without this key, all monitor requests return `"monitoring disabled"`.
+
+### CLI authentication
+
+All WebSocket-based CLI commands accept `--username` and `--password` for authentication:
+
+```bash
+mkio monitor 8080 --username alice --password secret
+mkio send 8080 orders --op new '{"symbol":"AAPL"}' --username alice --password secret
+mkio subpub 8080 prices AAPL --username bob --password secret
+mkio query 8080 all_orders --username bob --password secret
+mkio stream 8080 audit_feed --username bob --password secret
+mkio reqrep 8080 lookup name=test --username bob --password secret
+mkio schema 8080 orders --username bob --password secret
+mkio check 8080 --username bob --password secret
+```
+
+If `--username` is given without `--password`, the CLI prompts interactively.
+
 ### Bootstrap
 
 ```bash

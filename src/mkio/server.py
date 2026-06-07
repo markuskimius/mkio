@@ -841,6 +841,31 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                         txnid=txnid,
                     ))
                     continue
+                if request.app["config"].get("auth"):
+                    from mkio.auth import check_access, build_when_params, execute_when_check
+                    monitor_access = request.app["config"].get("monitor_access")
+                    if monitor_access is None:
+                        await ws.send_bytes(make_error(ref, "monitoring disabled", txnid=txnid))
+                        continue
+                    auth_info = getattr(ws, "_mkio_auth", None)
+                    rights_cache = request.app.get("rights_cache")
+                    allowed, when_sql = check_access(monitor_access, auth_info, rights_cache)
+                    if not allowed:
+                        message = "authentication required" if auth_info is None else "permission denied"
+                        await ws.send_bytes(make_error(ref, message, txnid=txnid))
+                        continue
+                    if when_sql is not None:
+                        params = build_when_params(auth_info, {})
+                        db = request.app["db"]
+                        try:
+                            passed = await execute_when_check(db, when_sql, params)
+                        except Exception:
+                            await ws.send_bytes(make_error(ref, "permission denied", txnid=txnid))
+                            continue
+                        if not passed:
+                            await ws.send_bytes(make_error(ref, "permission denied", txnid=txnid))
+                            continue
+
                 monitors[target].add(ws)
                 monitoring.add(target)
                 ack: dict[str, Any] = {"type": "monitor_ack"}

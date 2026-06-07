@@ -376,7 +376,7 @@ def _print_listener_detail(detail: dict[str, Any]) -> None:
 
 
 def _cmd_monitor() -> None:
-    usage = "mkio monitor <url> [service] [--filter <expr>]"
+    usage = "mkio monitor <url> [service] [--filter <expr>] [--username <user>] [--password <pass>]"
     args = sys.argv[2:]
     if len(args) < 1:
         print(f"Usage: {usage}")
@@ -384,8 +384,9 @@ def _cmd_monitor() -> None:
         print("  e.g. mkio monitor ws://localhost:8080 orders")
         print("  e.g. mkio monitor ws://localhost:8080 --filter \"direction == 'in'\"")
         sys.exit(1)
-    _check_unknown_flags(args, {"--filter"}, usage)
+    _check_unknown_flags(args, {"--filter", "--username", "--password"}, usage)
     filter_expr = _extract_flag(args, "--filter")
+    username, password = _extract_auth(args)
     _check_extra_positional(args[2:] if len(args) > 2 else [], usage)
     url = args[0].rstrip("/")
     service = args[1] if len(args) >= 2 else None
@@ -402,7 +403,7 @@ def _cmd_monitor() -> None:
 
     _run_client_command(
         ws_url,
-        _monitor_service(ws_url, service, filter_fn),
+        _monitor_service(ws_url, service, filter_fn, username=username, password=password),
         "\nMonitor stopped.",
     )
 
@@ -411,12 +412,24 @@ async def _monitor_service(
     ws_url: str,
     service: str | None,
     filter_fn: Any = None,
+    username: str | None = None,
+    password: str | None = None,
 ) -> None:
     import aiohttp
 
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(ws_url) as ws:
             from mkio._json import dumps
+
+            if username:
+                auth_msg = {"type": "auth", "data": {"username": username, "password": password}}
+                await ws.send_bytes(dumps(auth_msg))
+                auth_resp = await ws.receive()
+                auth_data = loads(auth_resp.data)
+                if not auth_data.get("ok"):
+                    print(f"Authentication failed: {auth_data.get('message', 'unknown error')}")
+                    sys.exit(1)
+
             monitor_msg: dict[str, Any] = {"type": "monitor"}
             if service:
                 monitor_msg["service"] = service
@@ -481,7 +494,7 @@ def _print_monitor_message(data: dict[str, Any]) -> None:
 # ---- send command -----------------------------------------------------------
 
 def _cmd_send() -> None:
-    usage = "mkio send <url> <service> [--op <name>] <data>"
+    usage = "mkio send <url> <service> [--op <name>] [--username <user>] [--password <pass>] <data>"
     args = sys.argv[2:]
     if len(args) < 3:
         print(f"Usage: {usage}")
@@ -492,7 +505,8 @@ def _cmd_send() -> None:
     service = args[1]
     rest = args[2:]
 
-    _check_unknown_flags(rest, {"--op"}, usage)
+    _check_unknown_flags(rest, {"--op", "--username", "--password"}, usage)
+    username, password = _extract_auth(rest)
 
     op_name = None
     if "--op" in rest:
@@ -517,7 +531,7 @@ def _cmd_send() -> None:
     messages = _load_messages(data_arg)
 
     ws_url = _normalize_ws_url(url)
-    _run_client_command(ws_url, _send_messages(ws_url, service, op_name, messages))
+    _run_client_command(ws_url, _send_messages(ws_url, service, op_name, messages, username=username, password=password))
 
 
 _ENVELOPE_KEYS = {"op", "ref", "service", "txnid"}
@@ -625,10 +639,14 @@ async def _send_messages(
     service: str,
     op_name: str | None,
     messages: list[dict[str, Any]],
+    username: str | None = None,
+    password: str | None = None,
 ) -> None:
     from mkio.client import MkioClient
 
     async with MkioClient(ws_url, reconnect=False) as client:
+        if username:
+            await _authenticate(client, username, password)
         total = len(messages)
         for i, msg in enumerate(messages, 1):
             # Extract envelope fields if present
@@ -666,7 +684,7 @@ async def _send_messages(
 
 def _cmd_subpub() -> None:
     args = sys.argv[2:]
-    usage = "mkio subpub <url> <service> <topic> [<topic2> ...] [--subid <id>] [--fields <f1,f2,...>]"
+    usage = "mkio subpub <url> <service> <topic> [<topic2> ...] [--subid <id>] [--fields <f1,f2,...>] [--username <user>] [--password <pass>]"
     if len(args) < 3:
         print(f"Usage: {usage}")
         sys.exit(1)
@@ -684,7 +702,8 @@ def _cmd_subpub() -> None:
         sys.exit(1)
 
     rest = list(args[i:])
-    _check_unknown_flags(rest, {"--fields", "--subid"}, usage)
+    _check_unknown_flags(rest, {"--fields", "--subid", "--username", "--password"}, usage)
+    username, password = _extract_auth(rest)
     fields = _extract_fields(rest)
     subid = _extract_flag(rest, "--subid")
     _check_extra_positional(rest, usage)
@@ -694,14 +713,14 @@ def _cmd_subpub() -> None:
 
     _run_client_command(
         ws_url,
-        _subscribe_service(ws_url, service, "subpub", None, None, subid, topic=topic_arg, fields=fields),
+        _subscribe_service(ws_url, service, "subpub", None, None, subid, topic=topic_arg, fields=fields, username=username, password=password),
         "\nSubscription stopped.",
     )
 
 
 def _cmd_stream() -> None:
     args = sys.argv[2:]
-    usage = "mkio stream <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--ref <ref>] [--maxcount <n>] [--before]"
+    usage = "mkio stream <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--ref <ref>] [--maxcount <n>] [--before] [--username <user>] [--password <pass>]"
     if len(args) < 2:
         print(f"Usage: {usage}")
         sys.exit(1)
@@ -709,7 +728,8 @@ def _cmd_stream() -> None:
     url = args[0].rstrip("/")
     service = args[1]
     rest = args[2:]
-    _check_unknown_flags(rest, {"--filter", "--fields", "--ref", "--subid", "--maxcount", "--before"}, usage)
+    _check_unknown_flags(rest, {"--filter", "--fields", "--ref", "--subid", "--maxcount", "--before", "--username", "--password"}, usage)
+    username, password = _extract_auth(rest)
     filter_expr = _extract_flag(rest, "--filter")
     fields = _extract_fields(rest)
     ref = _extract_flag(rest, "--ref")
@@ -727,14 +747,14 @@ def _cmd_stream() -> None:
 
     _run_client_command(
         ws_url,
-        _subscribe_service(ws_url, service, "stream", filter_expr, ref, subid, fields=fields, maxcount=maxcount, before=before),
+        _subscribe_service(ws_url, service, "stream", filter_expr, ref, subid, fields=fields, maxcount=maxcount, before=before, username=username, password=password),
         "\nSubscription stopped.",
     )
 
 
 def _cmd_query() -> None:
     args = sys.argv[2:]
-    usage = "mkio query <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--snapshotOnly] [--updateOnly]"
+    usage = "mkio query <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--snapshotOnly] [--updateOnly] [--username <user>] [--password <pass>]"
     if len(args) < 2:
         print(f"Usage: {usage}")
         sys.exit(1)
@@ -742,7 +762,8 @@ def _cmd_query() -> None:
     url = args[0].rstrip("/")
     service = args[1]
     rest = args[2:]
-    _check_unknown_flags(rest, {"--filter", "--fields", "--subid", "--snapshotOnly", "--updateOnly"}, usage)
+    _check_unknown_flags(rest, {"--filter", "--fields", "--subid", "--snapshotOnly", "--updateOnly", "--username", "--password"}, usage)
+    username, password = _extract_auth(rest)
     filter_expr = _extract_flag(rest, "--filter")
     fields = _extract_fields(rest)
     subid = _extract_flag(rest, "--subid")
@@ -752,7 +773,7 @@ def _cmd_query() -> None:
 
     _run_client_command(
         ws_url,
-        _subscribe_service(ws_url, service, "query", filter_expr, None, subid, snapshot=snapshot, updates=updates, fields=fields),
+        _subscribe_service(ws_url, service, "query", filter_expr, None, subid, snapshot=snapshot, updates=updates, fields=fields, username=username, password=password),
         "\nSubscription stopped.",
     )
 
@@ -791,6 +812,25 @@ def _extract_flag(args: list[str], flag: str) -> str | None:
     return value
 
 
+def _extract_auth(args: list[str]) -> tuple[str | None, str | None]:
+    username = _extract_flag(args, "--username")
+    password = _extract_flag(args, "--password")
+    if username and not password:
+        import getpass
+        password = getpass.getpass(f"Password for {username}: ")
+    return username, password
+
+
+async def _authenticate(
+    client: Any, username: str, password: str,
+) -> None:
+    try:
+        await client.auth({"username": username, "password": password})
+    except ValueError as exc:
+        print(f"Authentication failed: {exc}")
+        sys.exit(1)
+
+
 async def _subscribe_service(
     ws_url: str,
     service: str,
@@ -804,10 +844,14 @@ async def _subscribe_service(
     topic: str | list[str] | None = None,
     maxcount: int | None = None,
     before: bool = False,
+    username: str | None = None,
+    password: str | None = None,
 ) -> None:
     from mkio.client import MkioClient
 
     async with MkioClient(ws_url, reconnect=True) as client:
+        if username:
+            await _authenticate(client, username, password)
         async for msg in client.subscribe(service, protocol, topic=topic, filter=filter_expr, ref=ref, subid=subid, snapshot=snapshot, updates=updates, fields=fields, maxcount=maxcount, before=before):
             if msg.get("type") == "nack":
                 message = msg.get("message", "subscription rejected")
@@ -979,7 +1023,7 @@ def _normalize_ws_url(url: str) -> str:
 
 
 def _cmd_reqrep() -> None:
-    usage = "mkio reqrep <url> <service> [data]"
+    usage = "mkio reqrep <url> <service> [--username <user>] [--password <pass>] [data]"
     args = sys.argv[2:]
     if len(args) < 2:
         print(f"Usage: {usage}")
@@ -990,7 +1034,8 @@ def _cmd_reqrep() -> None:
 
     url = args[0]
     service = args[1]
-    rest = args[2:]
+    rest = list(args[2:])
+    username, password = _extract_auth(rest)
 
     data: dict[str, Any] = {}
     if rest:
@@ -1010,15 +1055,18 @@ def _cmd_reqrep() -> None:
                 data[k] = _auto_convert(v)
 
     ws_url = _normalize_ws_url(url)
-    _run_client_command(ws_url, _reqrep_request(ws_url, service, data))
+    _run_client_command(ws_url, _reqrep_request(ws_url, service, data, username=username, password=password))
 
 
 async def _reqrep_request(
-    ws_url: str, service: str, data: dict[str, Any]
+    ws_url: str, service: str, data: dict[str, Any],
+    username: str | None = None, password: str | None = None,
 ) -> None:
     from mkio.client import MkioClient
 
     async with MkioClient(ws_url, reconnect=False) as client:
+        if username:
+            await _authenticate(client, username, password)
         result = await client.request(service, data)
         if result.get("type") == "error":
             message = result.get("message", "unknown error")
@@ -1110,7 +1158,7 @@ def _cmd_dbupdate() -> None:
 
 
 def _cmd_check() -> None:
-    usage = "mkio check <url> [version=... protocol=... mkio=...]"
+    usage = "mkio check <url> [--username <user>] [--password <pass>] [version=... protocol=... mkio=...]"
     args = sys.argv[2:]
     if len(args) < 1:
         print(f"Usage: {usage}")
@@ -1121,8 +1169,10 @@ def _cmd_check() -> None:
         sys.exit(1)
 
     url = args[0]
+    rest = list(args[1:])
+    username, password = _extract_auth(rest)
     data: dict[str, Any] = {}
-    for kv in args[1:]:
+    for kv in rest:
         if "=" not in kv:
             print(f"Error: expected key=value, got {kv!r}")
             print(f"Usage: {usage}")
@@ -1134,13 +1184,18 @@ def _cmd_check() -> None:
         data[k] = v
 
     ws_url = _normalize_ws_url(url)
-    _run_client_command(ws_url, _check_request(ws_url, data))
+    _run_client_command(ws_url, _check_request(ws_url, data, username=username, password=password))
 
 
-async def _check_request(ws_url: str, data: dict[str, Any]) -> None:
+async def _check_request(
+    ws_url: str, data: dict[str, Any],
+    username: str | None = None, password: str | None = None,
+) -> None:
     from mkio.client import MkioClient
 
     async with MkioClient(ws_url, reconnect=False) as client:
+        if username:
+            await _authenticate(client, username, password)
         result = await client.request("_mkio", data)
         if result.get("type") == "error":
             print(f"Error: {result.get('message', 'unknown error')}")
@@ -1160,9 +1215,10 @@ async def _check_request(ws_url: str, data: dict[str, Any]) -> None:
 
 
 def _cmd_schema() -> None:
-    usage = "mkio schema <url> <table>"
+    usage = "mkio schema <url> <table> [--username <user>] [--password <pass>]"
     args = sys.argv[2:]
-    _check_unknown_flags(args, set(), usage)
+    _check_unknown_flags(args, {"--username", "--password"}, usage)
+    username, password = _extract_auth(args)
     if len(args) < 2:
         print(f"Usage: {usage}")
         print("  e.g. mkio schema 8080 orders")
@@ -1175,13 +1231,18 @@ def _cmd_schema() -> None:
     url = args[0]
     table = args[1]
     ws_url = _normalize_ws_url(url)
-    _run_client_command(ws_url, _schema_request(ws_url, table))
+    _run_client_command(ws_url, _schema_request(ws_url, table, username=username, password=password))
 
 
-async def _schema_request(ws_url: str, table: str) -> None:
+async def _schema_request(
+    ws_url: str, table: str,
+    username: str | None = None, password: str | None = None,
+) -> None:
     from mkio.client import MkioClient
 
     async with MkioClient(ws_url, reconnect=False) as client:
+        if username:
+            await _authenticate(client, username, password)
         result = await client.request("_mkio", {"table": table})
         if result.get("type") == "error":
             print(f"Error: {result.get('message', 'unknown error')}")

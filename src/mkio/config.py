@@ -29,7 +29,7 @@ _DEFAULTS = {
 _VALID_TOP_LEVEL_KEYS = frozenset(
     set(_DEFAULTS.keys())
     | {"tables", "services", "static", "config", "shutdown_timeout", "name", "version",
-       "auth", "auth_builtin"}
+       "auth", "auth_builtin", "monitor_access"}
 )
 
 _VALID_SERVICE_KEYS: dict[str, frozenset[str]] = {
@@ -96,6 +96,9 @@ def load_config(source: str | Path | dict[str, Any]) -> dict[str, Any]:
     tables = config["tables"]
     config["auth"] = "_mkio_rights" in tables
     config["auth_builtin"] = "_mkio_users" in tables
+
+    if "monitor_access" in config:
+        _validate_access("monitor_access", config["monitor_access"])
 
     # Validate and resolve seed file paths on tables
     config_dir = config.get("_config_dir")
