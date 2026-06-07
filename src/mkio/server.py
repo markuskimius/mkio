@@ -717,6 +717,7 @@ async def _handle_auth(
         return auth_info
     except Exception as exc:
         resp = {"type": "auth", "ok": False, "message": str(exc) if str(exc) else "authentication failed"}
+        await asyncio.sleep(1)
         await ws.send_bytes(dumps(resp))
         await _notify_monitors(app, "_auth", "out", resp)
         return None
