@@ -226,8 +226,8 @@ reply = { length = "LEN(value)", label = "UPPER(name)" }
 
 _INIT_USERS_CSV = """\
 username,password,role
-admin,pbkdf2:e2c1cec54fdbc92d8c44c53769fe475024a32590cf48b3e0d200e8dbfdf262e7,admin
-user,pbkdf2:e2c1cec54fdbc92d8c44c53769fe475024a32590cf48b3e0d200e8dbfdf262e7,user
+admin,pbkdf2:9d9b43e1fcc40e898182e8a8ed5cbb97:6e8b888168d50453679ca6d71acb34f1c06402aab9d5bd707bb9bf5cc1d3b74c,admin
+user,pbkdf2:355d9bfdd7e7e479266abf50d9b80995:b89bd9291674fbedea0c4dedd5ca55f956394b5ea00e7db187892ffe7244674b,user
 """
 
 _INIT_RIGHTS_CSV = """\

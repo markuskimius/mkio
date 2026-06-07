@@ -28,6 +28,33 @@ def test_verify_bad_hash():
     assert not verify_password("secret", "garbage")
 
 
+def test_hash_password_unique_salts():
+    h1 = hash_password("same")
+    h2 = hash_password("same")
+    assert h1 != h2
+    assert verify_password("same", h1)
+    assert verify_password("same", h2)
+
+
+def test_pbkdf2_format():
+    from mkio.auth import _BCRYPT_AVAILABLE
+    if _BCRYPT_AVAILABLE:
+        pytest.skip("bcrypt available, PBKDF2 path not exercised")
+    h = hash_password("test")
+    parts = h.split(":")
+    assert len(parts) == 3
+    assert parts[0] == "pbkdf2"
+    assert len(parts[1]) == 32  # 16 bytes = 32 hex chars
+    assert len(parts[2]) == 64  # 32 bytes = 64 hex chars
+
+
+def test_verify_malformed_pbkdf2():
+    assert not verify_password("x", "pbkdf2:")
+    assert not verify_password("x", "pbkdf2:nothex:nothex")
+    assert not verify_password("x", "pbkdf2:a:b:c")
+    assert not verify_password("x", "pbkdf2:abcd")
+
+
 # ---------------------------------------------------------------------------
 # Unit tests: RightsCache
 # ---------------------------------------------------------------------------

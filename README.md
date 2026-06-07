@@ -219,7 +219,7 @@ mkio adduser admin1 admin my.toml      # use a specific config file
 mkio hashpass                          # generate a hashed password for seed files
 ```
 
-Install bcrypt for strong password hashing: `pip install mkio[auth]`. Without it, PBKDF2 is used as a fallback.
+Install bcrypt for strong password hashing: `pip install mkio[auth]`. Without it, PBKDF2 with per-password random salt is used as a fallback.
 
 ## Programmatic API
 

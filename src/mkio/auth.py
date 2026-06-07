@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from typing import Any
 
 from aiohttp import web
@@ -25,15 +26,23 @@ def hash_password(password: str) -> str:
     """Hash a password using bcrypt if available, otherwise PBKDF2."""
     if _BCRYPT_AVAILABLE:
         return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), b"mkio_salt", 100_000)
-    return "pbkdf2:" + dk.hex()
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100_000)
+    return "pbkdf2:" + salt.hex() + ":" + dk.hex()
 
 
 def verify_password(password: str, hashed: str) -> bool:
     """Verify a password against its hash."""
     if hashed.startswith("pbkdf2:"):
-        dk = hashlib.pbkdf2_hmac("sha256", password.encode(), b"mkio_salt", 100_000)
-        return dk.hex() == hashed[7:]
+        try:
+            parts = hashed.split(":")
+            if len(parts) != 3:
+                return False
+            salt = bytes.fromhex(parts[1])
+            dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100_000)
+            return dk.hex() == parts[2]
+        except (ValueError, TypeError):
+            return False
     if _BCRYPT_AVAILABLE:
         try:
             return bcrypt.checkpw(password.encode(), hashed.encode())
