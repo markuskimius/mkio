@@ -320,6 +320,16 @@ class MkioClient:
                 future.set_result(data)
             return
 
+        # An error with no correlation id while requests are pending — an
+        # older server denying a request without echoing reqid. Fail the
+        # oldest pending request rather than leaving it hanging forever.
+        if msg_type == "error" and not ref and not reqid and self._pending_reqid:
+            oldest = next(iter(self._pending_reqid))
+            future = self._pending_reqid.pop(oldest)
+            if not future.done():
+                future.set_result(data)
+            return
+
         # Nack: deliver to subscription queue and remove to prevent reconnect retry
         nack_key = data.get("subid") or service
         if msg_type == "nack" and nack_key and nack_key in self._subscriptions:

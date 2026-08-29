@@ -382,6 +382,23 @@ async def test_mkio_js_served():
         await app.stop()
 
 
+@pytest.mark.asyncio
+async def test_mkio_expr_js_served():
+    app = create_app(MINIMAL_CONFIG)
+    await app.start()
+    try:
+        port = _get_port(app)
+        async with ClientSession() as session:
+            async with session.get(f"http://127.0.0.1:{port}/mkio-expr.js") as resp:
+                assert resp.status == 200
+                assert "javascript" in resp.content_type
+                body = await resp.text()
+                assert "export const LANGUAGE_VERSION" in body
+                assert "globalThis.mkioExpr" in body
+    finally:
+        await app.stop()
+
+
 # ---- WebSocket ---------------------------------------------------------------
 
 

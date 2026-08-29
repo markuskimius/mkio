@@ -170,7 +170,7 @@ def _build_reqrep_detail(
     import json
     import re
 
-    from mkio._expr import field_refs, numeric_fields, parse
+    from mkio.expr import field_refs, function_refs, numeric_fields, parse
 
     detail: dict[str, Any] = {}
     sql = config.get("sql")
@@ -202,20 +202,25 @@ def _build_reqrep_detail(
     # Discover input fields from expressions
     input_fields: set[str] = set()
     num_fields: set[str] = set()
+    functions: set[str] = set()
     if params_cfg:
         for expr_str in params_cfg.values():
             ast = parse(str(expr_str))
             input_fields |= field_refs(ast)
             num_fields |= numeric_fields(ast)
+            functions |= function_refs(ast)
     elif not sql and reply:
         exprs = [reply] if isinstance(reply, str) else list(reply.values())
         for expr_str in exprs:
             ast = parse(str(expr_str))
             input_fields |= field_refs(ast)
             num_fields |= numeric_fields(ast)
+            functions |= function_refs(ast)
 
     if input_fields:
         detail["input_fields"] = sorted(input_fields)
+    if functions:
+        detail["functions"] = sorted(functions)
 
     # Build example data from SQL params or input fields
     example_data: dict[str, Any] = {}
@@ -743,10 +748,18 @@ async def _check_service_access(
     if svc is None:
         return None
 
+    # The built-in identity service gates itself: any authenticated user gets
+    # the full reply; before authentication it answers with identity fields
+    # only (see InfoService), so `mkio check` and client verification work
+    # against auth-enabled servers.
+    if service_name == "_mkio":
+        return None
+
     svc_config = svc.config
     ref = msg.get("ref")
     txnid = msg.get("txnid")
     subid = msg.get("subid")
+    reqid = msg.get("reqid")
 
     # Determine the access config: op-level overrides service-level for transactions
     access_config = svc_config.get("access")
@@ -759,7 +772,9 @@ async def _check_service_access(
     def _deny(message: str) -> bytes:
         if msg_type == "subscribe":
             return make_nack(service_name, message, ref=ref, txnid=txnid, subid=subid)
-        return make_error(ref, message, txnid=txnid)
+        # Requests correlate on reqid — an error without it would leave the
+        # caller's future pending forever.
+        return make_error(ref, message, txnid=txnid, reqid=reqid, service=service_name)
 
     if access_config is None:
         if auth_info is None:

@@ -324,6 +324,14 @@ class MkioApp:
                 )
             app.router.add_get("/mkio.js", serve_js)
 
+        expr_js_path = Path(__file__).parent / "client" / "mkio-expr.mjs"
+        if expr_js_path.exists():
+            async def serve_expr_js(request: web.Request) -> web.FileResponse:
+                return web.FileResponse(
+                    expr_js_path, headers={"Content-Type": "application/javascript"}
+                )
+            app.router.add_get("/mkio-expr.js", serve_expr_js)
+
         # Config file routes
         for route, directory in cfg.get("config", {}).items():
             config_path = Path(directory).resolve()

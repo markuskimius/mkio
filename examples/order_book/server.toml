@@ -70,10 +70,11 @@ symbol = "_mkio_topic"
 price = "0"
 time = "''"
 
+# publish values are expressions over the row (see README "Expression Language")
 [services.last_trade.publish]
 symbol = "symbol"
 price = "IF(side == 'Buy', price, -price)"
-time = "_mkio_ref"
+time = "REF_TIME(_mkio_ref, fmt: '%H:%M:%S')"
 
 # SubPub with computed topic — subscribe by "AAPL:Buy" or "MSFT:Sell"
 [services.last_trade_by_side]
@@ -121,14 +122,20 @@ access = "view"
 # Compute order total from client-supplied data (no DB)
 [services.order_total]
 protocol = "reqrep"
-reply = { subtotal = "qty * price", fee = "ROUND(qty * price * 0.001, 2)", total = "ROUND(qty * price * 1.001, 2)" }
+reply = { subtotal = "qty * price", fee = "qty * price |> (sub -> ROUND(sub * 0.001, 2))", total = "LET(sub, qty * price, ROUND(sub + sub * 0.001, 2))" }
+access = "open"
+
+# Basket total from a client-supplied array (no DB): { "items": [{"qty": 2, "price": 10}, ...] }
+[services.basket_total]
+protocol = "reqrep"
+reply = "items |> (xs -> SUM(MAP(xs, i -> i.qty * i.price)))"
 access = "open"
 
 # Count orders by status (scalar)
 [services.order_count]
 protocol = "reqrep"
 sql = "SELECT COUNT(*) as n FROM orders WHERE status = :status"
-reply = "COALESCE(n, 0)"
+reply = "n ?? 0"
 access = "view"
 
 # --- Static file serving ---

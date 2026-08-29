@@ -114,7 +114,8 @@ async def test_reply_shape(db, bus, writer):
     assert msg["reqid"] == "r1"
 
     row = msg["row"]
-    assert set(row.keys()) == {"name", "version", "mkio", "protocol", "services", "tables", "config_hash", "uptime", "started"}
+    assert set(row.keys()) == {"name", "version", "mkio", "protocol", "expr", "services", "tables", "config_hash", "uptime", "started"}
+    assert row["expr"] == "1"
     assert row["protocol"] == "1.0"
 
 
@@ -298,6 +299,18 @@ async def test_no_data_no_compatible(db, bus, writer):
     row = ws.get_messages()[0]["row"]
     assert "compatible" not in row
     assert "compatibility" not in row
+
+
+async def test_expr_version_exact_match(db, bus, writer):
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {"expr": "1"}})
+    row = ws.get_messages()[0]["row"]
+    assert row["compatible"] is True and row["compatibility"] == {"expr": True}
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r2", "data": {"expr": "2", "protocol": "1.0"}})
+    row = ws.get_messages()[0]["row"]
+    assert row["compatible"] is False and row["compatibility"] == {"expr": False, "protocol": True}
 
 
 async def test_empty_data_no_compatible(db, bus, writer):

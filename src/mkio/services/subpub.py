@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from aiohttp.web import WebSocketResponse
 
-from mkio._expr import compile_formatter
+from mkio.expr import compile_formatter
 from mkio.change_bus import ChangeEvent
 from mkio.services.base import Service
 from mkio.ws_protocol import make_error, make_snapshot, make_update

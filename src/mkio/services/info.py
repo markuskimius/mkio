@@ -9,6 +9,7 @@ from typing import Any
 
 from aiohttp.web import WebSocketResponse
 
+from mkio.expr import LANGUAGE_VERSION
 from mkio._json import dumps as json_dumps
 from mkio.services.base import Service
 from mkio.ws_protocol import make_error, make_nack, make_reply
@@ -117,8 +118,17 @@ class InfoService(Service):
         reqid = msg.get("reqid")
         try:
             data = msg.get("data")
+            # With auth enabled, unauthenticated callers get identity and
+            # compatibility only — enough to pick and verify a server before
+            # logging in, without exposing service or table names.
+            limited = bool(self._server_config.get("auth")) and getattr(ws, "_mkio_auth", None) is None
 
             if isinstance(data, dict) and "table" in data:
+                if limited:
+                    resp = make_error(None, "authentication required", reqid=reqid, service=self.name)
+                    await ws.send_bytes(resp)
+                    await self.notify_monitors("out", resp)
+                    return
                 await self._handle_schema(ws, data["table"], reqid)
                 return
 
@@ -140,18 +150,22 @@ class InfoService(Service):
                 "version": self._server_config.get("version", ""),
                 "mkio": mkio_version,
                 "protocol": "1.0",
+                "expr": LANGUAGE_VERSION,
                 "services": services_map,
                 "tables": tables,
                 "config_hash": _config_hash(self._server_config),
                 "uptime": uptime,
                 "started": self._started_ref,
             }
+            if limited:
+                for k in ("services", "tables", "config_hash", "uptime", "started"):
+                    row.pop(k, None)
             if isinstance(data, dict):
-                version_keys = ("version", "protocol", "mkio")
+                version_keys = ("version", "protocol", "mkio", "expr")
                 checks = {k: data[k] for k in version_keys if k in data}
                 if checks:
                     compatibility = {
-                        k: _semver_compatible(row[k], v)
+                        k: (str(row[k]) == str(v)) if k == "expr" else _semver_compatible(row[k], v)
                         for k, v in checks.items()
                     }
                     row["compatible"] = all(compatibility.values())

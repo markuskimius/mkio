@@ -1,6 +1,7 @@
 """mkio: Config-driven microservice framework."""
 
-from mkio._expr import register_function
+from mkio import expr
+from mkio.expr import register_function, register_library, register_type
 from mkio.app import MkioApp, create_app
 from mkio.change_bus import ChangeEvent
 from mkio.scaffold import get_default_config, init
@@ -16,4 +17,7 @@ __all__ = [
     "Service",
     "ChangeEvent",
     "register_function",
+    "register_library",
+    "register_type",
+    "expr",
 ]

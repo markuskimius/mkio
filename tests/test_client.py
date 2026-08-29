@@ -236,3 +236,20 @@ async def test_nack_not_resubscribed_on_reconnect(nack_server):
         assert "test_service" not in client._subscriptions
         # Server should have received exactly 1 subscribe
         assert server_obj.subscribe_count == 1
+
+
+# -- Uncorrelated errors ------------------------------------------------------
+
+async def test_uncorrelated_error_fails_oldest_pending_request():
+    """An error with no ref/reqid settles the oldest pending request instead of hanging."""
+    from mkio.client import MkioClient
+    client = MkioClient("ws://127.0.0.1:1/ws", reconnect=False)
+    loop = asyncio.get_running_loop()
+    first, second = loop.create_future(), loop.create_future()
+    client._pending_reqid["a"] = first
+    client._pending_reqid["b"] = second
+    client._dispatch({"type": "error", "message": "permission denied"})
+    assert first.done() and first.result()["message"] == "permission denied"
+    assert not second.done()
+    client._dispatch({"type": "error", "message": "boom", "reqid": "b"})
+    assert second.result()["message"] == "boom"

@@ -96,7 +96,7 @@ def _usage() -> None:
     print("  mkio reqrep <url> <service> [data]")
     print("                                   Send a request-reply query (JSON or key=value)")
     print("  mkio schema <url> <table>        Show table schema (columns, types, keys)")
-    print("  mkio check <url> [version=... protocol=... mkio=...]")
+    print("  mkio check <url> [version=... protocol=... mkio=... expr=...]")
     print("                                   Check version compatibility with server")
     print("  mkio dbupdate [server.toml] [--allow-risky] [--allow-destructive]")
     print("                                   Apply pending schema migrations")
@@ -388,6 +388,7 @@ def _cmd_monitor() -> None:
         print("  e.g. mkio monitor ws://localhost:8080")
         print("  e.g. mkio monitor ws://localhost:8080 orders")
         print("  e.g. mkio monitor ws://localhost:8080 --filter \"direction == 'in'\"")
+        print("  e.g. mkio monitor 8080 --filter \"service == 'orders' && direction == 'out'\"")
         sys.exit(1)
     _check_unknown_flags(args, {"--filter", "--username"}, usage)
     filter_expr = _extract_flag(args, "--filter")
@@ -399,7 +400,7 @@ def _cmd_monitor() -> None:
 
     filter_fn = None
     if filter_expr:
-        from mkio._expr import compile_filter
+        from mkio.expr import compile_filter
         try:
             filter_fn = compile_filter(filter_expr)
         except Exception as e:
@@ -1173,7 +1174,7 @@ def _cmd_dbupdate() -> None:
 
 
 def _cmd_check() -> None:
-    usage = "mkio check <url> [--username <user>] [version=... protocol=... mkio=...]"
+    usage = "mkio check <url> [--username <user>] [version=... protocol=... mkio=... expr=...]"
     args = sys.argv[2:]
     if len(args) < 1:
         print(f"Usage: {usage}")
@@ -1193,8 +1194,8 @@ def _cmd_check() -> None:
             print(f"Usage: {usage}")
             sys.exit(1)
         k, v = kv.split("=", 1)
-        if k not in ("version", "protocol", "mkio"):
-            print(f"Error: unknown key {k!r} (expected version, protocol, or mkio)")
+        if k not in ("version", "protocol", "mkio", "expr"):
+            print(f"Error: unknown key {k!r} (expected version, protocol, mkio, or expr)")
             sys.exit(1)
         data[k] = v
 

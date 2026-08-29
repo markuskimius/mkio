@@ -333,7 +333,7 @@ async def subpub_where_svc(db, bus, writer):
     )
     await db.write_conn.commit()
 
-    from mkio._expr import compile_filter
+    from mkio.expr import compile_filter
 
     config = {
         "protocol": "subpub",
@@ -1954,7 +1954,7 @@ async def test_stream_pagination_with_filter(stream_svc, db):
     ws = MockWebSocket()
     await svc.on_subscribe(ws, {
         "type": "subscribe", "maxcount": 2,
-        "filter": "event == 'event_1' OR event == 'event_3'",
+        "filter": "event == 'event_1' || event == 'event_3'",
     })
     snap = ws.get_messages()[0]
     assert len(snap["rows"]) == 2
@@ -2329,7 +2329,7 @@ async def test_stream_before_with_filter(stream_svc, db):
     ws = MockWebSocket()
     await svc.on_subscribe(ws, {
         "type": "subscribe", "ref": last_ref, "before": True, "maxcount": 10,
-        "filter": "event == 'event_1' OR event == 'event_3'",
+        "filter": "event == 'event_1' || event == 'event_3'",
     })
     snap = ws.get_messages()[0]
     assert [r["event"] for r in snap["rows"]] == ["event_1", "event_3"]

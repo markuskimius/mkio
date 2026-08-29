@@ -236,7 +236,7 @@ console.log(JSON.stringify({entries, seen, afterOffIsNull, dispatcherMethods}));
 
     # Dispatcher exposes CLI-matching verbs as methods
     assert out["dispatcherMethods"] == [
-        "auth", "check", "help", "instances", "monitor", "query", "reqrep", "schema", "send", "services", "stream", "subpub",
+        "auth", "check", "expr", "help", "instances", "monitor", "query", "reqrep", "schema", "send", "services", "stream", "subpub",
     ]
 
 
@@ -508,3 +508,21 @@ def test_js_client_no_external_deps():
     requires = [l for l in lines if "require(" in l and "module.exports" not in l]
     assert len(imports) == 0, f"Found external imports: {imports}"
     assert len(requires) == 0, f"Found external requires: {requires}"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_js_client_uncorrelated_error_settles_oldest_request():
+    script = r"""
+const { MkioClient } = require(PATH);
+const c = new MkioClient("ws://localhost:8080/ws");
+c._ws = { send: () => {}, readyState: 1 };
+const out = {};
+c.request("locked", {}, { reqid: "a" }).then((r) => { out.a = r.message; });
+c.request("locked", {}, { reqid: "b" }).then((r) => { out.b = r.message; });
+c._dispatch({ type: "error", message: "permission denied" });
+c._dispatch({ type: "error", message: "boom", reqid: "b" });
+setTimeout(() => { console.log(JSON.stringify(out)); }, 10);
+""".replace("PATH", json.dumps(str(JS_CLIENT_PATH)))
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    assert out == {"a": "permission denied", "b": "boom"}

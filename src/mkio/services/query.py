@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from aiohttp.web import WebSocketResponse
 
-from mkio._expr import compile_filter
+from mkio.expr import compile_filter
 from mkio.change_bus import ChangeEvent
 from mkio.services.base import Service
 from mkio.ws_protocol import make_nack, make_snapshot, make_update

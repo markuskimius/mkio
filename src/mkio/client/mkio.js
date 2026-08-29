@@ -2,7 +2,23 @@
  * mkio JavaScript client library.
  * Auto-served at /mkio.js by the mkio server.
  * No dependencies, no CDN, ES module compatible.
+ *
+ * The expression language lives in /mkio-expr.js (an ES module). Load it with
+ * <script type="module" src="/mkio-expr.js"></script> to use string filters in
+ * mkio.monitor({filter: "direction == 'in'"}); it is also exposed as
+ * globalThis.mkioExpr and mkio.expr.
  */
+
+// Compile a string filter with the expression module when it has been loaded.
+function _compileStringFilter(src) {
+  const expr = typeof globalThis !== "undefined" && globalThis.mkioExpr;
+  if (!expr) {
+    throw new Error(
+      "mkio: string filters need the expression module — load /mkio-expr.js first"
+    );
+  }
+  return expr.compileFilter(src, new expr.Env({ strict: false }));
+}
 
 // ---------------------------------------------------------------------------
 // Ref generator (same YYYYMMDD HH:mm:ss.mmmuuunnnppp format as server)
@@ -417,8 +433,9 @@ class MkioClient {
     } else if (this._monitor) {
       services = this._monitor.services;
     }
-    const filter =
+    let filter =
       (opts && typeof opts === "object" && opts.filter) || null;
+    if (typeof filter === "string") filter = _compileStringFilter(filter);
     this._monitor = { services, filter, fn };
     return this._monitor;
   }
@@ -499,6 +516,15 @@ class MkioClient {
 
     // Route reqrep reply/error by reqid
     const reqid = data.reqid;
+    if (!reqid && !data.ref && type === "error" && this._pending.size) {
+      // An error with no correlation id while calls are pending — an older
+      // server denying a request without echoing reqid. Settle the oldest
+      // pending call with it rather than leaving the promise hanging.
+      const [oldest, entry] = this._pending.entries().next().value;
+      this._pending.delete(oldest);
+      entry.resolve(data);
+      return;
+    }
     if (reqid && this._pending.has(reqid) && (type === "reply" || type === "error")) {
       const { resolve } = this._pending.get(reqid);
       this._pending.delete(reqid);
@@ -628,7 +654,7 @@ const MKIO_HELP = [
   'mkio.services("<name>")                              show detail for one service',
   'mkio.monitor()                                       tap every service (this tab)',
   'mkio.monitor("<service>")                            tap one service (call again to add more)',
-  'mkio.monitor({filter: fn})                           tap with client-side filter function',
+  'mkio.monitor({filter: fn | "expr"})                  tap with a client-side filter (function or expression string)',
   'mkio.monitor("off")                                  stop tapping',
   'mkio.send("<service>", data, {op, ref, txnid})       send a transaction',
   'mkio.subpub("<svc>", "<topic>"|["t1","t2"], {fields, subid})  subscribe to a subpub service',
@@ -638,7 +664,7 @@ const MKIO_HELP = [
   '                     snapshotOnly, updateOnly})',
   'mkio.reqrep("<service>", data, {reqid})              send a request-reply message',
   'mkio.schema("<table>")                               show table schema (columns, types, keys)',
-  'mkio.check({version, protocol, mkio})               check version compatibility',
+  'mkio.check({version, protocol, mkio, expr})         check version compatibility',
   'mkio.instances()                                     list live MkioClient instances',
 ].join("\n");
 
@@ -1035,6 +1061,10 @@ const mkio = {
   },
   instances() {
     return MkioClient.instances();
+  },
+  /** The expression module (globalThis.mkioExpr) once /mkio-expr.js is loaded, else null. */
+  get expr() {
+    return (typeof globalThis !== "undefined" && globalThis.mkioExpr) || null;
   },
 };
 

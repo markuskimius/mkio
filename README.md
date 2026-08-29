@@ -78,7 +78,7 @@ For programmatic control (custom routes, non-blocking lifecycle), see [Programma
 - **Stream** — append-only ring buffer with cursor-based reconnection
 - **Query** — snapshot + change feed from SQLite
 - **ReqRep** — one-shot request-reply with parameterized SQL and/or expression evaluation, returning scalar values, single records, or result sets
-- **Expression language** — safe, extensible filter and formatter expressions (`qty > 100 AND status == 'pending'`)
+- **Expression language** — one safe, extensible language for filters and formatters (`qty > 100 && status == 'pending'`), implemented identically in Python and JavaScript
 - **Schema migration** — automatic detection of safe/destructive changes with interactive confirmation
 - **Write batching** — hundreds of writes committed in a single SQLite transaction for high throughput
 - **Reconnection recovery** — stream services use ref-based cursor reconnection persisted across server restarts via `_mkio_ref` column; subpub and query always replay a full snapshot
@@ -530,8 +530,9 @@ Reply:
   "row": {
     "name": "order-book-dev",
     "version": "2.1.0",
-    "mkio": "0.1.47",
+    "mkio": "0.2.0",
     "protocol": "1.0",
+    "expr": "1",
     "services": {"orders": "transaction", "last_trade": "subpub", "all_orders": "query"},
     "tables": ["orders", "audit_log"],
     "config_hash": "a3f7c2b1",
@@ -547,6 +548,7 @@ Reply:
 | `version` | Application version from config `version` key (default `""`) |
 | `mkio` | Framework version |
 | `protocol` | Protocol version (semver — bump minor for compatible additions, major for breaking changes) |
+| `expr` | Expression language version (exact match required) |
 | `services` | Map of service name → protocol type |
 | `tables` | List of configured table names |
 | `config_hash` | Short hex hash of the running config (detects config drift) |
@@ -565,11 +567,11 @@ From the CLI: `mkio reqrep 8080 _mkio`. From the browser console: `mkio.reqrep("
 
 #### Version Compatibility
 
-Clients can check whether they're compatible with the server by sending expected version(s) in the request `data`. The server replies with a `compatible` boolean (AND of all checks) and a `compatibility` dict with per-version results. All versions use semantic versioning (caret `^` convention).
+Clients can check whether they're compatible with the server by sending expected version(s) in the request `data`. The server replies with a `compatible` boolean (AND of all checks) and a `compatibility` dict with per-version results. `version`, `protocol`, and `mkio` use semantic versioning (caret `^` convention); `expr` must match exactly.
 
 ```json
 {"type": "request", "service": "_mkio", "reqid": "v1",
- "data": {"version": "2.0.0", "protocol": "1.0", "mkio": "0.1.40"}}
+ "data": {"version": "2.0.0", "protocol": "1.0", "mkio": "0.2.0", "expr": "1"}}
 ```
 
 Reply:
@@ -578,9 +580,9 @@ Reply:
 {
   "type": "reply", "service": "_mkio", "reqid": "v1",
   "row": {
-    "name": "order-book-dev", "version": "2.3.0", "mkio": "0.1.47", "protocol": "1.0",
+    "name": "order-book-dev", "version": "2.3.0", "mkio": "0.2.0", "protocol": "1.0", "expr": "1",
     "compatible": true,
-    "compatibility": {"version": true, "protocol": true, "mkio": true},
+    "compatibility": {"version": true, "protocol": true, "mkio": true, "expr": true},
     ...
   }
 }
@@ -593,7 +595,11 @@ If any version is incompatible, `compatible` is `false` and the failing key(s) s
 | `compatible` | bool | `true` if all requested versions are compatible |
 | `compatibility` | dict | Per-version result: `{key: true/false}` for each key sent in `data` |
 
-From the CLI: `mkio check 8080 version=2.0.0 protocol=1.0`. From the browser console: `mkio.check({version: "2.0.0", protocol: "1.0"})`. The CLI exits with code 0 if compatible, 1 if not.
+From the CLI: `mkio check 8080 version=2.0.0 protocol=1.0 expr=1`. From the browser console: `mkio.check({version: "2.0.0", protocol: "1.0", expr: "1"})`. The CLI exits with code 0 if compatible, 1 if not.
+
+When authentication is enabled, `_mkio` still answers **before** login — with identity and compatibility fields only (`name`, `version`, `mkio`, `protocol`, `expr`, `compatible`, `compatibility`), so `mkio check` and client verification can pick a server without credentials and without learning its service or table names. Any authenticated user, whatever their rights, gets the full reply and the schema query.
+
+Error replies to requests always echo `reqid` (and `service`), including access denials, so clients can correlate them; both clients also settle their oldest pending request if an older server sends an error without one.
 
 The `_mkio` service is hidden from `/api/services` and error hints. Using the wrong protocol (e.g., `mkio subpub 8080 _mkio`) returns a nack with a hint suggesting the correct command.
 
@@ -768,6 +774,23 @@ const { MkioClient } = require("./mkio.js");
 
 The file uses CommonJS `module.exports`; load it via `require(...)` in Node, or `<script src="/mkio.js">` in the browser.
 
+#### Expressions in the browser
+
+The [expression language](#expression-language) is also served, as an ES module, at `/mkio-expr.js`:
+
+```html
+<script src="/mkio.js"></script>
+<script type="module" src="/mkio-expr.js"></script>
+<script>
+// after the module has loaded: globalThis.mkioExpr, also reachable as mkio.expr
+const pred = mkioExpr.compileFilter("status == 'pending' && qty > 100");
+const label = mkioExpr.compileTemplate("${symbol}: ${NUM(qty * price, digits: 2, group: TRUE)}");
+rows.filter((r) => pred(r)).map((r) => label.call(r));
+</script>
+```
+
+or `import { compile, compileTemplate } from "/mkio-expr.js"` from your own module. With it loaded, `mkio.monitor({filter: "direction == 'in'"})` accepts expression strings.
+
 #### Debugging from the browser console
 
 Once `/mkio.js` is loaded, a `mkio` object is available in DevTools with methods that mirror the `mkio` CLI (the `<url>` argument is dropped since the page already holds the connection):
@@ -780,6 +803,7 @@ mkio.services("orders")                    // detail for one service
 mkio.monitor()                             // log every frame to/from any service
 mkio.monitor("orders")                     // filter to one service (call again to add more)
 mkio.monitor({filter: e => e.direction === "in"})  // filter with a function
+mkio.monitor({filter: "direction == 'in'"})       // ...or an expression (needs /mkio-expr.js)
 mkio.monitor("off")                        // stop
 mkio.send("orders", {side:"Buy",...}, {op:"new"})
 mkio.subpub("last_trade", "AAPL")
@@ -803,65 +827,210 @@ All subscribe methods return a `MkioSubscription` with `.stop()`. Nack responses
 
 ## Expression Language
 
-Used for client filters, server-side `where` filters, and `publish` formatters.
+One small, safe expression language is used everywhere mkio evaluates something per row or per request: client `filter`s, server-side `where`, `publish`, `defaults`, reqrep `params` and `reply`, and the CLI's `--filter`. The same language ships as a JavaScript module (`/mkio-expr.js`), so a browser UI evaluates the identical grammar; both implementations run the shared conformance fixtures in `tests/expr_cases.json`, and the `_mkio` identity reply carries `expr` (the language version, currently `"1"`).
 
-| Category | Syntax |
-|----------|--------|
-| Comparison | `==`, `!=`, `>`, `<`, `>=`, `<=` |
-| Logical | `AND`, `OR`, `NOT` |
-| Arithmetic | `+`, `-`, `*`, `/` |
-| String | `CONTAINS`, `STARTS_WITH` |
-| Null | `IS NULL`, `IS NOT NULL` |
-| Functions | `UPPER()`, `LOWER()`, `ROUND()`, `ABS()`, `COALESCE()`, `IF()` |
-| Membership | `IN` (right side is a list/tuple/set supplied by host code) |
-| Grouping | `(` ... `)` |
+```
+qty * price > 1000 && status == 'open'
+IF(side == 'Buy', price, -price)
+qty * price |> (sub -> NUM(sub * 0.001, digits: 2))
+items |> (xs -> SUM(MAP(xs, i -> i.qty * i.price)))
+meta.region ?? 'n/a'
+```
 
-**Data types:** string (single-quoted, e.g. `'pending'`), integer, float, boolean (`TRUE`/`FALSE`), and `NULL`.
+### Syntax
 
-**Operator precedence** (lowest to highest):
+| | Form |
+|---|---|
+| Numbers | `42` `3.5` `1e6` `1_000_000` — one number type; integral values print without a fraction (`2`, not `2.0`) |
+| Strings | `'text'` or `"text"`, escapes `\n \t \\ \' \" \u{1F600}` |
+| Literals | `TRUE` `FALSE` `NULL` (case-insensitive — the only reserved words) |
+| Names | `qty`, `_mkio_ref` — case-sensitive; `` `order id` `` in backticks for any other name |
+| Arrays / maps | `[1, 2, 3]`, `{symbol: 'AAPL', qty: 100}` (trailing commas allowed) |
+| Access | `meta.region`, `tags[0]`, `tags[-1]`, `data.items[0].name` — a missing key or index yields `NULL` |
+| Calls | `ROUND(x, 2)`, `NUM(x, digits: 2, group: TRUE)` — names are case-insensitive; named arguments follow positional ones |
+| Lambdas | `x -> x * 2`, `(a, b) -> a + b` — values you pass to `MAP`, `FILTER`, `SORT_BY`, … |
+| Pipes | `value \|> (x -> body)` — the right side must be a parenthesized lambda; chains read left to right |
 
-1. `OR`
-2. `AND`
-3. `NOT`
-4. Comparisons: `==` `!=` `<` `>` `<=` `>=`, `IS NULL` / `IS NOT NULL`, `IN`, `CONTAINS`, `STARTS_WITH`
-5. Additive: `+` `-`
-6. Multiplicative: `*` `/`
-7. Unary minus: `-x`
-8. Primary: literals, field references, function calls, parenthesized expressions
+**Operators, lowest to highest precedence:**
 
-Use parentheses to override precedence, e.g. `(status == 'new' OR status == 'pending') AND qty > 100`.
-
-### Built-in Functions
-
-| Function | Signature | Description |
+| Level | Operators | Notes |
 |---|---|---|
-| `UPPER` | `UPPER(s)` | Uppercase a string. Non-string values pass through unchanged. |
-| `LOWER` | `LOWER(s)` | Lowercase a string. Non-string values pass through unchanged. |
-| `ROUND` | `ROUND(x, n=0)` | Round numeric `x` to `n` decimal places. `n` defaults to 0. |
-| `ABS` | `ABS(x)` | Absolute value of a numeric. |
-| `COALESCE` | `COALESCE(a, b, ...)` | Returns the first non-`NULL` argument, or `NULL` if all are `NULL`. Variadic (1+ args). |
-| `IF` | `IF(cond, then, else)` | Returns `then` if `cond` is truthy, else `else`. Short-circuits — only the taken branch is evaluated. |
+| 1 | `\|>` | pipe into a lambda |
+| 2 | `\|\|` | short-circuit |
+| 3 | `&&` | short-circuit |
+| 4 | `== != < <= > >=` | `==` is strict (no coercion: `'1' == 1` is `FALSE`); comparisons don't chain |
+| 5 | `??` | null-coalescing, short-circuit |
+| 6 | `+ -` | `+` adds two numbers or concatenates two strings |
+| 7 | `* / // %` | `/` true division, `//` floor division, `%` takes the divisor's sign |
+| 8 | `- !` (unary) | `!a == b` is `(!a) == b` |
+| 9 | `**` | right-associative |
+| 10 | `.name` `[i]` `F()` | postfix |
 
-Notes:
+**Semantics:** falsy values are `NULL`, `FALSE`, `0`, `''`, `[]`, `{}`; everything else is truthy. `&&`, `||`, `??` and the `IF`/`CASE`/`TRY`/`LET` functions evaluate only what they need, so `qty > 0 && price / qty > 10` never divides by zero. Errors (unknown field, division by zero, type mismatch, bad index type) abort the expression with a message and position; `TRY(expr, fallback)` catches them. There are no statements, loops, assignments, or side effects — name intermediate results with `LET(name, value, ..., body)` or a pipe.
 
-- `IF` is a special form, not a regular function: the non-taken branch is never evaluated, so it's safe to guard against nulls or division-by-zero, e.g. `IF(qty > 0, price / qty, 0)`.
-- `UPPER` / `LOWER` are null-safe via passthrough: `UPPER(NULL)` returns `NULL`.
-- Function names are case-insensitive at parse time but conventionally written uppercase.
-- Custom functions registered via `register_function` appear alongside these built-ins.
+**Scope and strictness.** Bare names resolve in the scope the host supplies — the row, for server filters and formatters. The server compiles in *strict* mode: an unknown root name is an error listing the available fields. Hosts may choose a *lenient* environment where unknown names are `NULL` (a UI over heterogeneous rows, say). Missing map keys, out-of-range indexes, and indexing into `NULL` yield `NULL` in both modes, so `meta.region ?? 'n/a'` always works. Keys beginning with `__` (and `constructor` / `prototype`) are never accessible.
 
-Worked example combining several functions:
+### Templates
 
-```
-IF(status == 'filled', UPPER(symbol), COALESCE(note, '-'))
-```
+`compile_template` handles strings with embedded expressions: `"Order #${id} for ${UPPER(symbol)}"`. A template that is exactly one `${...}` returns the expression's raw value (type preserved); any other template returns a string, with `NULL` rendering as empty. Write `$${` for a literal `${`.
 
-Extend with custom functions:
+### Standard library
+
+All libraries are enabled by default. Function names are shown upper-case by convention; `upper(s)` is the same function.
+
+<!-- expr-functions:start -->
+
+#### `core`
+
+Control flow, coercion, and safe lookup. `IF`, `CASE`, `TRY`, and `LET` are lazy — only the branches they take are evaluated.
+
+| Function | Description |
+|---|---|
+| `BOOL(x)` | Truthiness: NULL, FALSE, 0, '', [], {} are false. |
+| `CASE(cond, value, ..., default?)` *(lazy)* | CASE(c1, v1, c2, v2, ..., default?) — first truthy condition wins; NULL if none and no default. |
+| `COALESCE(...)` | First non-NULL argument. |
+| `GET(coll, key, default)` | Lookup in a map or array, `default` (NULL) when absent — never an error. |
+| `HAS(coll, key)` | TRUE if a map has the key or an array has the index. |
+| `IF(cond, then, else)` *(lazy)* | Return `then` if `cond` is truthy, else `else`. Only the taken branch is evaluated. |
+| `INT(x)` | Integer part, truncated toward zero; NULL if not numeric. |
+| `IS_NUM(x)` | TRUE for numbers. |
+| `IS_STR(x)` | TRUE for strings. |
+| `LET(name, value, ..., body)` *(lazy)* | LET(name, value, ..., body) — bind names in order, then evaluate `body`. |
+| `NUM_OF(x)` | Parse a number from a string or boolean; NULL if not numeric. |
+| `STR(x)` | String form (NULL → '', TRUE → 'true', 2.0 → '2'). |
+| `TRY(expr, fallback)` *(lazy)* | Evaluate `expr`; on error return `fallback` (or NULL). |
+| `TYPE(x)` | Kind of a value: null, boolean, number, string, array, map, function, or a host type name. |
+
+#### `math`
+
+Numeric helpers. `ROUND` rounds half away from zero on the decimal representation (`ROUND(2.675, 2)` is `2.68`).
+
+| Function | Description |
+|---|---|
+| `ABS(x)` | Absolute value. |
+| `AVG(xs)` | Mean of an array of numbers; NULL when empty. |
+| `CEIL(x)` | Smallest integer ≥ x. |
+| `CLAMP(x, lo, hi)` | x limited to [lo, hi]. |
+| `FLOOR(x)` | Largest integer ≤ x. |
+| `MAX(...)` | Largest of the arguments, or of a single array; NULLs ignored. |
+| `MIN(...)` | Smallest of the arguments, or of a single array; NULLs ignored. |
+| `POW(x, y)` | x to the power y. |
+| `ROUND(x, digits)` | Round half away from zero to `digits` places (default 0). |
+| `SIGN(x)` | -1, 0, or 1. |
+| `SQRT(x)` | Square root. |
+| `SUM(xs)` | Sum of an array of numbers; NULLs ignored. |
+
+#### `string`
+
+`REPLACE` and `SPLIT` take literal strings; only `MATCHES` takes a regular expression. Lengths and positions count characters (code points).
+
+| Function | Description |
+|---|---|
+| `CONCAT(...)` | Concatenate the string forms of all arguments. |
+| `CONTAINS(hay, x)` | Substring of a string, member of an array, or key of a map. |
+| `ENDS_WITH(s, suffix)` | TRUE if `s` ends with `suffix`. |
+| `JOIN(xs, sep)` | Join an array's string forms with `sep` (default ''). |
+| `LEN(x)` | Length of a string, array, or map (NULL → 0). |
+| `LOWER(s)` | Lower-case. |
+| `MATCHES(s, pattern)` | TRUE if the regular expression matches anywhere in `s`. |
+| `PAD(s, width, ch)` | Left-pad to `width` with `ch` (default space). |
+| `PAD_END(s, width, ch)` | Right-pad to `width` with `ch` (default space). |
+| `REPLACE(s, old, new)` | Replace every literal occurrence of `old` with `new`. |
+| `SPLIT(s, sep)` | Split on a literal separator ('' splits into characters). |
+| `STARTS_WITH(s, prefix)` | TRUE if `s` starts with `prefix`. |
+| `SUBSTR(s, start, length)` | Substring from `start` (negative counts from the end), optionally `length` long. |
+| `TITLE(s)` | Capitalise each space-separated word. |
+| `TRIM(s)` | Strip surrounding whitespace. |
+| `TRUNCATE(s, n, suffix)` | Cut to at most `n` characters, ending with `suffix` if cut. |
+| `UPPER(s)` | Upper-case. |
+
+#### `format`
+
+Numbers to display strings. Rounding follows `ROUND`; no locale is involved.
+
+| Function | Description |
+|---|---|
+| `BYTES(n, digits)` | Byte count to '1.5 KB' (1024-based). |
+| `DURATION(seconds, digits)` | Seconds to '1d 2h 3m 4s'. |
+| `FORMAT(pattern, ...)` | Fill '{}' / '{0}' placeholders in a pattern with the remaining arguments. |
+| `NUM(x, digits, group)` | Number to string with fixed `digits` (shortest form when omitted) and optional thousands `group`. |
+| `PCT(x, digits)` | Fraction to percentage string: 0.125 → '12.5%' with digits: 1. |
+| `SCI(x, digits)` | Scientific notation: 123456 → '1.23e+5'. |
+
+#### `time`
+
+The numeric unit is **seconds since the Unix epoch**. `EPOCH` accepts numbers, mkio ref strings (`"20260828 12:34:56.123456789000"`), and ISO-8601. Formats understand `%Y %m %d %H %M %S %f %z %%` (`%f` = microseconds); time zones are `'UTC'` (default), `'local'`, or a fixed offset such as `'+09:00'`.
+
+| Function | Description |
+|---|---|
+| `DATE(ts, fmt, tz)` | Format a time as a date (default '%Y-%m-%d', UTC). |
+| `EPOCH(x)` | Seconds since the epoch from a number, mkio ref string, or ISO-8601 string. |
+| `NOW()` | Current time in seconds since the epoch. |
+| `REF_TIME(ref, fmt, tz)` | Format an mkio ref (default '%Y-%m-%d %H:%M:%S', UTC). |
+| `TIME(ts, fmt, tz)` | Format a time as a clock time (default '%H:%M:%S', UTC). |
+
+#### `collection`
+
+Arrays and maps; the higher-order functions take lambdas.
+
+| Function | Description |
+|---|---|
+| `ALL(xs, fn)` | TRUE if `fn` (or the element) is truthy for every element (TRUE for empty). |
+| `ANY(xs, fn)` | TRUE if `fn` (or the element) is truthy for any element. |
+| `FILTER(xs, fn)` | Elements for which `fn` is truthy. |
+| `FIND(xs, fn)` | First element for which `fn` is truthy, else NULL. |
+| `FIRST(xs)` | First element, or NULL. |
+| `FLATTEN(xs)` | Flatten one level of nesting. |
+| `KEYS(m)` | Keys of a map. |
+| `LAST(xs)` | Last element, or NULL. |
+| `MAP(xs, fn)` | Apply `fn` to each element. |
+| `MERGE(...)` | Merge maps left to right (later keys win). |
+| `RANGE(a, b, step)` | RANGE(n) → [0..n), RANGE(a, b) → [a..b), optional step. |
+| `REDUCE(xs, fn, init)` | Fold with `fn(acc, x)` starting from `init`. |
+| `SORT_BY(xs, fn, desc)` | Stable sort by `fn(x)` (or the element); NULL keys last; `desc: TRUE` reverses. |
+| `VALUES(m)` | Values of a map. |
+
+<!-- expr-functions:end -->
+
+### Extending the language
+
+Applications register functions, bundles of functions, and value types. Registered names are callable from every expression the server evaluates, and appear in the `functions` list of the service detail API.
 
 ```python
-from mkio import register_function
+from mkio import expr
 
-register_function("MASK_PAN", lambda s: "****" + s[-4:])
+# A plain function — arguments arrive evaluated
+expr.register_function("MASK_PAN", lambda s: "****" + s[-4:], doc="Mask all but the last 4 digits")
+
+# A library: metadata drives docs, named arguments, and the numeric-field analysis
+expr.register_library("risk", {
+    "VAR":    (lambda pos, conf=0.99: value_at_risk(pos, conf), {"numeric": True, "params": ("pos", "conf")}),
+    "BUCKET": (lambda x, edges: sum(1 for e in edges if x >= e), {"numeric": True}),
+})
+
+# A lazy function receives unevaluated arguments (Arg thunks with .value(), .eval(scope), .name)
+def when(ctx, cond, then):
+    return then.value() if expr.truthy(cond.value()) else None
+expr.register_function("WHEN", when, lazy=True)
+
+# A host value type: teach the operators about it
+from decimal import Decimal
+expr.register_type("decimal", is_instance=lambda v: isinstance(v, Decimal),
+                   add=lambda a, b: a + b, to_string=str,
+                   compare=lambda a, b: (a > b) - (a < b))
+# A `concat=` hook lets a type survive "text ${x}" template joining (mkui's
+# rich text uses it); without one the type renders through to_string.
+
+# Use the engine directly, with a custom environment
+env = expr.Env(libraries=["core", "math", "risk"], strict=True)
+alert = expr.compile("VAR(positions, conf: 0.95) > limit", env)
+alert({"positions": pos, "limit": 1e6})
+msg = expr.compile_template("VaR ${NUM(VAR(positions), digits: 0, group: TRUE)}", env)
 ```
+
+Static analysis is available for validation and dependency tracking: `expr.field_refs(ast)`, `expr.function_refs(ast)`, `expr.numeric_fields(ast)` (fields used in numeric contexts — driven by each function's `numeric` flag). `expr.parse(src)` returns the AST; `expr.compile(src, env)` validates function names against the environment, so a typo fails at config load, not at request time.
+
+The JavaScript module exposes the same API with camelCase names — `compile`, `compileTemplate`, `compileFilter`, `registerFunction`, `registerLibrary`, `registerType`, `Env`, `fieldRefs`, … — as ES-module exports and as `globalThis.mkioExpr`. Lazy JS functions are called as `fn(ctx, args, kwargs)`.
 
 ## Performance
 
@@ -935,6 +1104,7 @@ mkio monitor localhost:8080                 # Monitor all services
 mkio monitor localhost:8080 orders          # Monitor one service
 mkio monitor localhost:8080 --filter "direction == 'in'"    # Inbound only
 mkio monitor localhost:8080 --filter "service == 'orders'"  # Filter by service
+mkio monitor localhost:8080 --filter "direction == 'out' && CONTAINS(['snapshot', 'update'], message.type)"
 ```
 
 ```

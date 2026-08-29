@@ -53,8 +53,11 @@ def make_error(
     *,
     txnid: str | None = None,
     reqid: str | None = None,
+    service: str | None = None,
 ) -> bytes:
     envelope: dict[str, Any] = {"type": "error", "message": message}
+    if service is not None:
+        envelope["service"] = service
     if ref is not None:
         envelope["ref"] = ref
     if txnid is not None:

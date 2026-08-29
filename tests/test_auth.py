@@ -821,3 +821,46 @@ async def test_monitor_unauthenticated_denied():
         assert "authentication required" in resp["message"]
     finally:
         await app.stop()
+
+
+# -- _mkio identity service under auth ---------------------------------------
+
+async def test_mkio_identity_before_auth_is_limited(auth_app, auth_url):
+    """Unauthenticated: identity + compatibility only, no service/table names."""
+    from mkio.client import MkioClient
+    async with MkioClient(auth_url, reconnect=False) as client:
+        result = await client.request("_mkio", {"protocol": "1.0"})
+        assert result["type"] == "reply"
+        row = result["row"]
+        assert {"name", "version", "mkio", "protocol", "expr", "compatible", "compatibility"} <= set(row)
+        assert "services" not in row and "tables" not in row and "config_hash" not in row
+        assert row["compatibility"] == {"protocol": True}
+
+
+async def test_mkio_schema_before_auth_denied_with_reqid(auth_app, auth_url):
+    from mkio.client import MkioClient
+    async with MkioClient(auth_url, reconnect=False) as client:
+        result = await client.request("_mkio", {"table": "orders"}, reqid="q1")
+        assert result["type"] == "error"
+        assert "authentication required" in result["message"]
+        assert result["reqid"] == "q1" and result["service"] == "_mkio"
+
+
+async def test_mkio_full_for_any_authenticated_role(auth_app, auth_url):
+    from mkio.client import MkioClient
+    async with MkioClient(auth_url, reconnect=False) as client:
+        await client.auth({"username": "bob", "password": "secret"})   # viewer, no special rights
+        row = (await client.request("_mkio", {}))["row"]
+        assert "services" in row and "tables" in row
+        schema = (await client.request("_mkio", {"table": "orders"}))["row"]
+        assert schema["table"] == "orders"
+
+
+async def test_denied_request_error_echoes_reqid(auth_app, auth_url):
+    """A locked reqrep denial must carry reqid (and service) so clients can correlate it."""
+    from mkio.client import MkioClient
+    async with MkioClient(auth_url, reconnect=False) as client:
+        result = await asyncio.wait_for(client.request("orders_view", {}, reqid="r9"), 5)
+        assert result["type"] == "error"
+        assert "authentication required" in result["message"]
+        assert result["reqid"] == "r9" and result["service"] == "orders_view"

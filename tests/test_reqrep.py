@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 
 from mkio._json import loads
-from mkio._expr import compile_expression, compile_formatter
+from mkio.expr import compile_expression, compile_formatter
 from mkio.change_bus import ChangeBus
 from mkio.config import load_config
 from mkio.database import Database

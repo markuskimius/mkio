@@ -8,7 +8,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from mkio._expr import compile_expression, compile_filter, compile_formatter
+from mkio.expr import compile_expression, compile_filter, compile_formatter
 
 
 log = logging.getLogger("mkio.config")

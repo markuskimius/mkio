@@ -143,6 +143,7 @@ access = "open"
 primary_table = "items"
 watch_tables = ["items"]
 topic = "name"
+# Expression language (README "Expression Language"): e.g. category != 'hidden' && value > 0
 where = "category != 'hidden'"
 change_log_size = 5000
 
@@ -254,6 +255,7 @@ _INIT_INDEX_HTML = """\
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>mkio</title>
   <script src="/mkio.js"></script>
+  <script type="module" src="/mkio-expr.js"></script>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 600px; margin: 2rem auto; padding: 0 1rem; background: #0f172a; color: #e2e8f0; }
     h1 { color: #f1f5f9; }
