@@ -18,6 +18,7 @@ from mkio._json import dumps, loads
 from mkio._ref import next_ref
 from mkio.change_bus import ChangeBus
 from mkio.database import Database
+from mkio.history import effective_tables, history_specs, versioned_tables
 from mkio.services.base import Service
 from mkio.services.info import InfoService
 from mkio.services.query import QueryService
@@ -129,7 +130,9 @@ async def _api_service_detail(request: web.Request) -> web.Response:
             {"error": f"Unknown service: {service_name}"}, status=404
         )
 
-    tables = request.app["config"].get("tables", {})
+    # History tables included, so a service configured on one still reports
+    # its columns and examples.
+    tables = effective_tables(request.app["config"])
     return web.json_response(
         _build_service_detail(service_name, svc.config, tables)
     )
@@ -495,7 +498,11 @@ async def _preflight_services(cfg: dict[str, Any]) -> None:
     )
     await db.start()
     bus = ChangeBus()
-    writer = WriteBatcher(db=db, change_bus=bus, batch_max_size=1, batch_max_wait_ms=1000)
+    writer = WriteBatcher(
+        db=db, change_bus=bus, batch_max_size=1, batch_max_wait_ms=1000,
+        versioned=history_specs(cfg),
+        versioned_configs=versioned_tables(cfg),
+    )
     await writer.start()
 
     services: list[Service] = []
@@ -552,6 +559,8 @@ async def _on_startup(app: web.Application) -> None:
         change_bus=bus,
         batch_max_size=cfg.get("batch_max_size", 500),
         batch_max_wait_ms=cfg.get("batch_max_wait_ms", 2.0),
+        versioned=history_specs(cfg),
+        versioned_configs=versioned_tables(cfg),
     )
     await writer.start()
     app["writer"] = writer

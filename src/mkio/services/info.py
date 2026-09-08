@@ -11,6 +11,13 @@ from aiohttp.web import WebSocketResponse
 
 from mkio.expr import LANGUAGE_VERSION
 from mkio._json import dumps as json_dumps
+from mkio.history import (
+    HISTORY_SUFFIX,
+    effective_tables,
+    history_table_name,
+    is_history_table,
+    versioned_tables,
+)
 from mkio.services.base import Service
 from mkio.ws_protocol import make_error, make_nack, make_reply
 
@@ -85,9 +92,11 @@ class InfoService(Service):
     async def _handle_schema(
         self, ws: WebSocketResponse, table: str, reqid: str | None
     ) -> None:
-        config_tables = self._server_config.get("tables", {})
-        if table not in config_tables:
-            available = list(config_tables.keys())
+        # History tables are not advertised, but a caller that knows the
+        # naming convention can introspect one.
+        all_tables = effective_tables(self._server_config)
+        if table not in all_tables:
+            available = [t for t in all_tables if not is_history_table(t)]
             resp = make_error(
                 self.name,
                 f"Unknown table: {table!r} (available: {', '.join(available)})",
@@ -108,7 +117,14 @@ class InfoService(Service):
             }
             for r in rows
         ]
-        resp = make_reply(self.name, row={"table": table, "columns": columns}, reqid=reqid)
+        row = {"table": table, "columns": columns}
+        history_of = all_tables[table].get("_history_of")
+        if history_of:
+            row["history_of"] = history_of
+        elif all_tables[table].get("versioned"):
+            row["versioned"] = True
+            row["history_table"] = history_table_name(table)
+        resp = make_reply(self.name, row=row, reqid=reqid)
         await ws.send_bytes(resp)
         await self.notify_monitors("out", resp)
 
@@ -149,16 +165,19 @@ class InfoService(Service):
                 "name": self._server_config.get("name", ""),
                 "version": self._server_config.get("version", ""),
                 "mkio": mkio_version,
-                "protocol": "1.0",
+                "protocol": "1.1",
                 "expr": LANGUAGE_VERSION,
                 "services": services_map,
                 "tables": tables,
+                "versioned": list(versioned_tables(self._server_config)),
+                "history_suffix": HISTORY_SUFFIX,
                 "config_hash": _config_hash(self._server_config),
                 "uptime": uptime,
                 "started": self._started_ref,
             }
             if limited:
-                for k in ("services", "tables", "config_hash", "uptime", "started"):
+                for k in ("services", "tables", "versioned", "config_hash",
+                          "uptime", "started"):
                     row.pop(k, None)
             if isinstance(data, dict):
                 version_keys = ("version", "protocol", "mkio", "expr")

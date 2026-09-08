@@ -9,6 +9,18 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from mkio.history import (
+    BASE_INTERNAL_COLUMNS,
+    OP_BASELINE,
+    VERSION_COLUMN,
+    VERSION_COLUMN_DEF,
+    baseline_sql,
+    history_index_sql,
+    is_history_table,
+    orphan_history_gc_sql,
+    primary_key_columns,
+)
+
 
 @dataclass
 class SchemaChange:
@@ -117,12 +129,21 @@ def diff_schema(
     for table_name, table_config in config_tables.items():
         if table_name not in existing:
             col_defs = _build_col_defs(table_config)
+            steps = [f"CREATE TABLE IF NOT EXISTS {table_name} ({col_defs})"]
+            base = table_config.get("_history_of")
+            if base:
+                steps += history_index_sql(base, config_tables.get(base, {}))
+                description = f"Create history table for {base!r}"
+                impact = "None — new table, backfilled from current rows"
+            else:
+                description = "Create new table"
+                impact = "None — new table"
             changes.append(SchemaChange(
                 table=table_name,
-                description=f"Create new table",
+                description=description,
                 level="safe",
-                sql_steps=[f"CREATE TABLE IF NOT EXISTS {table_name} ({col_defs})"],
-                data_impact="None — new table",
+                sql_steps=steps,
+                data_impact=impact,
             ))
             continue
 
@@ -133,6 +154,10 @@ def diff_schema(
 
         config_parsed = _parse_config_columns(table_config["columns"])
         config_pk = _get_pk_columns(config_parsed)
+
+        # History tables are additive-only: a column dropped or retyped on the
+        # base table keeps its recorded values here, so only additions apply.
+        additive_only = is_history_table(table_name)
 
         # New columns
         for col_name, col_info in config_parsed.items():
@@ -164,9 +189,9 @@ def diff_schema(
                         data_impact=f"None — existing rows get default/NULL",
                     ))
 
-        # Removed columns (skip internal _mkio_ref — managed by framework)
-        for col_name in existing_cols:
-            if col_name == "_mkio_ref":
+        # Removed columns (framework-managed _mkio_ columns are not in config)
+        for col_name in () if additive_only else existing_cols:
+            if col_name in BASE_INTERNAL_COLUMNS:
                 continue
             if col_name not in config_parsed:
                 changes.append(SchemaChange(
@@ -177,8 +202,8 @@ def diff_schema(
                 ))
 
         # Changed column types (skip internal columns)
-        for col_name, col_info in config_parsed.items():
-            if col_name == "_mkio_ref":
+        for col_name, col_info in ({} if additive_only else config_parsed).items():
+            if col_name in BASE_INTERNAL_COLUMNS:
                 continue
             if col_name in existing_cols:
                 existing_type = existing_cols[col_name]["type"].upper()
@@ -192,7 +217,7 @@ def diff_schema(
                     ))
 
         # Primary key changes
-        if config_pk and existing_pk and config_pk != existing_pk:
+        if not additive_only and config_pk and existing_pk and config_pk != existing_pk:
             changes.append(SchemaChange(
                 table=table_name,
                 description=f"Change primary key {existing_pk} → {config_pk}",
@@ -200,9 +225,12 @@ def diff_schema(
                 data_impact=f"Duplicate rows under new PK may be dropped",
             ))
 
-    # Tables in DB but not in config → remove (destructive)
+    # Tables in DB but not in config → remove (destructive).
+    # History tables are exempt: turning versioning off must not silently queue
+    # a destructive change that blocks startup.  Use 'mkio dbupdate
+    # --drop-history' to remove an orphaned history table deliberately.
     for table_name in existing:
-        if table_name not in config_tables:
+        if table_name not in config_tables and not is_history_table(table_name):
             changes.append(SchemaChange(
                 table=table_name,
                 description="Remove table",
@@ -238,13 +266,27 @@ def _build_recreate_steps(
             trigger_change.sql_steps = ["-- handled by prior recreation"]
             return
 
-    existing_cols = set(existing_table["columns"].keys()) - {"_mkio_ref"}
+    existing_cols = set(existing_table["columns"].keys()) - BASE_INTERNAL_COLUMNS
     config_parsed = _parse_config_columns(config_table["columns"])
     config_cols = set(config_parsed.keys())
     shared = existing_cols & config_cols
 
     col_defs = _build_col_defs(config_table)
-    shared_list = ", ".join(sorted(shared))
+    carried = sorted(shared)
+
+    # A versioned table's cursor and ref must survive the recreate: losing
+    # _mkio_version would strand every row's history. Both columns are declared
+    # on the new table so the copy can carry them across.
+    if config_table.get("versioned"):
+        for col, definition in (
+            ("_mkio_ref", "TEXT DEFAULT ''"),
+            (VERSION_COLUMN, VERSION_COLUMN_DEF),
+        ):
+            if col in existing_table["columns"]:
+                col_defs += f", {col} {definition}"
+                carried.append(col)
+
+    shared_list = ", ".join(carried)
 
     config_pk = _get_pk_columns(config_parsed)
     if not config_pk:
@@ -343,6 +385,8 @@ def apply_changes(
     if config_tables and created_tables:
         for table_name in created_tables:
             tbl_cfg = config_tables.get(table_name, {})
+            if tbl_cfg.get("_history_of"):
+                continue
             seed_path = tbl_cfg.get("_seed_path")
             if seed_path:
                 # Add _mkio_ref column now so seed_table can populate it
@@ -357,8 +401,85 @@ def apply_changes(
                 if count:
                     print(f"  Seeded {table_name}: {count} rows from {Path(seed_path).name}")
 
+    # Backfill newly created history tables from the rows already in the base
+    # table, so every live row has an earlier version to step back onto.
+    if config_tables and created_tables:
+        for table_name in created_tables:
+            base = config_tables.get(table_name, {}).get("_history_of")
+            if not base:
+                continue
+            add_version_column(conn, base)
+            count = baseline_table(conn, base, config_tables.get(base, {}))
+            if count:
+                print(f"  Recorded baseline in {table_name}: {count} rows")
+
     conn.commit()
     return total_before, total_after
+
+
+def add_version_column(conn: sqlite3.Connection, table: str) -> bool:
+    """Add the version counter to a versioned base table. Existing rows get 1."""
+    if _table_has_column(conn, table, VERSION_COLUMN):
+        return False
+    conn.execute(
+        f"ALTER TABLE {table} ADD COLUMN {VERSION_COLUMN} {VERSION_COLUMN_DEF}"
+    )
+    return True
+
+
+def baseline_table(
+    conn: sqlite3.Connection, base: str, base_config: dict
+) -> int:
+    """Capture the current rows of a base table as version 1."""
+    from mkio._ref import next_ref
+
+    has_ref = _table_has_column(conn, base, "_mkio_ref")
+    cursor = conn.execute(
+        baseline_sql(base, base_config, has_ref=has_ref),
+        (OP_BASELINE, next_ref()),
+    )
+    return cursor.rowcount if cursor.rowcount > 0 else 0
+
+
+def collect_redo_garbage(
+    conn: sqlite3.Connection, config_tables: dict[str, dict]
+) -> dict[str, tuple[int, int]]:
+    """Discard the redo stack of every versioned table.
+
+    Returns ``{history_table: (orphaned_rows, dangling_redo_rows)}`` for the
+    tables that had anything to drop.  Orphaned rows are the history of a key
+    with no base row — undone past version 1 and never redone.  Dangling redo
+    rows sit above a live row's cursor.  Both are reachable only through redo,
+    which this deliberately ends.
+    """
+    existing = get_existing_schema(conn)
+    dropped: dict[str, tuple[int, int]] = {}
+    for hist_name, hist_cfg in config_tables.items():
+        base = hist_cfg.get("_history_of")
+        if not base or hist_name not in existing or base not in existing:
+            continue
+        base_cfg = config_tables.get(base, {})
+        if not primary_key_columns(base_cfg):
+            continue
+        counts = []
+        for sql in orphan_history_gc_sql(base, base_cfg):
+            counts.append(conn.execute(sql).rowcount or 0)
+        if any(counts):
+            dropped[hist_name] = (counts[0], counts[1])
+    if dropped:
+        conn.commit()
+    return dropped
+
+
+def orphan_history_tables(
+    conn: sqlite3.Connection, config_tables: dict[str, dict]
+) -> list[str]:
+    """History tables in the DB whose base table is no longer versioned."""
+    existing = get_existing_schema(conn)
+    return sorted(
+        name for name in existing
+        if is_history_table(name) and name not in config_tables
+    )
 
 
 _MIGRATE_LEVELS = ("safe", "risky", "destructive")

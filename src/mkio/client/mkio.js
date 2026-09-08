@@ -644,6 +644,24 @@ class MkioClient {
 }
 
 // ---------------------------------------------------------------------------
+// Versioned tables
+// ---------------------------------------------------------------------------
+
+/** Reserved suffix for the history table of a versioned table. */
+const HISTORY_SUFFIX = "__history";
+
+/**
+ * Name of the history table recording changes to `table`.
+ *
+ * The convention is fixed, so a client that knows the base table can reach its
+ * history without being told the name. The server also reports it as
+ * `history_suffix` in the `_mkio` reply.
+ */
+function historyTable(table) {
+  return table + HISTORY_SUFFIX;
+}
+
+// ---------------------------------------------------------------------------
 // Console dispatcher: mkio.<verb>(...args) — mirrors the mkio CLI
 // ---------------------------------------------------------------------------
 
@@ -664,6 +682,7 @@ const MKIO_HELP = [
   '                     snapshotOnly, updateOnly})',
   'mkio.reqrep("<service>", data, {reqid})              send a request-reply message',
   'mkio.schema("<table>")                               show table schema (columns, types, keys)',
+  'mkio.historyTable("<table>")                         name of a versioned table\'s history table (<table>__history)',
   'mkio.check({version, protocol, mkio, expr})         check version compatibility',
   'mkio.instances()                                     list live MkioClient instances',
 ].join("\n");
@@ -1059,6 +1078,13 @@ const mkio = {
       return result;
     });
   },
+  historyTable(table) {
+    if (!table || typeof table !== "string") {
+      console.warn("mkio.historyTable: table name is required (string)");
+      return undefined;
+    }
+    return historyTable(table);
+  },
   instances() {
     return MkioClient.instances();
   },
@@ -1070,7 +1096,10 @@ const mkio = {
 
 // Export for ES modules and global scope
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { MkioClient, makeRef, mkio, defaultMonitorFormatter };
+  module.exports = {
+    MkioClient, makeRef, mkio, defaultMonitorFormatter,
+    historyTable, HISTORY_SUFFIX,
+  };
 }
 if (typeof window !== "undefined") {
   window.MkioClient = MkioClient;

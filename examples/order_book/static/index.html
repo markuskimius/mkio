@@ -57,6 +57,34 @@
     .btn-logout { background: #475569; font-size: 0.75rem; padding: 3px 10px; }
     .btn-logout:hover { background: #64748b; }
     #app { display: none; }
+
+    /* Change history */
+    .hint { font-size: 0.8rem; font-weight: 400; color: #64748b; }
+    .btn-history { background: #7c3aed; }
+    .btn-history:hover { background: #8b5cf6; }
+    .btn-undo-row { background: #b45309; }
+    .btn-undo-row:hover { background: #d97706; }
+    .btn-redo-row { background: #0e7490; }
+    .btn-redo-row:hover { background: #0891b2; }
+    .actions button:disabled { background: #334155; color: #64748b; cursor: not-allowed; }
+    .op-insert { color: #34d399; }
+    .op-update { color: #fbbf24; }
+    .op-delete { color: #f87171; }
+    .op-baseline { color: #94a3b8; }
+    .seq, .when { color: #64748b; font-variant-numeric: tabular-nums; }
+    #versions-overlay { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.85); display: flex; align-items: center; justify-content: center; z-index: 150; }
+    #versions-box { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 1.5rem; width: min(760px, 92vw); max-height: 80vh; overflow: auto; }
+    #versions-box h2 { margin-top: 0; }
+    #versions-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
+    .btn-undo { background: #b45309; }
+    .btn-undo:hover { background: #d97706; }
+    .btn-redo { background: #0e7490; }
+    .btn-redo:hover { background: #0891b2; }
+    .btn-undo:disabled, .btn-redo:disabled { background: #334155; color: #64748b; cursor: not-allowed; }
+    .ver { color: #a78bfa; font-variant-numeric: tabular-nums; }
+    .cursor-row { background: #312e81; }
+    .cursor-mark { color: #a78bfa; font-weight: 700; }
+    .redo-row td { opacity: 0.5; font-style: italic; }
   </style>
 </head>
 <body>
@@ -107,10 +135,50 @@
     <h2>Live Orders</h2>
     <table>
       <thead>
-        <tr><th>ID</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Status</th><th id="actions-header">Actions</th></tr>
+        <tr><th>ID</th><th>Ver</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Status</th><th id="actions-header">Actions</th></tr>
       </thead>
       <tbody id="orders-body"></tbody>
     </table>
+
+    <!-- Rows undone past version 1. The row itself is gone, but its versions
+         survive, so the app keeps the keys around to redo from. -->
+    <div id="undone-section" hidden>
+      <h2>Undone Orders <span class="hint">the row is gone; its versions are not</span></h2>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Versions</th><th class="actions">Actions</th></tr>
+        </thead>
+        <tbody id="undone-body"></tbody>
+      </table>
+    </div>
+
+    <!-- Live feed from orders__history: every recorded change, as it happens -->
+    <h2>Recent Changes <span class="hint" id="history-hint"></span></h2>
+    <table>
+      <thead>
+        <tr><th>Order</th><th>Ver</th><th>Change</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Status</th><th>By</th><th>When</th></tr>
+      </thead>
+      <tbody id="history-body"></tbody>
+    </table>
+  </div>
+
+  <!-- Per-order audit trail + undo -->
+  <div id="versions-overlay" style="display: none;">
+    <div id="versions-box">
+      <h2>Order <span id="versions-id"></span> &mdash; every recorded version</h2>
+      <table>
+        <thead>
+          <tr><th>Ver</th><th></th><th>Change</th><th>Side</th><th>Symbol</th><th>Qty</th><th>Price</th><th>Status</th><th>By</th><th>When</th></tr>
+        </thead>
+        <tbody id="versions-body"></tbody>
+      </table>
+      <div class="hint" id="versions-note"></div>
+      <div id="versions-actions">
+        <button class="btn-undo" id="btn-undo" disabled>Undo</button>
+        <button class="btn-redo" id="btn-redo" disabled>Redo</button>
+        <button class="btn-cancel" onclick="closeVersions()">Close</button>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -147,6 +215,11 @@
       cancelled: [],
     };
 
+    // Rows we know have a version above their cursor, so Redo would land
+    // somewhere. Undoing adds to it; any ordinary edit truncates that branch
+    // and so clears it. showVersions() refreshes it from the server.
+    const redoable = new Set();
+
     function renderOrders() {
       tbody.innerHTML = '';
       for (const row of ordersMap.values()) {
@@ -156,18 +229,91 @@
         const actions = STATUS_ACTIONS[row.status] || [];
         const actionButtons = actions.map(a =>
           `<button class="btn-${a}" onclick="doAction(${row.id}, '${a}')">${a[0].toUpperCase() + a.slice(1)}</button>`
-        ).join('');
-        tr.innerHTML = `<td>${row.id}</td><td class="${sideClass}">${row.side}</td><td>${row.symbol}</td><td>${row.qty}</td><td>${row.price}</td><td class="${statusClass}">${row.status}</td><td class="actions">${actionButtons}</td>`;
+        ).join('') +
+          // Undo always has somewhere to go while the row exists: version 1
+          // steps it out of the table entirely, into the Undone list.
+          `<button class="btn-undo-row" onclick="stepVersion(${row.id}, 'undo')">Undo</button>` +
+          `<button class="btn-redo-row" onclick="stepVersion(${row.id}, 'redo')"` +
+          `${redoable.has(row.id) ? '' : ' disabled'}>Redo</button>` +
+          `<button class="btn-history" onclick="showVersions(${row.id})">History</button>`;
+        tr.innerHTML = `<td>${row.id}</td><td class="ver">v${row._mkio_version}</td><td class="${sideClass}">${row.side}</td><td>${row.symbol}</td><td>${row.qty}</td><td>${row.price}</td><td class="${statusClass}">${row.status}</td><td class="actions">${actionButtons}</td>`;
         tbody.appendChild(tr);
       }
+    }
+
+    // --- Orders undone out of existence ---
+    //
+    // Undoing version 1 deletes the row but keeps its versions, so redo can
+    // rebuild it. Nothing on the server points at it any more — the app holds
+    // the primary key, which is all redo needs.
+
+    const undoneMap = new Map();
+    const undoneBody = document.getElementById('undone-body');
+    const undoneSection = document.getElementById('undone-section');
+
+    function renderUndone() {
+      undoneSection.hidden = undoneMap.size === 0;
+      undoneBody.innerHTML = '';
+      for (const [id, row] of undoneMap) {
+        const tr = document.createElement('tr');
+        const sideClass = row.side === 'Buy' ? 'side-buy' : 'side-sell';
+        tr.innerHTML =
+          `<td>${id}</td><td class="${sideClass}">${row.side ?? ''}</td>` +
+          `<td>${row.symbol ?? ''}</td><td>${row.qty ?? ''}</td><td>${row.price ?? ''}</td>` +
+          `<td class="ver">${row.top ?? '?'} kept</td>` +
+          `<td class="actions">` +
+          `<button class="btn-redo-row" onclick="stepVersion(${id}, 'redo')">Redo</button>` +
+          `<button class="btn-history" onclick="showVersions(${id})">History</button></td>`;
+        undoneBody.appendChild(tr);
+      }
+    }
+
+    /** Where a row sits in its own history: {current, top}, nulls when absent. */
+    async function orderState(id) {
+      const reply = await client.request('order_state', { id });
+      if (reply.type === 'error') return null;
+      return (reply.rows || [])[0] || null;
+    }
+
+    /** A row vanished. Undone past version 1, or genuinely deleted? */
+    async function classifyRemoval(id, row) {
+      const state = await orderState(id);
+      if (state && state.top != null) {
+        // Its versions survive, so it is undone rather than gone.
+        undoneMap.set(id, { ...row, top: state.top });
+        redoable.add(id);
+      } else {
+        undoneMap.delete(id);
+        redoable.delete(id);
+      }
+      renderUndone();
     }
 
     async function doAction(id, action) {
       try {
         const result = await client.send('orders', { id }, { op: action });
-        if (result.type === 'error') showError(result.message || 'Action failed');
+        if (result.type === 'error') {
+          showError(result.message || 'Action failed');
+          return;
+        }
+        // An ordinary edit discards whatever sat above the current version.
+        redoable.delete(id);
+        renderOrders();
       } catch (e) {
         showError(e.message || 'Action failed');
+      }
+    }
+
+    function applyOrderChange(op, row) {
+      if (op === 'delete') {
+        ordersMap.delete(row.id);
+        // Distinguish "undone to nothing" from a real delete, which takes the
+        // row's versions with it.
+        classifyRemoval(row.id, row);
+      } else {
+        ordersMap.set(row.id, row);
+        undoneMap.delete(row.id);
+        renderUndone();
       }
     }
 
@@ -179,15 +325,11 @@
           renderOrders();
         },
         onDelta(changes) {
-          changes.forEach(c => {
-            if (c.op === 'delete') ordersMap.delete(c.row.id);
-            else ordersMap.set(c.row.id, c.row);
-          });
+          changes.forEach(c => applyOrderChange(c.op, c.row));
           renderOrders();
         },
         onUpdate(op, row) {
-          if (op === 'delete') ordersMap.delete(row.id);
-          else ordersMap.set(row.id, row);
+          applyOrderChange(op, row);
           renderOrders();
         },
         onNack(msg) {
@@ -195,6 +337,190 @@
         },
       });
     }
+
+    // --- Change history ---
+    //
+    // Every change to `orders` is recorded in `orders__history` because
+    // the table is marked `versioned = true`. The name follows the convention
+    // "__history" + table, which the JS client exposes as
+    // mkio.historyTable('orders') — no extra config told us where to look.
+
+    const historyBody = document.getElementById('history-body');
+    const historyHint = document.getElementById('history-hint');
+    const historyRows = [];        // newest first
+    const HISTORY_LIMIT = 50;
+
+    // Refs are fixed-width sortable UTC timestamps: "YYYYMMDD HH:MM:SS.frac"
+    function refTime(ref) {
+      return ref ? ref.slice(9, 17) : '';
+    }
+
+    function opCell(op) {
+      return `<span class="op-${op}">${op}</span>`;
+    }
+
+    function renderHistory() {
+      historyBody.innerHTML = '';
+      for (const r of historyRows.slice(0, HISTORY_LIMIT)) {
+        const tr = document.createElement('tr');
+        const sideClass = r.side === 'Buy' ? 'side-buy' : 'side-sell';
+        tr.innerHTML =
+          `<td>${r.id}</td><td class="ver">v${r._mkio_version}</td>` +
+          `<td>${opCell(r._mkio_op)}</td><td class="${sideClass}">${r.side ?? ''}</td>` +
+          `<td>${r.symbol ?? ''}</td><td>${r.qty ?? ''}</td><td>${r.price ?? ''}</td>` +
+          `<td class="status-${r.status || ''}">${r.status ?? ''}</td>` +
+          `<td>${r._mkio_user ?? '(system)'}</td><td class="when">${refTime(r._mkio_ref)}</td>`;
+        historyBody.appendChild(tr);
+      }
+    }
+
+    function addHistoryRow(row) {
+      historyRows.unshift(row);
+      historyRows.length = Math.min(historyRows.length, HISTORY_LIMIT);
+      renderHistory();
+    }
+
+    function subscribeToHistory() {
+      client.subscribe('order_history', 'query', {
+        onSnapshot(rows) {
+          // The service's SQL already returns newest first.
+          historyRows.length = 0;
+          rows.forEach(r => historyRows.push(r));
+          renderHistory();
+        },
+        onDelta(changes) {
+          changes.forEach(c => addHistoryRow(c.row));
+        },
+        onUpdate(op, row) {
+          addHistoryRow(row);
+        },
+        onNack(msg) {
+          // History is gated by its own `audit` right — a viewer sees this.
+          historyHint.textContent = '(not available for your role: ' + msg + ')';
+        },
+      });
+    }
+
+    // --- Per-order version history ---
+
+    /**
+     * What the controls should say for a row sitting on `cursor` of `top`
+     * recorded versions. Undo walks all the way down — cursor 3 means three
+     * more undos are available, the last of which removes the row.
+     */
+    function versionControls(cursor, top) {
+      if (top === 0) {
+        return { canUndo: false, canRedo: false, note: 'No recorded versions.' };
+      }
+      const plural = n => (n === 1 ? '' : 's');
+      if (cursor === 0) {
+        return {
+          canUndo: false, canRedo: true,
+          note: `Undone past version 1. ${top} version${plural(top)} kept — ` +
+                `redo rebuilds version 1.`,
+        };
+      }
+      if (cursor < top) {
+        return {
+          canUndo: true, canRedo: true,
+          note: `On version ${cursor} of ${top}. Undo steps back ${cursor} more ` +
+                `time${plural(cursor)}; editing now would discard versions ` +
+                `above ${cursor}.`,
+        };
+      }
+      return {
+        canUndo: true, canRedo: false,
+        note: `On the newest version (${cursor} of ${top}). Undo steps back ` +
+              `${cursor} time${plural(cursor)}.`,
+      };
+    }
+
+    let versionsOrderId = null;   // the order the panel is showing
+
+    async function showVersions(id) {
+      const body = document.getElementById('versions-body');
+      const note = document.getElementById('versions-note');
+      const undoBtn = document.getElementById('btn-undo');
+      const redoBtn = document.getElementById('btn-redo');
+      document.getElementById('versions-id').textContent = id;
+      body.innerHTML = '';
+      note.textContent = '';
+      undoBtn.disabled = redoBtn.disabled = true;
+      versionsOrderId = id;
+      document.getElementById('versions-overlay').style.display = 'flex';
+
+      const versions = await client.request('order_versions', { id });
+      if (versions.type === 'error') {
+        note.textContent = versions.message || 'Could not read history';
+        return;
+      }
+      // Ask the server where the row sits rather than reading whatever the
+      // orders subscription last delivered — after a step, that may not have
+      // arrived yet.
+      const state = await orderState(id);
+      const cursor = (state && state.current != null) ? state.current : 0;
+      const top = (state && state.top != null) ? state.top : 0;
+
+      for (const v of versions.rows || []) {
+        const tr = document.createElement('tr');
+        const sideClass = v.side === 'Buy' ? 'side-buy' : 'side-sell';
+        if (v.version === cursor) tr.className = 'cursor-row';
+        else if (v.version > cursor) tr.className = 'redo-row';
+        tr.innerHTML =
+          `<td class="ver">v${v.version}</td>` +
+          `<td class="cursor-mark">${v.version === cursor ? '\u25b6' : ''}</td>` +
+          `<td>${opCell(v.op)}</td>` +
+          `<td class="${sideClass}">${v.side}</td><td>${v.symbol}</td>` +
+          `<td>${v.qty}</td><td>${v.price}</td>` +
+          `<td class="status-${v.status}">${v.status}</td>` +
+          `<td>${v.user}</td><td class="when">${v.time}</td>`;
+        body.appendChild(tr);
+      }
+
+      const controls = versionControls(cursor, top);
+      undoBtn.disabled = !controls.canUndo;
+      redoBtn.disabled = !controls.canRedo;
+      note.textContent = controls.note;
+      // Keep the row buttons honest with what the server just told us.
+      if (controls.canRedo) redoable.add(id); else redoable.delete(id);
+      renderOrders();
+    }
+
+    function closeVersions() {
+      document.getElementById('versions-overlay').style.display = 'none';
+      versionsOrderId = null;
+    }
+
+    /**
+     * Step one order back or forward along its recorded versions.
+     *
+     * Neither op writes a new version, so this can be repeated all the way
+     * down to version 1 — and once more, which removes the row but keeps its
+     * versions for redo.
+     */
+    async function stepVersion(id, op) {
+      try {
+        const result = await client.send('orders', { id }, { op });
+        if (result.type === 'error') {
+          showError(result.message || `${op} failed`);
+          return;
+        }
+        if (op === 'undo') redoable.add(id);
+        const state = await orderState(id);
+        if (state && state.current != null && state.top != null) {
+          if (state.current >= state.top) redoable.delete(id);
+        }
+        renderOrders();
+        if (versionsOrderId === id) await showVersions(id);
+      } catch (e) {
+        showError(e.message || `${op} failed`);
+      }
+    }
+
+    document.getElementById('btn-undo').addEventListener('click',
+      () => versionsOrderId !== null && stepVersion(versionsOrderId, 'undo'));
+    document.getElementById('btn-redo').addEventListener('click',
+      () => versionsOrderId !== null && stepVersion(versionsOrderId, 'redo'));
 
     // --- Login ---
 
@@ -220,6 +546,7 @@
         // Show/hide trade UI based on role having trade right
         // (We don't know rights client-side, but we can try and handle nack)
         subscribeToOrders();
+        subscribeToHistory();
       } catch (err) {
         errorEl.textContent = err.message || 'Login failed';
         client.close();
@@ -233,6 +560,13 @@
       currentUser = null;
       ordersMap.clear();
       tbody.innerHTML = '';
+      historyRows.length = 0;
+      historyBody.innerHTML = '';
+      historyHint.textContent = '';
+      undoneMap.clear();
+      redoable.clear();
+      renderUndone();
+      closeVersions();
       document.getElementById('app').style.display = 'none';
       document.getElementById('login-overlay').style.display = 'flex';
       document.getElementById('login-error').textContent = '';

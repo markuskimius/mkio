@@ -10,7 +10,17 @@ monitor_access = "trade"
 
 [tables.orders]
 columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", side = "TEXT NOT NULL", symbol = "TEXT NOT NULL", qty = "INTEGER", price = "REAL DEFAULT 0", status = "TEXT DEFAULT 'pending'" }
+# Record every version of every row in orders__history, stamped with the
+# ref, the authenticated user and the service it came through. Rows gain a
+# _mkio_version counter: 1 on insert, +1 on every edit. The undo/redo ops below
+# move a row back and forth along its recorded versions.
+versioned = true
 
+# audit_log is hand-rolled and still worth having: it records application
+# *events* ("accepted", "filled") through a second op in the same transaction,
+# which is what the `bind` references below demonstrate. The history table is a
+# different thing — it captures the whole row on every change, automatically,
+# and is what the undo and audit-trail services below are built on.
 [tables.audit_log]
 columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", event = "TEXT", order_id = "INTEGER", status = "TEXT" }
 
@@ -53,6 +63,18 @@ fill = [
 cancel = [
     { table = "orders", op_type = "update", key = ["id"], fields = ["status"], defaults = { status = "cancelled" } },
     { table = "audit_log", op_type = "insert", defaults = { event = "cancelled" }, bind = { order_id = "$0.id", status = "$0.status" } },
+]
+# Undo/redo step the row along its recorded versions. They take only the key —
+# the values come from the history table — and write no new version, so the
+# step stays reversible. Editing after an undo drops the abandoned branch.
+# The bound audit_log entry works here like anywhere else.
+undo = [
+    { table = "orders", op_type = "undo", key = ["id"] },
+    { table = "audit_log", op_type = "insert", defaults = { event = "undo" }, bind = { order_id = "$0.id", status = "$0.status" } },
+]
+redo = [
+    { table = "orders", op_type = "redo", key = ["id"] },
+    { table = "audit_log", op_type = "insert", defaults = { event = "redo" }, bind = { order_id = "$0.id", status = "$0.status" } },
 ]
 
 # --- Live data services ---
@@ -137,6 +159,58 @@ protocol = "reqrep"
 sql = "SELECT COUNT(*) as n FROM orders WHERE status = :status"
 reply = "n ?? 0"
 access = "view"
+
+# --- Change history (from `versioned = true` on [tables.orders]) ---
+#
+# The history table is named by convention — "__history" + the base table
+# — so a client that knows the table knows where its history lives. mkio never
+# advertises it: it is absent from the _mkio table listing, and no service
+# exists for it until you write one. The three below are that deliberate
+# choice, each gated by its own right like anything else.
+
+# Live audit tape: the 50 most recent versions, then every new one as it lands.
+[services.order_history]
+protocol = "query"
+primary_table = "orders__history"
+sql = "SELECT * FROM orders__history ORDER BY _mkio_ref DESC LIMIT 50"
+filterable = ["id", "status", "_mkio_op", "_mkio_user"]
+change_log_size = 10000
+access = "audit"
+
+# Every recorded version of one order, oldest first. The live row's own
+# _mkio_version says which of these it currently sits on; anything above that
+# is a redo entry left behind by an undo.
+[services.order_versions]
+protocol = "reqrep"
+sql = "SELECT * FROM orders__history WHERE id = :id ORDER BY _mkio_version"
+access = "audit"
+
+[services.order_versions.reply]
+version = "_mkio_version"
+op = "_mkio_op"
+time = "REF_TIME(_mkio_ref, fmt: '%Y-%m-%d %H:%M:%S')"
+user = "_mkio_user ?? '(system)'"
+side = "side"
+symbol = "symbol"
+qty = "qty"
+price = "price"
+status = "status"
+
+# Where a row sits in its own history: the version it is on, and the highest
+# version recorded for it. `current` is null once the row has been undone away
+# — its versions survive, so redo can rebuild it. `top` is null when the row
+# has no history at all. Reading this is what tells the UI whether undo and
+# redo are available, rather than guessing from the last message it saw.
+[services.order_state]
+protocol = "reqrep"
+sql = "SELECT (SELECT _mkio_version FROM orders WHERE id = :id) AS current, MAX(_mkio_version) AS top FROM orders__history WHERE id = :id"
+access = "audit"
+
+# Housekeeping. History grows without bound, so archive it periodically —
+# note that archiving old versions is what removes undo depth. Redo state is
+# transient: `mkio dbupdate` discards it unless you pass --keep-redo.
+#   mkio archive server.toml --older-than 90d --out ./archive --dry-run
+#   mkio archive server.toml --older-than 90d --out ./archive --delete
 
 # --- Static file serving ---
 

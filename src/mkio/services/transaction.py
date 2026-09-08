@@ -8,6 +8,7 @@ from typing import Any
 from aiohttp.web import WebSocketResponse
 
 from mkio._ref import next_ref
+from mkio.history import VERSION_COLUMN, redo_plan, undo_plan
 from mkio.services.base import Service
 from mkio.writer import CompiledOp
 from mkio.ws_protocol import make_result, make_error
@@ -37,14 +38,15 @@ class TransactionService(Service):
 
     async def start(self) -> None:
         ops = self.config.get("ops", [])
+        versioned = self.writer.versioned_configs if self.writer else {}
         if isinstance(ops, dict):
             # Named op sets
             for op_name, op_list in ops.items():
-                compiled = tuple(_compile_op(spec) for spec in op_list)
+                compiled = tuple(_compile_op(spec, versioned) for spec in op_list)
                 self._named_ops[op_name] = compiled
         else:
             # Single (unnamed) op set
-            self._default_ops = tuple(_compile_op(spec) for spec in ops)
+            self._default_ops = tuple(_compile_op(spec, versioned) for spec in ops)
 
     def _resolve_ops(self, msg: dict[str, Any]) -> tuple[CompiledOp, ...]:
         """Resolve which op set to use from the message."""
@@ -93,7 +95,12 @@ class TransactionService(Service):
             params_list = tuple(
                 _extract_params(op, data) for op in compiled_ops
             )
-            result = await self.writer.submit(compiled_ops, params_list, data, ref=ref)
+            auth = getattr(ws, "_mkio_auth", None)
+            result = await self.writer.submit(
+                compiled_ops, params_list, data, ref=ref,
+                user=auth.get("user") if auth else None,
+                service=self.name,
+            )
             # Cache result for recovery
             self._cache_result(ref, result)
             resp = make_result(ref, self.name, result, txnid=txnid)
@@ -121,16 +128,25 @@ class TransactionService(Service):
             self._result_cache.popitem(last=False)
 
 
-def _compile_op(spec: dict[str, Any]) -> CompiledOp:
+def _compile_op(
+    spec: dict[str, Any], versioned: dict[str, dict[str, Any]] | None = None
+) -> CompiledOp:
     """Compile a single operation spec into a CompiledOp with parameterized SQL.
 
     The optional ``bind`` dict maps column names to ``"$N.field"`` references,
     where N is the zero-based index of a prior op in the same transaction whose
     RETURNING row supplies the value.  Bound columns are included in the SQL
     but their parameter values are resolved at execution time by the writer.
+
+    ``versioned`` maps versioned table names to their config.  Ops against one
+    maintain the ``_mkio_version`` counter and return every affected row so the
+    writer can record it; ``undo``/``redo`` compile to a two-step plan that
+    moves the cursor without writing history.
     """
     op_type = spec["op_type"]
     table = spec["table"]
+    versioned = versioned or {}
+    is_versioned = table in versioned
     fields = list(spec.get("fields", []))
     key = spec.get("key", [])
     raw_bind = spec.get("bind", {})
@@ -151,26 +167,44 @@ def _compile_op(spec: dict[str, Any]) -> CompiledOp:
     default_cols = [c for c in defaults if c not in fields and c not in bound_cols]
     all_fields = fields + [c for c in bound_cols if c not in fields] + default_cols
 
+    if op_type in ("undo", "redo"):
+        plan_for = undo_plan if op_type == "undo" else redo_plan
+        plan = plan_for(table, versioned[table])
+        return CompiledOp(table, op_type, "", tuple(key), bind, defaults, plan)
+
     # _mkio_ref is always the last parameter (filled by writer at execution time)
     REF_COL = "_mkio_ref"
+
+    # A new row always starts at version 1; an edit steps the counter forward,
+    # which is what the writer uses to cut the abandoned redo branch.
+    version_col = f", {VERSION_COLUMN}" if is_versioned else ""
+    version_value = ", 1" if is_versioned else ""
+    version_set = f", {VERSION_COLUMN} = {VERSION_COLUMN} + 1" if is_versioned else ""
 
     if op_type == "insert":
         cols = all_fields + [REF_COL]
         col_list = ", ".join(cols)
         placeholders = ", ".join("?" for _ in cols)
-        sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) RETURNING *"
+        sql = (
+            f"INSERT INTO {table} ({col_list}{version_col}) "
+            f"VALUES ({placeholders}{version_value}) RETURNING *"
+        )
         return CompiledOp(table, op_type, sql, tuple(cols), bind, defaults)
 
     elif op_type == "update":
         set_fields = fields + [c for c in bound_cols if c not in fields] + default_cols + [REF_COL]
         set_clause = ", ".join(f"{f} = ?" for f in set_fields)
         where_clause = " AND ".join(f"{k} = ?" for k in key)
-        sql = f"UPDATE {table} SET {set_clause} WHERE {where_clause} RETURNING *"
+        sql = (
+            f"UPDATE {table} SET {set_clause}{version_set} "
+            f"WHERE {where_clause} RETURNING *"
+        )
         return CompiledOp(table, op_type, sql, tuple(set_fields) + tuple(key), bind, defaults)
 
     elif op_type == "delete":
         where_clause = " AND ".join(f"{k} = ?" for k in key)
-        sql = f"DELETE FROM {table} WHERE {where_clause}"
+        returning = " RETURNING *" if is_versioned else ""
+        sql = f"DELETE FROM {table} WHERE {where_clause}{returning}"
         return CompiledOp(table, op_type, sql, tuple(key), bind, defaults)
 
     elif op_type == "upsert":
@@ -179,9 +213,12 @@ def _compile_op(spec: dict[str, Any]) -> CompiledOp:
         placeholders = ", ".join("?" for _ in all_upsert)
         non_key = [f for f in all_upsert if f not in key]
         update_clause = ", ".join(f"{f} = excluded.{f}" for f in non_key)
+        if is_versioned:
+            update_clause += f", {VERSION_COLUMN} = {table}.{VERSION_COLUMN} + 1"
         key_list = ", ".join(key)
         sql = (
-            f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) "
+            f"INSERT INTO {table} ({col_list}{version_col}) "
+            f"VALUES ({placeholders}{version_value}) "
             f"ON CONFLICT({key_list}) DO UPDATE SET {update_clause} RETURNING *"
         )
         return CompiledOp(table, op_type, sql, tuple(all_upsert), bind, defaults)

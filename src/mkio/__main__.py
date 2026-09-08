@@ -25,7 +25,7 @@ _PROTOCOL_CLI_HINT = {
 }
 
 
-_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep", "check", "dbupdate", "init", "schema", "adduser", "hashpass")
+_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep", "check", "dbupdate", "archive", "init", "schema", "adduser", "hashpass")
 
 
 def main() -> None:
@@ -63,6 +63,8 @@ def main() -> None:
         _cmd_check()
     elif cmd == "dbupdate":
         _cmd_dbupdate()
+    elif cmd == "archive":
+        _cmd_archive()
     elif cmd == "schema":
         _cmd_schema()
     elif cmd == "init":
@@ -98,8 +100,11 @@ def _usage() -> None:
     print("  mkio schema <url> <table>        Show table schema (columns, types, keys)")
     print("  mkio check <url> [version=... protocol=... mkio=... expr=...]")
     print("                                   Check version compatibility with server")
-    print("  mkio dbupdate [server.toml] [--allow-risky] [--allow-destructive]")
+    print("  mkio dbupdate [server.toml] [--allow-risky] [--allow-destructive] [--drop-history]")
     print("                                   Apply pending schema migrations")
+    print("  mkio archive [server.toml] [--table <name>] --older-than <N>d|<ref>")
+    print("               [--out <dir>] [--delete] [--prune-source] [--dry-run] [--yes]")
+    print("                                   Archive history rows to CSV, optionally purging them")
     print("  mkio init [directory] [--no-static]")
     print("  mkio adduser <username> <role> [server.toml]")
     print("                                   Add a user to _mkio_users (prompts for password)")
@@ -1104,11 +1109,15 @@ async def _reqrep_request(
 
 
 def _cmd_dbupdate() -> None:
-    usage = "mkio dbupdate [server.toml] [--allow-risky] [--allow-destructive]"
+    usage = ("mkio dbupdate [server.toml] [--allow-risky] [--allow-destructive] "
+             "[--drop-history] [--keep-redo]")
     args = sys.argv[2:]
     allow_risky = "--allow-risky" in args
     allow_destructive = "--allow-destructive" in args
-    args = [a for a in args if a not in ("--allow-risky", "--allow-destructive")]
+    drop_history = "--drop-history" in args
+    keep_redo = "--keep-redo" in args
+    args = [a for a in args if a not in
+            ("--allow-risky", "--allow-destructive", "--drop-history", "--keep-redo")]
     _check_unknown_flags(args, set(), usage)
     if len(args) > 1:
         print(f"Error: 'dbupdate' takes at most 1 argument (config path), got {len(args)}")
@@ -1123,7 +1132,11 @@ def _cmd_dbupdate() -> None:
 
     import sqlite3
     from mkio.config import load_config
-    from mkio.migration import check_schema, migrate_schema, print_change_summary
+    from mkio.history import effective_tables
+    from mkio.migration import (
+        check_schema, collect_redo_garbage, migrate_schema,
+        orphan_history_tables, print_change_summary,
+    )
 
     try:
         config = load_config(config_path)
@@ -1134,10 +1147,10 @@ def _cmd_dbupdate() -> None:
         sys.exit(1)
 
     db_path = config["db_path"]
-    tables = config.get("tables", {})
-    if not tables:
+    if not config.get("tables"):
         print("No tables defined in config.")
         sys.exit(0)
+    tables = effective_tables(config)
 
     if db_path == ":memory:":
         print("Error: dbupdate does not apply to in-memory databases")
@@ -1146,12 +1159,25 @@ def _cmd_dbupdate() -> None:
     conn = sqlite3.connect(db_path)
     try:
         conn.execute("PRAGMA journal_mode=WAL")
+        orphans = orphan_history_tables(conn, tables)
+        if orphans and drop_history:
+            for name in orphans:
+                conn.execute(f"DROP TABLE {name}")
+                print(f"  Dropped orphaned history table: {name}")
+            conn.commit()
+            orphans = []
+
+        if not keep_redo:
+            _discard_redo(conn, tables)
+
         changes = check_schema(conn, tables)
         if not changes:
             print("Schema is up to date.")
+            _print_orphan_note(orphans)
             sys.exit(0)
 
         print_change_summary(changes, db_path, conn)
+        _print_orphan_note(orphans)
 
         if allow_destructive:
             level = "destructive"
@@ -1171,6 +1197,297 @@ def _cmd_dbupdate() -> None:
         print("  Done.")
     finally:
         conn.close()
+
+
+def _ref_slug(ref: str) -> str:
+    """Filename-safe form of a ref string."""
+    return ref.replace(" ", "_").replace(":", "").replace(".", "_")
+
+
+def _archive_cutoff(older_than: str) -> str:
+    """Resolve --older-than to a ref cutoff.
+
+    ``90d`` (also ``h``/``m``) counts back from now; anything else is taken as
+    a literal ref, so a bare ``20260101`` means "before that date".
+    """
+    import re
+    from datetime import timedelta
+
+    m = re.fullmatch(r"(\d+)([dhm])", older_than.strip())
+    if not m:
+        return older_than
+    seconds = int(m.group(1)) * {"d": 86400, "h": 3600, "m": 60}[m.group(2)]
+    dt = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    return dt.strftime("%Y%m%d %H:%M:%S") + ".000000000000"
+
+
+def _archive_table(
+    conn: Any,
+    base: str,
+    base_config: dict,
+    cutoff: str,
+    out_dir: str,
+    *,
+    delete: bool,
+    prune_source: bool,
+    dry_run: bool,
+) -> None:
+    """Archive one table's recorded versions older than the cutoff."""
+    from pathlib import Path
+    from mkio.history import (
+        VERSION_COLUMN, history_table_name, primary_key_columns, source_columns,
+    )
+
+    hist = history_table_name(base)
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", (hist,)
+    ).fetchone():
+        print(f"  {hist}: table does not exist yet — run 'mkio dbupdate' first")
+        return
+
+    pk = primary_key_columns(base_config)
+    match = " AND ".join(f"b.{k} = h.{k}" for k in pk)
+    # A row's current version is what the base table points at, so archiving it
+    # would strand the live row. Only --prune-source, which removes the live row
+    # too, may take the whole chain.
+    guard = "" if prune_source else (
+        f" AND (NOT EXISTS (SELECT 1 FROM {base} b WHERE {match})"
+        f" OR h.{VERSION_COLUMN} < (SELECT b.{VERSION_COLUMN} FROM {base} b"
+        f" WHERE {match}))"
+    )
+    order = ", ".join(f"h.{k}" for k in pk)
+    cursor = conn.execute(
+        f"SELECT h.* FROM {hist} h WHERE h._mkio_ref < ?{guard} "
+        f"ORDER BY {order}, h.{VERSION_COLUMN}",
+        (cutoff,),
+    )
+    columns = [d[0] for d in cursor.description]
+    rows = cursor.fetchall()
+    if not rows:
+        print(f"  {hist}: no archivable versions older than the cutoff")
+        return
+
+    refs = sorted(r["_mkio_ref"] for r in rows)
+    name = f"{hist}_{_ref_slug(refs[0])}_{_ref_slug(refs[-1])}.csv"
+    dest = Path(out_dir) / name
+
+    if dry_run:
+        print(f"  {hist}: {len(rows):,} versions would be written to {dest}")
+    else:
+        # The CSV lands on disk before anything is removed, so a failed write
+        # leaves the history intact.
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        with open(dest, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(columns)
+            for row in rows:
+                writer.writerow([row[c] for c in columns])
+            f.flush()
+            os.fsync(f.fileno())
+        print(f"  {hist}: {len(rows):,} versions -> {dest}")
+    print("    archiving a version removes that much undo depth")
+
+    if not delete:
+        return
+
+    # Delete exactly the rows that were archived, addressed by key and version,
+    # so a concurrent undo cannot widen the set.
+    archived_keys = [tuple(r[c] for c in pk) + (r[VERSION_COLUMN],) for r in rows]
+    key_filter = " AND ".join(f"{k} = ?" for k in list(pk) + [VERSION_COLUMN])
+    if dry_run:
+        print(f"    {len(rows):,} versions would be purged")
+    else:
+        conn.executemany(f"DELETE FROM {hist} WHERE {key_filter}", archived_keys)
+        print(f"    purged {len(rows):,} versions")
+
+    if not prune_source:
+        return
+
+    # A source row is removable only when its whole chain has just been archived
+    # and the live row still matches the newest archived version exactly.
+    src_cols = source_columns(base_config)
+    compare = list(src_cols) + [VERSION_COLUMN]
+    where = " AND ".join(f"{k} = ?" for k in pk)
+
+    newest: dict[tuple, Any] = {}
+    for row in rows:
+        key = tuple(row[k] for k in pk)
+        current = newest.get(key)
+        if current is None or row[VERSION_COLUMN] > current[VERSION_COLUMN]:
+            newest[key] = row
+
+    archived_versions: dict[tuple, set] = {}
+    for row in rows:
+        archived_versions.setdefault(tuple(row[k] for k in pk), set()).add(
+            row[VERSION_COLUMN]
+        )
+
+    pruned = 0
+    for key, row in newest.items():
+        # Versions the purge leaves behind, evaluated the same way in a dry run.
+        remaining = [
+            r[0] for r in conn.execute(
+                f"SELECT {VERSION_COLUMN} FROM {hist} WHERE {where}", key
+            )
+        ]
+        if any(v not in archived_versions[key] for v in remaining):
+            continue  # part of the chain survives, so the row is still versioned
+        live = conn.execute(f"SELECT * FROM {base} WHERE {where}", key).fetchone()
+        if live is None:
+            continue
+        if any(live[c] != row[c] for c in compare):
+            continue
+        if not dry_run:
+            conn.execute(f"DELETE FROM {base} WHERE {where}", key)
+        pruned += 1
+
+    verb = "would be pruned" if dry_run else "pruned"
+    print(f"    {pruned:,} source rows {verb} from {base}")
+
+
+def _cmd_archive() -> None:
+    usage = (
+        "mkio archive [server.toml] [--table <name>] --older-than <N>d|<ref> "
+        "[--out <dir>] [--delete] [--prune-source] [--dry-run] [--yes]"
+    )
+    args = sys.argv[2:]
+    delete = "--delete" in args
+    prune_source = "--prune-source" in args
+    dry_run = "--dry-run" in args
+    assume_yes = "--yes" in args
+    args = [a for a in args
+            if a not in ("--delete", "--prune-source", "--dry-run", "--yes")]
+    table_arg = _extract_flag(args, "--table")
+    older_than = _extract_flag(args, "--older-than")
+    out_dir = _extract_flag(args, "--out") or "."
+    _check_unknown_flags(
+        args,
+        {"--table", "--older-than", "--out", "--delete", "--prune-source",
+         "--dry-run", "--yes"},
+        usage,
+    )
+    if len(args) > 1:
+        print(f"Error: 'archive' takes at most 1 argument (config path), got {len(args)}")
+        print(f"Usage: {usage}")
+        sys.exit(1)
+    if not older_than:
+        print("Error: --older-than is required (e.g. --older-than 90d)")
+        print(f"Usage: {usage}")
+        sys.exit(1)
+    if prune_source and not delete:
+        delete = True
+    if prune_source and not dry_run and not assume_yes:
+        print("Error: --prune-source deletes live rows — pass --yes to confirm")
+        print("  (or --dry-run to see what it would remove)")
+        sys.exit(1)
+
+    config_path = args[0] if args else "server.toml"
+    from pathlib import Path
+    if not Path(config_path).exists():
+        print(f"Config file not found: {config_path}")
+        sys.exit(1)
+
+    import sqlite3
+    from mkio.config import load_config
+    from mkio.history import base_table_name, is_history_table, versioned_tables
+
+    try:
+        config = load_config(config_path)
+    except Exception as exc:
+        if _TRACEBACK:
+            raise
+        print(f"Error loading config: {exc}")
+        sys.exit(1)
+
+    db_path = config["db_path"]
+    if db_path == ":memory:":
+        print("Error: archive does not apply to in-memory databases")
+        sys.exit(1)
+    if not Path(db_path).exists():
+        print(f"Database not found: {db_path}")
+        sys.exit(1)
+
+    versioned = versioned_tables(config)
+    if not versioned:
+        print("No versioned tables in config — nothing to archive.")
+        print("  Set versioned = true on a table to record its change history.")
+        sys.exit(0)
+
+    if table_arg:
+        base = base_table_name(table_arg) if is_history_table(table_arg) else table_arg
+        if base not in versioned:
+            available = ", ".join(sorted(versioned))
+            print(f"Error: table {table_arg!r} is not versioned. Versioned tables: {available}")
+            sys.exit(1)
+        targets = {base: versioned[base]}
+    else:
+        targets = versioned
+
+    cutoff = _archive_cutoff(older_than)
+    print(f"Archiving history rows before {cutoff}" + (" (dry run)" if dry_run else ""))
+    if prune_source and not dry_run:
+        print("  Note: pruning source rows bypasses the change bus — run this")
+        print("  against a stopped server so live subscribers stay consistent.")
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        for base, base_config in targets.items():
+            _archive_table(
+                conn, base, base_config, cutoff, out_dir,
+                delete=delete, prune_source=prune_source, dry_run=dry_run,
+            )
+        # Nothing is committed until every table is written, so a failure
+        # part-way through leaves the history exactly as it was.
+        if dry_run:
+            conn.rollback()
+        else:
+            conn.commit()
+    except (sqlite3.Error, OSError) as exc:
+        conn.rollback()
+        if _TRACEBACK:
+            raise
+        print(f"Error: {exc}")
+        sys.exit(1)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    print("  Done.")
+
+
+def _discard_redo(conn: Any, tables: dict) -> None:
+    """Drop every versioned table's redo stack, reporting what went.
+
+    Undo/redo state is deliberately transient: it survives until the next
+    maintenance run. Pass --keep-redo to leave it alone.
+    """
+    from mkio.migration import collect_redo_garbage
+
+    dropped = collect_redo_garbage(conn, tables)
+    if not dropped:
+        return
+    print()
+    for hist, (orphaned, dangling) in dropped.items():
+        parts = []
+        if orphaned:
+            parts.append(f"{orphaned:,} rows of fully undone records")
+        if dangling:
+            parts.append(f"{dangling:,} redo rows above the current version")
+        print(f"  Discarded redo history from {hist}: {', '.join(parts)}")
+    print("  These are no longer redo-able. Use --keep-redo to retain them.")
+    print()
+
+
+def _print_orphan_note(orphans: list[str]) -> None:
+    """Note history tables whose base table is no longer versioned."""
+    if not orphans:
+        return
+    print(f"  Note: history retained for tables no longer versioned: {', '.join(orphans)}")
+    print("  These are left in place. To remove them: mkio dbupdate --drop-history")
+    print()
 
 
 def _cmd_check() -> None:
@@ -1283,6 +1600,13 @@ async def _schema_request(
             if col["dflt_value"] is not None:
                 flags.append(f"default={col['dflt_value']}")
             print(f"{col['name']:<{name_w}}  {col['type']:<{type_w}}  {', '.join(flags)}")
+        if row.get("versioned"):
+            print()
+            print(f"  Versioned — changes are recorded in {row['history_table']}")
+            print(f"  e.g. mkio schema <url> {row['history_table']}")
+        elif row.get("history_of"):
+            print()
+            print(f"  History of {row['history_of']!r} — one row per recorded change")
 
 
 def _cmd_init() -> None:

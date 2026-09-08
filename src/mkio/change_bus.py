@@ -36,6 +36,10 @@ class ChangeBus:
         for table in tables:
             self._subscribers[table].discard(q)
 
+    def has_subscribers(self, table: str) -> bool:
+        """True if anything is listening for changes on ``table``."""
+        return bool(self._subscribers.get(table))
+
     def publish(self, events: list[ChangeEvent]) -> None:
         """Fan out events to subscribers. Drops on full queue (backpressure)."""
         for event in events:

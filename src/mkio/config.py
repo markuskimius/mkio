@@ -9,6 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from mkio.expr import compile_expression, compile_filter, compile_formatter
+from mkio.history import (
+    HISTORY_SUFFIX,
+    base_table_name,
+    effective_tables as _effective_tables,
+    history_table_configs,
+    is_history_table,
+    primary_key_columns,
+    versioned_tables,
+)
 
 
 log = logging.getLogger("mkio.config")
@@ -61,6 +70,8 @@ _VALID_SERVICE_KEYS: dict[str, frozenset[str]] = {
 
 _VALID_PROTOCOLS = frozenset({"transaction", "subpub", "stream", "query", "reqrep"})
 
+_VALID_TABLE_KEYS = frozenset({"columns", "primary_key", "seed", "versioned"})
+
 
 def load_config(source: str | Path | dict[str, Any]) -> dict[str, Any]:
     """Load and normalize a config from a TOML file path or dict."""
@@ -103,8 +114,14 @@ def load_config(source: str | Path | dict[str, Any]) -> dict[str, Any]:
     # Validate and resolve seed file paths on tables
     config_dir = config.get("_config_dir")
     for tbl_name, tbl_config in tables.items():
+        _validate_table(tbl_name, tbl_config)
         if "seed" in tbl_config:
             _validate_seed(tbl_name, tbl_config, config_dir)
+
+    # Derive history tables for versioned tables.  Stored under an underscore
+    # key so they stay out of config_hash and the _mkio service's table list —
+    # history tables are reachable by name but never advertised.
+    config["_history_tables"] = history_table_configs(config)
 
     # Warn about unknown top-level keys
     _warn_unknown_keys(
@@ -220,8 +237,8 @@ def _normalize_service(
     if "primary_table" in svc and "watch_tables" not in svc:
         svc["watch_tables"] = [svc["primary_table"]]
 
-    # Validate table references exist in config
-    tables = config.get("tables", {})
+    # Validate table references exist in config (history tables included)
+    tables = _effective_tables(config)
     _validate_table_refs(name, svc, tables)
 
     # Validate topic field exists in table columns
@@ -230,7 +247,7 @@ def _normalize_service(
 
     # Validate transaction ops
     if svc_type == "transaction":
-        _validate_transaction_ops(name, svc, tables)
+        _validate_transaction_ops(name, svc, tables, config)
 
     # Default change_log_size from global config
     if svc_type in ("subpub", "query"):
@@ -293,6 +310,26 @@ def _normalize_service(
         _validate_access(f"service '{name}'", svc["access"])
 
 
+def _unknown_table_error(context: str, table: str, tables: dict[str, Any]) -> str:
+    """Build the error message for a reference to a table that does not exist."""
+    if is_history_table(table):
+        base = base_table_name(table)
+        if base in tables:
+            return (
+                f"{context} {table!r} is the history table of {base!r}, "
+                f"but {base!r} is not versioned. Set versioned = true on "
+                f"[tables.{base}] to record its change history."
+            )
+        return (
+            f"{context} {table!r} is a history table name (the "
+            f"{HISTORY_SUFFIX!r} suffix), but there is no table {base!r} "
+            f"in [tables]."
+        )
+    visible = sorted(t for t in tables if not is_history_table(t))
+    available = ", ".join(visible) if visible else "(none defined)"
+    return f"{context} {table!r} not found in [tables]. Available tables: {available}"
+
+
 def _validate_table_refs(
     name: str, svc: dict[str, Any], tables: dict[str, Any]
 ) -> None:
@@ -300,20 +337,14 @@ def _validate_table_refs(
     # Check primary_table
     primary = svc.get("primary_table")
     if primary and primary not in tables:
-        available = ", ".join(sorted(tables.keys())) if tables else "(none defined)"
-        raise ValueError(
-            f"Service '{name}': primary_table {primary!r} "
-            f"not found in [tables]. Available tables: {available}"
-        )
+        raise ValueError(_unknown_table_error(
+            f"Service '{name}': primary_table", primary, tables))
 
     # Check watch_tables
     for wt in svc.get("watch_tables", []):
         if wt not in tables:
-            available = ", ".join(sorted(tables.keys())) if tables else "(none defined)"
-            raise ValueError(
-                f"Service '{name}': watch_tables entry {wt!r} "
-                f"not found in [tables]. Available tables: {available}"
-            )
+            raise ValueError(_unknown_table_error(
+                f"Service '{name}': watch_tables entry", wt, tables))
 
     # Check transaction op tables
     ops = svc.get("ops", [])
@@ -321,11 +352,8 @@ def _validate_table_refs(
     for spec in op_list:
         t = spec.get("table", "")
         if t and t not in tables:
-            available = ", ".join(sorted(tables.keys())) if tables else "(none defined)"
-            raise ValueError(
-                f"Service '{name}': op references table {t!r} "
-                f"not found in [tables]. Available tables: {available}"
-            )
+            raise ValueError(_unknown_table_error(
+                f"Service '{name}': op references table", t, tables))
 
 
 def _validate_topic_field(
@@ -349,7 +377,8 @@ def _validate_topic_field(
 
 
 def _validate_transaction_ops(
-    name: str, svc: dict[str, Any], tables: dict[str, Any]
+    name: str, svc: dict[str, Any], tables: dict[str, Any],
+    config: dict[str, Any] | None = None,
 ) -> None:
     """Validate transaction op specs against table schemas."""
     ops = svc.get("ops", [])
@@ -358,8 +387,10 @@ def _validate_transaction_ops(
     else:
         all_op_sets = [("default", ops)]
 
-    valid_op_types = ("insert", "update", "delete", "upsert")
+    valid_op_types = ("insert", "update", "delete", "upsert", "undo", "redo")
+    versioned = versioned_tables(config)
 
+    config = config or {}
     for op_name, op_list in all_op_sets:
         if not isinstance(op_list, list):
             raise ValueError(
@@ -372,12 +403,25 @@ def _validate_transaction_ops(
 
             if not table:
                 raise ValueError(f"{step_label}: missing 'table' field")
+            if is_history_table(table):
+                raise ValueError(
+                    f"{step_label}: table {table!r} is a history table and is "
+                    f"read-only — it records changes to "
+                    f"{base_table_name(table)!r} and cannot be written to "
+                    f"directly. Use 'mkio archive' to prune it."
+                )
             if not op_type:
                 raise ValueError(f"{step_label}: missing 'op_type' field")
             if op_type not in valid_op_types:
                 raise ValueError(
                     f"{step_label}: unknown op_type {op_type!r}. "
                     f"Valid types: {', '.join(valid_op_types)}"
+                )
+
+            if op_type in ("undo", "redo") and table not in versioned:
+                raise ValueError(
+                    f"{step_label}: op_type {op_type!r} needs table {table!r} to be "
+                    f"versioned. Set versioned = true on [tables.{table}]."
                 )
 
             # Validate fields and key against table columns (skip if table not in config)
@@ -447,12 +491,63 @@ def _validate_transaction_ops(
                         f"{', '.join(sorted(columns))}.{hint}"
                     )
 
-            # Validate key required for update/delete/upsert
-            if op_type in ("update", "delete", "upsert") and not spec.get("key"):
+            # Validate key required for ops that address existing rows
+            if op_type in ("update", "delete", "upsert", "undo", "redo") and not spec.get("key"):
                 raise ValueError(
                     f"{step_label}: op_type {op_type!r} requires a 'key' "
                     f"field to identify which rows to {op_type}"
                 )
+
+            # undo/redo restore recorded values — they take no fields
+            if op_type in ("undo", "redo") and spec.get("fields"):
+                raise ValueError(
+                    f"{step_label}: op_type {op_type!r} takes no 'fields' — it "
+                    f"restores the values recorded in the history table"
+                )
+            if op_type in ("undo", "redo"):
+                pk = primary_key_columns(tables.get(table, {}))
+                if sorted(spec.get("key", [])) != sorted(pk):
+                    raise ValueError(
+                        f"{step_label}: op_type {op_type!r} must key on the full "
+                        f"primary key of {table!r} ({', '.join(pk)}), "
+                        f"got {', '.join(spec.get('key', [])) or '(none)'}"
+                    )
+
+
+def _validate_table(table_name: str, table_config: dict[str, Any]) -> None:
+    """Validate a [tables] entry: reserved names, columns, and 'versioned'."""
+    if is_history_table(table_name):
+        raise ValueError(
+            f"Table {table_name!r}: the {HISTORY_SUFFIX!r} suffix is reserved "
+            f"for history tables of versioned tables. Rename the table, and set "
+            f"versioned = true on {base_table_name(table_name)!r} to get a "
+            f"history table."
+        )
+
+    versioned = table_config.get("versioned", False)
+    if not isinstance(versioned, bool):
+        raise ValueError(
+            f"Table {table_name!r}: 'versioned' must be true or false, "
+            f"got {versioned!r}"
+        )
+
+    if versioned:
+        reserved = [c for c in table_config.get("columns", {}) if c.startswith("_mkio_")]
+        if reserved:
+            raise ValueError(
+                f"Table {table_name!r}: versioned tables cannot declare "
+                f"'_mkio_'-prefixed columns ({', '.join(reserved)}) — those names "
+                f"are used by the framework's version tracking."
+            )
+        if not primary_key_columns(table_config):
+            raise ValueError(
+                f"Table {table_name!r}: versioned tables need a primary key — "
+                f"the history table is keyed by (primary key, _mkio_version). "
+                f"Add PRIMARY KEY to a column, or a primary_key = [...] entry."
+            )
+
+    _warn_unknown_keys(f"table '{table_name}'", table_config, _VALID_TABLE_KEYS,
+                       exclude_prefixes=("_",))
 
 
 _VALID_ACCESS_STRINGS = frozenset({"open", "auth"})
@@ -533,7 +628,7 @@ def _validate_filterable(
         watch_tables = [svc["primary_table"]]
 
     all_columns: set[str] = set()
-    tables = config.get("tables", {})
+    tables = _effective_tables(config)
     for table_name in watch_tables:
         table_config = tables.get(table_name, {})
         all_columns.update(table_config.get("columns", {}).keys())

@@ -10,6 +10,7 @@ from typing import Any
 
 import aiosqlite
 
+from mkio.history import VERSION_COLUMN, VERSION_COLUMN_DEF, history_create_sql
 from mkio.migration import check_schema, migrate_schema
 
 
@@ -18,10 +19,18 @@ class Database:
         self._path = path
         self._tables = tables
         self._config = config or {}
+        # Derived history tables of versioned tables — created and migrated
+        # alongside the configured ones, but never advertised.
+        self._history_tables = self._config.get("_history_tables", {})
         self._skip_migration = skip_migration
         self._write_conn: aiosqlite.Connection | None = None
         self._read_conn: aiosqlite.Connection | None = None
         self._checkpoint_task: asyncio.Task[None] | None = None
+
+    @property
+    def _all_tables(self) -> dict[str, dict]:
+        """Configured tables plus derived history tables."""
+        return {**self._tables, **self._history_tables}
 
     async def start(self) -> None:
         """Open connections, run migration, set pragmas."""
@@ -58,7 +67,9 @@ class Database:
                 )).close()
             await self._write_conn.commit()
 
-        # Add internal _mkio_ref column to all tables (for cross-restart recovery)
+        # Add internal _mkio_ref column to all tables (for cross-restart
+        # recovery).  History tables are absent here — they declare _mkio_ref
+        # themselves and carry their own indexes.
         for table_name in self._tables:
             try:
                 await (await self._write_conn.execute(
@@ -82,6 +93,34 @@ class Database:
                     await async_seed_table(self._write_conn, name, seed_path, table_columns)
             await self._write_conn.commit()
 
+        # Version counter on versioned base tables (on-disk databases get it
+        # during migration; in-memory ones are built here).
+        for hist_cfg in self._history_tables.values():
+            try:
+                await (await self._write_conn.execute(
+                    f"ALTER TABLE {hist_cfg['_history_of']} "
+                    f"ADD COLUMN {VERSION_COLUMN} {VERSION_COLUMN_DEF}"
+                )).close()
+            except Exception:
+                pass  # Column already exists
+        await self._write_conn.commit()
+
+        # History tables for versioned tables.  Created after seeding so that
+        # seeded rows are captured by the baseline backfill below.
+        if is_memory and self._history_tables:
+            from mkio.history import OP_BASELINE, baseline_sql
+            from mkio._ref import next_ref
+            for hist_name, hist_cfg in self._history_tables.items():
+                base = hist_cfg["_history_of"]
+                base_cfg = self._tables.get(base, {})
+                for sql in history_create_sql(base, base_cfg):
+                    await (await self._write_conn.execute(sql)).close()
+                await (await self._write_conn.execute(
+                    baseline_sql(base, base_cfg, has_ref=True),
+                    (OP_BASELINE, next_ref()),
+                )).close()
+            await self._write_conn.commit()
+
         # Start periodic WAL checkpoint
         interval = self._config.get("wal_checkpoint_interval_s", 300)
         if interval > 0 and not is_memory:
@@ -102,7 +141,7 @@ class Database:
                 level = auto_migrate if isinstance(auto_migrate, str) else "safe"
                 success = migrate_schema(
                     conn=conn,
-                    config_tables=self._tables,
+                    config_tables=self._all_tables,
                     db_path=self._path,
                     level=level,
                 )
@@ -110,7 +149,7 @@ class Database:
                     conn.close()
                     raise SystemExit(1)
             else:
-                changes = check_schema(conn, self._tables)
+                changes = check_schema(conn, self._all_tables)
                 if changes:
                     from mkio.migration import print_change_summary
                     print_change_summary(changes, self._path, conn)

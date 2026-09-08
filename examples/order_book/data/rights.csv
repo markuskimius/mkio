@@ -1,4 +1,5 @@
 role,right
 trader,view
 trader,trade
+trader,audit
 viewer,view

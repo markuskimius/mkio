@@ -10,6 +10,7 @@ import aiohttp
 
 from mkio._json import dumps, loads
 from mkio._ref import next_ref as make_ref
+from mkio.history import history_table  # noqa: F401  (re-exported for clients)
 
 
 # ---------------------------------------------------------------------------

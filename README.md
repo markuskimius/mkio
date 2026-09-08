@@ -14,6 +14,7 @@ A single TCP port serves HTTP and WebSocket, backed by an embedded SQLite databa
 - [Features](#features)
 - [Authentication & Access Control](#authentication--access-control)
 - [Programmatic API](#programmatic-api)
+- [Versioned Tables](#versioned-tables)
 - [Service Types](#service-types)
 - [WebSocket Protocol](#websocket-protocol)
 - [Client Libraries](#client-libraries)
@@ -79,6 +80,7 @@ For programmatic control (custom routes, non-blocking lifecycle), see [Programma
 - **Query** — snapshot + change feed from SQLite
 - **ReqRep** — one-shot request-reply with parameterized SQL and/or expression evaluation, returning scalar values, single records, or result sets
 - **Expression language** — one safe, extensible language for filters and formatters (`qty > 100 && status == 'pending'`), implemented identically in Python and JavaScript
+- **Versioned tables** — set `versioned = true` on a table and every row gets a `_mkio_version` counter and a full history of its versions in `<table>__history`, stamped with the ref, the user and the service. Built-in `undo`/`redo` ops step a row along its own history; `mkio archive` moves old versions to CSV
 - **Schema migration** — automatic detection of safe/destructive changes with interactive confirmation
 - **Write batching** — hundreds of writes committed in a single SQLite transaction for high throughput
 - **Reconnection recovery** — stream services use ref-based cursor reconnection persisted across server restarts via `_mkio_ref` column; subpub and query always replay a full snapshot
@@ -265,8 +267,9 @@ asyncio.run(main())
 | `on_connect(callback)` | Register an async `(ws) -> None` callback invoked when a WebSocket client connects. |
 | `on_disconnect(callback)` | Register an async `(ws) -> None` callback invoked when a WebSocket client disconnects. |
 | `on_auth(callback)` | Register a custom async auth handler `(data) -> {"user", "role", ...}`. Overrides table-backed auth. Raise to reject. |
-| `async execute(service, data, *, op=None)` | Submit a transaction through the write path. Returns `{"ok": True, "ref": "..."}`. |
+| `async execute(service, data, *, op=None, user=None)` | Submit a transaction through the write path. Returns `{"ok": True, "ref": "..."}`. `user` is recorded on history rows of [versioned tables](#versioned-tables). |
 | `async query(sql, params=())` | Read query on the read connection. Returns `list[dict]`. |
+| `async history(table, *, pk=None, since=None, until=None, limit=1000, newest_first=False)` | Recorded versions of a [versioned table](#versioned-tables). Returns `list[dict]`. |
 | `async subscribe(tables, callback)` | Subscribe to `ChangeEvent`s. Returns an unsubscribe function. |
 | `async start()` | Non-blocking start — runs migration, preflight, binds the port. |
 | `async stop()` | Graceful shutdown — drains writes, closes WebSockets, checkpoints DB. Idempotent. |
@@ -329,6 +332,13 @@ async def on_change(event: ChangeEvent):
 
 unsub = await app.subscribe(["orders"], on_change)
 # later: unsub()
+
+# Recorded versions, if the table is versioned
+versions = await app.history("orders", pk={"id": "O1"})
+
+# Step the row back and forward along them (ops declared in config)
+await app.execute("orders", {"id": "O1"}, op="undo")
+await app.execute("orders", {"id": "O1"}, op="redo")
 ```
 
 ### Lifecycle hooks
@@ -396,6 +406,195 @@ created = init("./api-only", no_static=True)
 ```
 
 Raises `FileExistsError` if `server.toml` already exists in the target directory.
+
+## Versioned Tables
+
+Set `versioned = true` on a table and mkio numbers every version of every row, keeping them all in a companion **history table**. Rows can then be stepped backwards and forwards along their own history — undo and redo — and the trail is there for audit.
+
+```toml
+[tables.orders]
+columns = { id = "TEXT PRIMARY KEY", symbol = "TEXT", qty = "INTEGER", status = "TEXT" }
+versioned = true
+```
+
+Then run `mkio dbupdate` to create the history table (or set `auto_migrate`). A versioned table must have a primary key, since the history table is keyed by it.
+
+### The model: a cursor over recorded versions
+
+```
+history for "O1":   v1 ── v2 ── v3 ── v4      (contiguous, 1..N)
+base row:                        ▲
+                          _mkio_version = 3    (the cursor)
+                                      └── v4 is redo, still reachable
+```
+
+Every versioned row carries a `_mkio_version` counter: **1** when inserted, **+1** on every edit. The base row's source columns always equal the history row with the same key and that version number — normally the highest one. After an undo the cursor sits lower, and the versions above it remain as redo.
+
+An absent base row means the cursor is at 0: the row was undone past version 1, and redo can rebuild it.
+
+### What a history row holds
+
+| Column | Description |
+|--------|-------------|
+| `_mkio_version` | Version number; part of the primary key with the base table's own key |
+| `_mkio_op` | `insert`, `update`, or `baseline` |
+| `_mkio_ref` | Ref of the transaction that recorded this version |
+| `_mkio_user` | Authenticated user who made it (`NULL` when auth is disabled) |
+| `_mkio_service` | Service the change came through |
+| *(source columns)* | The row as it stood at that version |
+
+Source columns keep their types but drop every constraint — an old version must be storable even when it would violate the constraints the base table carries today.
+
+`baseline` rows are written once, when versioning is switched on for a table that already holds data: existing rows become version 1 so they have something to step back onto. The history table is otherwise **additive-only** across schema changes: a column added to the base table is added here too, but one dropped or retyped keeps its recorded values.
+
+### Undo and redo
+
+Two op types move the cursor. They take only the key — the values come from the history table — and record no new version, so a step is always reversible:
+
+```toml
+[services.orders.ops]
+undo = [{ table = "orders", op_type = "undo", key = ["id"] }]
+redo = [{ table = "orders", op_type = "redo", key = ["id"] }]
+```
+
+```python
+await app.execute("orders", {"id": "O1"}, op="undo")
+await app.execute("orders", {"id": "O1"}, op="redo")
+```
+
+| Situation | `undo` | `redo` |
+|---|---|---|
+| Cursor at V > 1 | step back to V−1 | — |
+| Cursor at V, version V+1 recorded | — | step forward to V+1 |
+| Cursor at 1 | **delete the row**, keeping its history | — |
+| Row absent, version 1 recorded | — | **rebuild the row** at version 1 |
+| Nothing left to step onto | error: `nothing to undo` | error: `nothing to redo` |
+
+Subscribers see ordinary row changes: an undo that removes a row emits a `delete`, a redo that rebuilds one emits an `insert`. Undo and redo compose with the rest of a transaction, so a bound `audit_log` entry works the way it does for any other op.
+
+### Editing after an undo discards the redo branch
+
+Writing at version V removes the recorded versions at V and above. So an edit made while the cursor sits below the top abandons everything above it — the same as typing after undoing in an editor:
+
+```
+v1 ── v2 ── v3        undo, undo        v1 ── v2 ── v3        edit        v1 ── v2 ── v3'
+            ▲                            ▲                                      ▲
+```
+
+A fresh `insert` is version 1, so it discards the whole prior chain — which is what makes "undo to nothing, then insert again" behave sensibly. A `delete` is a real delete: the row goes and its history goes with it.
+
+**This means truncation destroys audit history.** If you need the abandoned versions kept for audit, record application events separately — the `order_book` example's `audit_log` pattern does exactly that, and survives truncation because it is an ordinary table.
+
+### Redo state is transient
+
+`mkio dbupdate` discards every redo entry: versions above a live row's cursor, and the history of rows undone past version 1. It reports what went, and `--keep-redo` skips it:
+
+```
+  Discarded redo history from orders__history: 7 rows of fully undone records,
+  12 redo rows above the current version
+  These are no longer redo-able. Use --keep-redo to retain them.
+```
+
+Restarting a server never does this, even with `auto_migrate` — only the explicit command.
+
+### Naming convention
+
+The history table is always `<table>__history` — `orders` becomes `orders__history`, which sorts right next to it when you browse the schema. The `__history` suffix is reserved: mkio refuses to start if an application table ends in it, so it can never clash with one of yours. Only a *trailing* `__history` is reserved, so `history_of_orders` and `__history_log` are ordinary names.
+
+Because the convention is fixed, a client that knows the base table can reach its history without being told the name:
+
+```python
+from mkio import history_table
+history_table("orders")     # "orders__history"
+```
+
+```javascript
+mkio.historyTable("orders") // "orders__history"
+```
+
+The server reports the convention at runtime too — the `_mkio` reply carries `versioned` (which tables are recorded) and `history_suffix`.
+
+### Visibility
+
+mkio never advertises a history table on its own. It is absent from the `_mkio` service's `tables` list and from the available-tables list in error messages, and no service exists for it unless you write one. It *is* reachable by anyone who knows the name:
+
+```bash
+mkio schema localhost:8080 orders__history
+```
+
+To expose history to your users, configure an ordinary service on it — with its own `access` rule, so audit visibility is a permission like any other. Such a service appears in `GET /api/services` and `mkio services` like any other, naming the history table as its `primary_table`; that is deliberate, since you wrote it:
+
+```toml
+[services.order_history]
+protocol = "query"
+primary_table = "orders__history"
+filterable = ["id", "_mkio_user", "_mkio_op"]
+access = "audit"
+```
+
+Subscribers to such a service receive new versions live as they are recorded. Transaction ops targeting a history table are rejected at config load — history is written only by the framework.
+
+### Reading history
+
+```python
+# Every recorded version, oldest first
+await app.history("orders")
+
+# One row's versions — compare _mkio_version against the live row's to see
+# where the cursor sits and what is still redoable
+await app.history("orders", pk={"id": "O1"})
+
+# A window, newest first
+await app.history("orders", since=start_ref, until=end_ref, limit=50, newest_first=True)
+```
+
+### Archiving
+
+`mkio archive` writes versions older than a cutoff to CSV, and optionally purges them. Refs sort lexicographically, so the age cutoff is an indexed range scan.
+
+```bash
+# See what would be archived
+mkio archive server.toml --older-than 90d --out ./archive --dry-run
+
+# Write the CSV and keep the history
+mkio archive server.toml --older-than 90d --out ./archive
+
+# Write the CSV, then purge the archived versions
+mkio archive server.toml --older-than 90d --out ./archive --delete
+
+# Also delete live rows the archive fully captured
+mkio archive server.toml --older-than 90d --out ./archive --prune-source --yes
+```
+
+**Archiving a version removes that much undo depth** — the archived versions are no longer there to step back onto. By default the version a live row currently sits on is never archived; archiving it would leave the row pointing at a version that no longer exists.
+
+The CSV is written and fsynced *before* anything is deleted, and the whole run is one transaction — a failed write archives nothing and deletes nothing. Files are named `orders__history_<first-ref>_<last-ref>.csv` and include `_mkio_version`, so an archive can be re-imported.
+
+`--prune-source` lifts the cursor guard for rows whose whole chain predates the cutoff, and deletes the live row when all three hold:
+
+1. its entire chain was just archived,
+2. the newest archived version is the one the row sits on, and
+3. every column of that version — `_mkio_version` included — matches the live row exactly.
+
+It implies `--delete` and requires `--yes`. Run it against a stopped server: pruning bypasses the change bus, so live subscribers would not see the removals.
+
+| Flag | Effect |
+|------|--------|
+| `--older-than <N>d\|<ref>` | Cutoff. `90d` counts back from now (`h`/`m` also work); anything else is a literal ref, so a bare `20260101` means "before that date" |
+| `--table <name>` | Archive one table (base or history name); defaults to every versioned table |
+| `--out <dir>` | Where to write CSVs (default: current directory) |
+| `--delete` | Purge the archived versions |
+| `--prune-source` | Also delete fully-archived, unchanged live rows |
+| `--dry-run` | Report what would happen, change nothing |
+| `--yes` | Confirm `--prune-source` |
+
+### Turning versioning off
+
+Removing `versioned = true` stops recording. The history table is **never** dropped automatically, so no destructive change is queued and the server keeps starting. `mkio dbupdate` notes the retained table; remove it deliberately with `mkio dbupdate --drop-history`.
+
+### Scope
+
+Versioning covers every write through mkio's write path — the transaction services and `MkioApp.execute()`. Writes made to the database file by another process are not recorded, and would leave the counter and the history out of step. Capture happens inside the same SAVEPOINT as the change itself, so a rolled-back transaction records nothing.
 
 ## Service Types
 
@@ -530,11 +729,13 @@ Reply:
   "row": {
     "name": "order-book-dev",
     "version": "2.1.0",
-    "mkio": "0.2.0",
-    "protocol": "1.0",
+    "mkio": "0.3.0",
+    "protocol": "1.1",
     "expr": "1",
     "services": {"orders": "transaction", "last_trade": "subpub", "all_orders": "query"},
     "tables": ["orders", "audit_log"],
+    "versioned": ["orders"],
+    "history_suffix": "__history",
     "config_hash": "a3f7c2b1",
     "uptime": 3621.4,
     "started": "20260517 08:12:03.000000000000"
@@ -551,6 +752,8 @@ Reply:
 | `expr` | Expression language version (exact match required) |
 | `services` | Map of service name → protocol type |
 | `tables` | List of configured table names |
+| `versioned` | Base tables whose changes are recorded — see [Versioned Tables](#versioned-tables) |
+| `history_suffix` | Suffix for deriving a versioned table's history table name |
 | `config_hash` | Short hex hash of the running config (detects config drift) |
 | `uptime` | Seconds since server startup |
 | `started` | Server startup time as a ref string |
@@ -571,7 +774,7 @@ Clients can check whether they're compatible with the server by sending expected
 
 ```json
 {"type": "request", "service": "_mkio", "reqid": "v1",
- "data": {"version": "2.0.0", "protocol": "1.0", "mkio": "0.2.0", "expr": "1"}}
+ "data": {"version": "2.0.0", "protocol": "1.0", "mkio": "0.3.0", "expr": "1"}}
 ```
 
 Reply:
@@ -580,7 +783,7 @@ Reply:
 {
   "type": "reply", "service": "_mkio", "reqid": "v1",
   "row": {
-    "name": "order-book-dev", "version": "2.3.0", "mkio": "0.2.0", "protocol": "1.0", "expr": "1",
+    "name": "order-book-dev", "version": "2.3.0", "mkio": "0.3.0", "protocol": "1.1", "expr": "1",
     "compatible": true,
     "compatibility": {"version": true, "protocol": true, "mkio": true, "expr": true},
     ...
@@ -630,6 +833,8 @@ Reply:
 ```
 
 Unknown tables return an error listing available tables. From the CLI: `mkio schema 8080 orders`. From the browser console: `mkio.schema("orders")`.
+
+A [versioned table's](#versioned-tables) reply also carries `"versioned": true` and `"history_table": "orders__history"`; querying the history table by name works too and replies with `"history_of": "orders"`. History tables are not listed among the available tables, so they stay out of listings while remaining reachable by anyone who knows the convention.
 
 ## WebSocket Protocol
 
@@ -728,6 +933,12 @@ async with MkioClient("ws://localhost:8080/ws") as client:
     # ReqRep — one-shot request-reply (auto-generates reqid)
     result = await client.request("tax", {"qty": 10, "price": 99.95, "rate": 0.08})
     print(result)  # {"type": "reply", "value": 79.96, ...}
+
+    # A versioned table's history table, by convention
+    from mkio.client import history_table
+    async for msg in client.subscribe("order_history", "query",
+                                      filter="_mkio_user == 'alice'"):
+        print(msg)  # versions from history_table("orders")
 ```
 
 ### JavaScript
@@ -819,6 +1030,7 @@ mkio.query("all_orders", {updateOnly: true, fields:["id","status"]})
 mkio.reqrep("tax", {qty: 10, price: 99.95, rate: 0.08})
 mkio.reqrep("search", {symbol: "AAPL"})
 mkio.schema("orders")                   // table schema (columns, types, keys)
+mkio.historyTable("orders")             // "orders__history"
 ```
 
 All subscribe methods return a `MkioSubscription` with `.stop()`. Nack responses are logged to the console by default. Console commands auto-generate `subid` (subscriptions) and `txnid` (sends) with a `_mkio_` prefix so they never intercept messages meant for the application.
@@ -1095,6 +1307,16 @@ mkio reqrep localhost:8080 tax '{"qty": 10, "price": 99.95, "rate": 0.08}'
 mkio reqrep localhost:8080 search symbol=AAPL
 ```
 
+### Archive change history
+
+Write a [versioned table's](#versioned-tables) old versions to CSV, optionally purging them:
+
+```bash
+mkio archive server.toml --older-than 90d --out ./archive --dry-run
+mkio archive server.toml --older-than 90d --out ./archive --delete
+mkio archive server.toml --older-than 90d --out ./archive --prune-source --yes
+```
+
 ### Monitor traffic
 
 Tap into inbound and outbound message flow in real time. Monitor a single service or all services at once:
@@ -1122,15 +1344,18 @@ The monitor protocol is a native framework feature — any mkio application supp
 ### Inspect table schema
 
 ```bash
-mkio schema localhost:8080 orders          # Show columns, types, keys, defaults
+mkio schema localhost:8080 orders                 # Show columns, types, keys, defaults
+mkio schema localhost:8080 orders__history   # A versioned table's history schema
 ```
 
 ### Schema management
 
 ```bash
-mkio dbupdate                       # Apply safe schema changes
+mkio dbupdate                       # Apply safe schema changes (discards redo state)
 mkio dbupdate --allow-risky         # Include potentially destructive changes
 mkio dbupdate --allow-destructive   # Include all changes
+mkio dbupdate --drop-history        # Drop history tables no longer versioned
+mkio dbupdate --keep-redo           # Keep pending undo/redo state
 mkio dbupdate custom.toml           # Use a specific config file
 ```
 
@@ -1238,7 +1463,13 @@ By default, `mkio serve` refuses to start if the database schema differs from co
 mkio dbupdate                       # Apply safe changes only
 mkio dbupdate --allow-risky         # Also apply potentially destructive changes
 mkio dbupdate --allow-destructive   # Apply all changes (including data loss)
+mkio dbupdate --drop-history        # Also drop history tables no longer versioned
+mkio dbupdate --keep-redo           # Do not discard pending redo state
 ```
+
+History tables of [versioned tables](#versioned-tables) migrate alongside their base table. Creating one, adding the `_mkio_version` counter and backfilling the baseline is a safe change, as is adding a column that was added to the base. A column dropped or retyped on the base table produces no change at all — history is additive-only. A history table is never proposed for removal, so turning `versioned` off does not queue a destructive change or block startup; use `--drop-history` when you actually want it gone.
+
+`mkio dbupdate` also discards pending redo state — versions above a live row's cursor, and the history of rows undone past version 1 — reporting what it dropped. Pass `--keep-redo` to leave it in place.
 
 For automatic migration on startup, set `auto_migrate` in config:
 

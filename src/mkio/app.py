@@ -182,6 +182,7 @@ class MkioApp:
         data: dict[str, Any],
         *,
         op: str | None = None,
+        user: str | None = None,
     ) -> dict[str, Any]:
         """Submit a transaction through the write path.
 
@@ -192,6 +193,9 @@ class MkioApp:
             service: Name of a transaction service.
             data: Row data dict.
             op: Op name (required if the service has named ops).
+            user: Attribution recorded on history rows for versioned tables.
+                  A WS client's authenticated user is filled in automatically;
+                  supply it here for writes made on a user's behalf.
 
         Returns:
             ``{"ok": True, "ref": "..."}``
@@ -219,7 +223,9 @@ class MkioApp:
             msg["op"] = op
         compiled_ops = svc._resolve_ops(msg)
         params_list = tuple(_extract_params(o, data) for o in compiled_ops)
-        return await writer.submit(compiled_ops, params_list, data)
+        return await writer.submit(
+            compiled_ops, params_list, data, user=user, service=service
+        )
 
     async def query(
         self,
@@ -242,6 +248,77 @@ class MkioApp:
         if db is None:
             raise RuntimeError("Server is not running")
         return await db.read(sql, params)
+
+    async def history(
+        self,
+        table: str,
+        *,
+        pk: dict[str, Any] | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        limit: int = 1000,
+        newest_first: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Read recorded versions of a versioned table, oldest first.
+
+        Each row is one version: ``_mkio_version`` is its number, ``_mkio_op``
+        how it came about (``insert``/``update``, or ``baseline`` for a row that
+        already existed when versioning was switched on), ``_mkio_ref`` when,
+        ``_mkio_user`` and ``_mkio_service`` by whom, and the remaining columns
+        hold the row as it stood at that version.
+
+        The live row's own ``_mkio_version`` says which of these it currently
+        sits on; versions above it are redo entries left by an undo.
+
+        Args:
+            table: A versioned base table (its history table is also accepted).
+            pk: Column/value pairs narrowing the result to one row's versions,
+                e.g. ``{"id": "O1"}``.
+            since: Only versions recorded at or after this ref.
+            until: Only versions recorded strictly before this ref.
+            limit: Maximum rows to return.
+            newest_first: Return the highest versions first.  Combined with
+                ``limit`` this reads the tail of a long history.
+
+        Raises:
+            RuntimeError: If the server is not running.
+            ValueError: If the table is not versioned.
+        """
+        from mkio.history import base_table_name, history_table_name, versioned_tables
+
+        base = base_table_name(table)
+        if base not in versioned_tables(self._config):
+            available = ", ".join(sorted(versioned_tables(self._config))) or "(none)"
+            raise ValueError(
+                f"Table {table!r} is not versioned. Versioned tables: {available}"
+            )
+
+        where: list[str] = []
+        params: dict[str, Any] = {}
+        for col, value in (pk or {}).items():
+            where.append(f"{col} = :pk_{col}")
+            params[f"pk_{col}"] = value
+        if since is not None:
+            where.append("_mkio_ref >= :since")
+            params["since"] = since
+        if until is not None:
+            where.append("_mkio_ref < :until")
+            params["until"] = until
+
+        from mkio.history import VERSION_COLUMN, primary_key_columns
+
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        direction = "DESC" if newest_first else "ASC"
+        key_cols = primary_key_columns(self._config["tables"][base])
+        order = ", ".join(
+            f"{c} {direction}" for c in key_cols + [VERSION_COLUMN]
+        )
+        sql = (
+            f"SELECT * FROM {history_table_name(base)}{clause} "
+            f"ORDER BY {order} LIMIT :limit"
+        )
+        params["limit"] = limit
+        return await self.query(sql, params)
 
     async def subscribe(
         self,

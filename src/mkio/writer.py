@@ -10,18 +10,21 @@ from typing import Any
 from mkio._ref import next_ref
 from mkio.change_bus import ChangeBus, ChangeEvent
 from mkio.database import Database
+from mkio.history import HistorySpec, VersionPlan
 
 
 @dataclass(frozen=True, slots=True)
 class CompiledOp:
     table: str
-    op_type: str  # "insert" | "update" | "delete" | "upsert"
+    op_type: str  # "insert" | "update" | "delete" | "upsert" | "undo" | "redo"
     sql: str
     param_names: tuple[str, ...]
     bind: dict[str, tuple[int, str]] = field(default_factory=dict)
     # bind: param_name -> (op_index, field_name) for cross-op references
     defaults: dict[str, Any] = field(default_factory=dict)
     # defaults: param_name -> static value (client doesn't need to provide)
+    plan: VersionPlan | None = None
+    # plan: two-step cursor move for undo/redo, in place of a single `sql`
 
 
 @dataclass(slots=True)
@@ -31,6 +34,8 @@ class WriteRequest:
     data: dict[str, Any]
     future: asyncio.Future[dict[str, Any]]
     ref: str | None = None
+    user: str | None = None      # authenticated user, recorded in history
+    service: str | None = None   # originating service, recorded in history
 
 
 class WriteBatcher:
@@ -40,14 +45,29 @@ class WriteBatcher:
         change_bus: ChangeBus,
         batch_max_size: int = 500,
         batch_max_wait_ms: float = 2.0,
+        versioned: dict[str, HistorySpec] | None = None,
+        versioned_configs: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self._db = db
         self._bus = change_bus
         self._batch_max_size = batch_max_size
         self._batch_max_wait_ms = batch_max_wait_ms
+        # base table -> history capture spec (empty when nothing is versioned)
+        self._versioned: dict[str, HistorySpec] = versioned or {}
+        self._versioned_configs: dict[str, dict[str, Any]] = versioned_configs or {}
         self._queue: asyncio.Queue[WriteRequest] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
         self._stopping = False
+
+    @property
+    def versioned_tables(self) -> frozenset[str]:
+        """Base tables whose changes are captured to a history table."""
+        return frozenset(self._versioned)
+
+    @property
+    def versioned_configs(self) -> dict[str, dict[str, Any]]:
+        """Table configs of the versioned tables, for compiling version ops."""
+        return self._versioned_configs
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._run())
@@ -84,13 +104,22 @@ class WriteBatcher:
         params_list: tuple[tuple[Any, ...], ...],
         data: dict[str, Any],
         ref: str | None = None,
+        user: str | None = None,
+        service: str | None = None,
     ) -> dict[str, Any]:
-        """Submit a write request. Returns when the write commits."""
+        """Submit a write request. Returns when the write commits.
+
+        ``user`` and ``service`` are recorded on history rows for versioned
+        tables and are otherwise unused.
+        """
         if self._stopping:
             raise RuntimeError("Writer is stopping, no new submissions accepted")
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
-        req = WriteRequest(ops=ops, params_list=params_list, data=data, future=future, ref=ref)
+        req = WriteRequest(
+            ops=ops, params_list=params_list, data=data, future=future,
+            ref=ref, user=user, service=service,
+        )
         self._queue.put_nowait(req)
         return await future
 
@@ -149,6 +178,86 @@ class WriteBatcher:
 
         return batch
 
+    async def _execute_version_op(
+        self,
+        conn: Any,
+        op: CompiledOp,
+        req: WriteRequest,
+        ref: str,
+    ) -> tuple[dict[str, Any], str]:
+        """Move a row's version cursor for an undo or redo.
+
+        Runs the plan's primary statement — step back or forward onto an
+        adjacent recorded version — and falls back to the edge case: undo at
+        version 1 removes the row, redo from an absent row rebuilds version 1.
+        History is left untouched either way, so the step stays reversible.
+        """
+        plan = op.plan
+        assert plan is not None
+        for sql, names, emit_op in (
+            (plan.primary_sql, plan.primary_params, plan.primary_op),
+            (plan.fallback_sql, plan.fallback_params, plan.fallback_op),
+        ):
+            params = tuple(
+                ref if n == "_mkio_ref" else req.data[n] for n in names
+            )
+            cursor = await conn.execute(sql, params)
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is not None:
+                return dict(row), emit_op
+        raise ValueError(
+            f"{plan.empty_message}: no recorded version for the given key "
+            f"in {op.table!r}"
+        )
+
+    async def _capture_history(
+        self,
+        conn: Any,
+        hist: HistorySpec,
+        op: CompiledOp,
+        rows: list[dict[str, Any]],
+        req: WriteRequest,
+        ref: str,
+    ) -> list[ChangeEvent]:
+        """Record changed rows in a history table, inside the caller's SAVEPOINT.
+
+        Writing at version V first discards the recorded versions at V and
+        above: an edit made after an undo abandons the redo branch it left
+        behind.  A delete drops the row's history outright.
+
+        Returns change events for the history table, but only when something is
+        subscribed to it — the common case pays nothing for the feed.
+        """
+        publish = self._bus.has_subscribers(hist.table)
+        captured: list[ChangeEvent] = []
+        for row_data in rows:
+            if op.op_type == "delete":
+                await (await conn.execute(
+                    hist.truncate_all_sql, hist.key_params(row_data)
+                )).close()
+                continue
+            await (await conn.execute(
+                hist.truncate_sql, hist.truncate_params(row_data)
+            )).close()
+            await (await conn.execute(
+                hist.insert_sql,
+                hist.insert_params(row_data, op.op_type, ref, req.user, req.service),
+            )).close()
+            if publish:
+                hist_row = {
+                    "_mkio_version": row_data.get("_mkio_version"),
+                    "_mkio_op": op.op_type,
+                    "_mkio_ref": ref,
+                    "_mkio_user": req.user,
+                    "_mkio_service": req.service,
+                    **{c: row_data.get(c) for c in hist.columns},
+                }
+                captured.append(
+                    ChangeBus.make_event(hist.table, "insert", hist_row, ref)
+                )
+        return captured
+
     async def _execute_batch(self, batch: list[WriteRequest]) -> None:
         """Execute all writes in a single SQLite transaction with SAVEPOINTs."""
         conn = self._db.write_conn
@@ -163,6 +272,10 @@ class WriteBatcher:
                     ref = req.ref if req.ref else next_ref()
                     await (await conn.execute(f"SAVEPOINT {savepoint}")).close()
                     returned_rows: list[tuple[CompiledOp, dict[str, Any]]] = []
+                    history_events: list[ChangeEvent] = []
+                    # (table, op, row) per statement — undo/redo decide their op
+                    # at execution time, so it is not always op.op_type.
+                    emitted: list[tuple[str, str, dict[str, Any]]] = []
                     for op_idx, (op, params) in enumerate(zip(req.ops, req.params_list)):
                         # Resolve cross-op bindings and _mkio_ref
                         resolved = list(params)
@@ -173,21 +286,42 @@ class WriteBatcher:
                         if "_mkio_ref" in op.param_names:
                             resolved[op.param_names.index("_mkio_ref")] = ref
                         params = tuple(resolved)
+                        hist = self._versioned.get(op.table)
+                        if op.plan is not None:
+                            row, emit_op = await self._execute_version_op(
+                                conn, op, req, ref
+                            )
+                            returned_rows.append((op, row))
+                            emitted.append((op.table, emit_op, row))
+                            continue
                         cursor = await conn.execute(op.sql, params)
-                        if op.op_type != "delete":
+                        if hist is not None:
+                            # Versioned ops RETURN every affected row (deletes
+                            # included) so each one is recorded.
+                            rows = [dict(r) for r in await cursor.fetchall()]
+                        elif op.op_type != "delete":
                             row = await cursor.fetchone()
+                            rows = [dict(row)] if row else []
                         else:
-                            row = None
+                            rows = []
                         await cursor.close()
-                        returned_rows.append((op, dict(row) if row else req.data))
+                        returned_rows.append((op, rows[0] if rows else req.data))
+                        emitted.append(
+                            (op.table, op.op_type, rows[0] if rows else req.data)
+                        )
+                        if hist is not None:
+                            history_events.extend(
+                                await self._capture_history(conn, hist, op, rows, req, ref)
+                            )
                     await (await conn.execute(f"RELEASE {savepoint}")).close()
 
                     successful.append((req, ref))
 
-                    for op, row_data in returned_rows:
+                    for table, emit_op, row_data in emitted:
                         events.append(
-                            ChangeBus.make_event(op.table, op.op_type, row_data, ref)
+                            ChangeBus.make_event(table, emit_op, row_data, ref)
                         )
+                    events.extend(history_events)
                 except Exception as exc:
                     try:
                         await (await conn.execute(f"ROLLBACK TO {savepoint}")).close()
