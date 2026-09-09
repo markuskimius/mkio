@@ -3279,3 +3279,169 @@ async def test_stream_append_omits_cause_for_an_ordinary_insert(stream_svc, bus)
 
     (msg,) = ws.get_messages()
     assert "cause" not in msg
+
+
+async def test_subpub_requery_path_carries_the_cause(subpub_computed_key_svc, bus):
+    """A computed-topic service re-queries on change; the cause survives it."""
+    ws = MockWebSocket()
+    await subpub_computed_key_svc.on_subscribe(
+        ws, {"type": "subscribe", "topic": "1:AAPL"})
+    ws.clear()
+
+    # Change the underlying row so the re-query produces a different value.
+    await subpub_computed_key_svc.db.write_conn.execute(
+        "UPDATE orders SET qty = 7 WHERE id = '1'")
+    await subpub_computed_key_svc.db.write_conn.commit()
+    bus.publish([_cursor_move(
+        "orders", "update", {"id": "1", "symbol": "AAPL", "qty": 7},
+        "20260404 00:00:00.000000000001", "undo",
+    )])
+    await asyncio.sleep(0.1)
+
+    (msg,) = ws.get_messages()
+    assert msg["cause"] == "undo"
+    assert msg["row"]["qty"] == 7
+
+
+async def test_query_buffered_update_during_pagination_carries_the_cause(
+    query_svc_many, bus
+):
+    """Updates buffered mid-pagination keep the cause when they burst out."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(
+        ws, {"type": "subscribe", "maxcount": 2, "subid": "s1"})
+    ws.clear()
+
+    # Arrives while pages are still outstanding, so it is buffered, not sent.
+    bus.publish([_cursor_move(
+        "orders", "update",
+        {"id": "1", "symbol": "SYM1", "qty": 999, "status": "pending"},
+        "20260404 00:00:00.000000000001", "undo",
+    )])
+    await asyncio.sleep(0.1)
+    assert ws.get_messages() == []
+
+    # Drain the remaining pages; the buffered update follows the last one.
+    for _ in range(3):
+        await query_svc_many.on_message(
+            ws, {"type": "getmore", "service": "all_orders", "subid": "s1"})
+    updates = [m for m in ws.get_messages() if m["type"] == "update"]
+
+    assert len(updates) == 1
+    assert updates[0]["cause"] == "undo"
+    assert updates[0]["row"]["qty"] == 999
+
+
+async def test_query_projection_keeps_the_cause_off_the_row(query_svc, bus):
+    """`cause` is an envelope field, so field projection cannot strip it."""
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe", "fields": ["id"]})
+    ws.clear()
+
+    bus.publish([_cursor_move(
+        "orders", "update",
+        {"id": "1", "symbol": "AAPL", "qty": 50, "status": "pending"},
+        "20260404 00:00:00.000000000001", "undo",
+    )])
+    await asyncio.sleep(0.1)
+
+    (msg,) = ws.get_messages()
+    assert msg["cause"] == "undo"
+    assert "qty" not in msg["row"]        # projection still applied
+    assert "cause" not in msg["row"]      # and it is not smuggled into the row
+
+
+async def test_monitors_see_the_cause(query_svc, bus):
+    """A monitor taps the same bytes, so an undo is visible there too."""
+    seen = []
+
+    async def notifier(service, direction, data):
+        seen.append((direction, loads(data) if isinstance(data, bytes) else data))
+
+    query_svc._monitor_notifier = notifier
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
+    seen.clear()
+
+    bus.publish([_cursor_move(
+        "orders", "update",
+        {"id": "1", "symbol": "AAPL", "qty": 50, "status": "pending"},
+        "20260404 00:00:00.000000000001", "redo",
+    )])
+    await asyncio.sleep(0.1)
+
+    out = [m for d, m in seen if d == "out" and m.get("type") == "update"]
+    assert out and out[0]["cause"] == "redo"
+
+
+def test_make_update_omits_cause_unless_given():
+    from mkio.ws_protocol import make_update
+
+    plain = loads(make_update("svc", ref="r", op="update", row={"id": "1"}))
+    assert "cause" not in plain
+
+    moved = loads(make_update(
+        "svc", ref="r", op="update", row={"id": "1"}, cause="undo"))
+    assert moved["cause"] == "undo"
+    # Everything else is unchanged by the new field.
+    assert {k: v for k, v in moved.items() if k != "cause"} == plain
+
+
+async def test_query_filter_drop_from_a_cursor_move_carries_the_cause(query_svc, bus):
+    """An undo can push a row out of a filter; the synthesized delete says so."""
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(
+        ws, {"type": "subscribe", "filter": "status == 'pending'"})
+    ws.clear()
+
+    bus.publish([_cursor_move(
+        "orders", "update",
+        {"id": "1", "symbol": "AAPL", "qty": 100, "status": "filled"},
+        "20260404 00:00:07.000000000000", "undo",
+    )])
+    await asyncio.sleep(0.1)
+
+    (msg,) = ws.get_messages()
+    assert (msg["op"], msg["cause"]) == ("delete", "undo")
+
+
+async def test_query_buffered_filter_drop_carries_the_cause(query_svc_many, bus):
+    """Same, for a subscriber still paginating: buffered, then burst with cause."""
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {
+        "type": "subscribe", "maxcount": 2, "subid": "s1",
+        "filter": "status == 'pending'",
+    })
+    ws.clear()
+
+    bus.publish([_cursor_move(
+        "orders", "update",
+        {"id": "1", "symbol": "SYM1", "qty": 10, "status": "filled"},
+        "20260404 00:00:07.000000000000", "undo",
+    )])
+    await asyncio.sleep(0.1)
+
+    for _ in range(3):
+        await query_svc_many.on_message(
+            ws, {"type": "getmore", "service": "all_orders", "subid": "s1"})
+    updates = [m for m in ws.get_messages() if m["type"] == "update"]
+
+    assert len(updates) == 1
+    assert (updates[0]["op"], updates[0]["cause"]) == ("delete", "undo")
+
+
+async def test_stream_projection_keeps_the_cause_off_the_row(stream_svc, bus):
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "fields": ["event"]})
+    ws.clear()
+
+    bus.publish([_cursor_move(
+        "audit_log", "insert", {"id": 97, "event": "rebuilt", "order_id": "7"},
+        "20260404 00:00:00.000000000007", "redo",
+    )])
+    await asyncio.sleep(0.1)
+
+    (msg,) = ws.get_messages()
+    assert msg["cause"] == "redo"
+    assert "order_id" not in msg["row"]
+    assert "cause" not in msg["row"]
