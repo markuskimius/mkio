@@ -211,6 +211,16 @@ def _key_filter(prefix: str, pk: list[str]) -> str:
     return " AND ".join(f"{prefix}{k} = ?" for k in pk)
 
 
+def _current_row_sql(table: str, pk: list[str]) -> str:
+    """SELECT the live row for a key — the pre-image of a cursor move.
+
+    Read before the plan runs so the change event can carry the shape the row
+    had, which is what an application needs to work out the action that a
+    given undo or redo implies.
+    """
+    return f"SELECT * FROM {table} WHERE {_key_filter('', pk)}"
+
+
 @dataclass(frozen=True, slots=True)
 class VersionPlan:
     """A two-step statement pair for undo/redo.
@@ -218,6 +228,9 @@ class VersionPlan:
     ``primary`` is tried first; if it affects no row, ``fallback`` runs.  The
     parameter lists name either a data field or ``_mkio_ref``, which the writer
     substitutes with the transaction's ref.
+
+    ``current`` reads the row before either step runs, so the emitted change
+    carries both the old and the new shape.
     """
 
     primary_sql: str
@@ -227,6 +240,8 @@ class VersionPlan:
     fallback_params: tuple[str, ...]
     fallback_op: str
     empty_message: str
+    current_sql: str
+    current_params: tuple[str, ...]
 
 
 def undo_plan(table: str, table_cfg: dict[str, Any]) -> VersionPlan:
@@ -258,6 +273,8 @@ def undo_plan(table: str, table_cfg: dict[str, Any]) -> VersionPlan:
         fallback_params=tuple(pk),
         fallback_op="delete",
         empty_message="nothing to undo",
+        current_sql=_current_row_sql(table, pk),
+        current_params=tuple(pk),
     )
 
 
@@ -292,6 +309,8 @@ def redo_plan(table: str, table_cfg: dict[str, Any]) -> VersionPlan:
         fallback_params=("_mkio_ref",) + tuple(pk) + tuple(pk),
         fallback_op="insert",
         empty_message="nothing to redo",
+        current_sql=_current_row_sql(table, pk),
+        current_params=tuple(pk),
     )
 
 

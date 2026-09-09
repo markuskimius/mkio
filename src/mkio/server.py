@@ -635,6 +635,32 @@ async def _on_startup(app: web.Application) -> None:
         rights_q = bus.subscribe(["_mkio_rights"])
         app["_rights_listener"] = asyncio.create_task(_rights_listener())
 
+    # Undo/redo hooks: one listener across every versioned base table.  Only
+    # cursor moves carry a cause, so ordinary writes fall straight through.
+    if mkio_app is not None and mkio_app._undo_redo_hooks:
+        watched = list(versioned_tables(cfg))
+        if watched:
+            undo_q = bus.subscribe(watched)
+
+            async def _undo_redo_listener():
+                try:
+                    while True:
+                        event = await undo_q.get()
+                        if event.cause is None:
+                            continue
+                        for hook in mkio_app._undo_redo_hooks:
+                            try:
+                                await hook(event)
+                            except Exception:
+                                logging.getLogger("mkio").exception(
+                                    "undo/redo hook failed for %s on %r",
+                                    event.cause, event.table,
+                                )
+                except asyncio.CancelledError:
+                    pass
+
+            app["_undo_redo_listener"] = asyncio.create_task(_undo_redo_listener())
+
     # User startup hooks
     if mkio_app is not None:
         for hook in mkio_app._startup_hooks:
@@ -648,14 +674,15 @@ async def _on_shutdown(app: web.Application) -> None:
         for hook in mkio_app._shutdown_hooks:
             await hook()
 
-    # 0b. Stop rights cache listener
-    rights_task = app.get("_rights_listener")
-    if rights_task is not None:
-        rights_task.cancel()
-        try:
-            await rights_task
-        except asyncio.CancelledError:
-            pass
+    # 0b. Stop background bus listeners
+    for key in ("_rights_listener", "_undo_redo_listener"):
+        task = app.get(key)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     # 1. Close all WebSocket connections so handlers can exit
     wss = set(app.get("websockets", set()))

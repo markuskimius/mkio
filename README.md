@@ -80,7 +80,7 @@ For programmatic control (custom routes, non-blocking lifecycle), see [Programma
 - **Query** — snapshot + change feed from SQLite
 - **ReqRep** — one-shot request-reply with parameterized SQL and/or expression evaluation, returning scalar values, single records, or result sets
 - **Expression language** — one safe, extensible language for filters and formatters (`qty > 100 && status == 'pending'`), implemented identically in Python and JavaScript
-- **Versioned tables** — set `versioned = true` on a table and every row gets a `_mkio_version` counter and a full history of its versions in `<table>__history`, stamped with the ref, the user and the service. Built-in `undo`/`redo` ops step a row along its own history; `mkio archive` moves old versions to CSV
+- **Versioned tables** — set `versioned = true` on a table and every row gets a `_mkio_version` counter and a full history of its versions in `<table>__history`, stamped with the ref, the user and the service. Built-in `undo`/`redo` ops step a row along its own history, with an `on_undo_redo` hook carrying the before and after shapes so an application can unwind what the write caused; `mkio archive` moves old versions to CSV
 - **Schema migration** — automatic detection of safe/destructive changes with interactive confirmation
 - **Write batching** — hundreds of writes committed in a single SQLite transaction for high throughput
 - **Reconnection recovery** — stream services use ref-based cursor reconnection persisted across server restarts via `_mkio_ref` column; subpub and query always replay a full snapshot
@@ -266,6 +266,7 @@ asyncio.run(main())
 | `on_shutdown(callback)` | Register an async callback invoked before services stop. |
 | `on_connect(callback)` | Register an async `(ws) -> None` callback invoked when a WebSocket client connects. |
 | `on_disconnect(callback)` | Register an async `(ws) -> None` callback invoked when a WebSocket client disconnects. |
+| `on_undo_redo(callback)` | Register an async `(ChangeEvent) -> None` callback invoked after every undo or redo on a [versioned table](#versioned-tables). Raises `RuntimeError` if already running. |
 | `on_auth(callback)` | Register a custom async auth handler `(data) -> {"user", "role", ...}`. Overrides table-backed auth. Raise to reject. |
 | `async execute(service, data, *, op=None, user=None)` | Submit a transaction through the write path. Returns `{"ok": True, "ref": "..."}`. `user` is recorded on history rows of [versioned tables](#versioned-tables). |
 | `async query(sql, params=())` | Read query on the read connection. Returns `list[dict]`. |
@@ -471,6 +472,43 @@ await app.execute("orders", {"id": "O1"}, op="redo")
 | Nothing left to step onto | error: `nothing to undo` | error: `nothing to redo` |
 
 Subscribers see ordinary row changes: an undo that removes a row emits a `delete`, a redo that rebuilds one emits an `insert`. Undo and redo compose with the rest of a transaction, so a bound `audit_log` entry works the way it does for any other op.
+
+### Reacting to an undo or a redo
+
+Moving the cursor puts the row right, but not whatever *followed* from the original write — a shipment booked when the order was entered, a ledger entry, a downstream notification. `on_undo_redo` is where an application unwinds or reinstates those:
+
+```python
+async def resync_shipment(event):
+    if event.table != "orders":
+        return
+    if event.new is None:                       # the order was withdrawn
+        await app.execute("shipments", {"order_id": event.old["id"]}, op="cancel")
+    elif event.old is None:                     # the order came back
+        await app.execute("shipments", {"order_id": event.new["id"]}, op="book")
+    elif event.old["qty"] != event.new["qty"]:
+        await app.execute(
+            "shipments",
+            {"order_id": event.new["id"], "qty": event.new["qty"]},
+            op="amend",
+        )
+
+app.on_undo_redo(resync_shipment)       # before start()
+app.run()
+```
+
+The callback gets the `ChangeEvent` for the row that moved, carrying both shapes so the dependent action can be read off the difference between them:
+
+| Field | Meaning |
+|---|---|
+| `event.cause` | `"undo"` or `"redo"` |
+| `event.old` | The row **before** the move — `None` when there was no row (a redo rebuilding a row undone past version 1) |
+| `event.new` | The row **after** the move — `None` when the row was removed (an undo of the insert that created it) |
+| `event.op` | The shape of the change: `"update"`, `"insert"`, or `"delete"` |
+| `event.table`, `event.ref` | Which table moved, and the ref of the transaction that moved it |
+
+`cause` and `old` are set only by a cursor move; an ordinary insert, update or delete leaves both `None`, so a plain-`subscribe` listener can tell an undo apart from the edit it reverses. `new` is defined for every event — it is `event.row` unless the op is a `delete`.
+
+Callbacks run after the transaction commits and the change is published, so they are free to write through `execute()`. Such a write is a new transaction, versioned in its own right — it is not folded into the undo, and undoing the order again will fire the hook again. Hooks are called in registration order; one that raises is logged and does not stop the others.
 
 ### Editing after an undo discards the redo branch
 
@@ -729,7 +767,7 @@ Reply:
   "row": {
     "name": "order-book-dev",
     "version": "2.1.0",
-    "mkio": "0.3.0",
+    "mkio": "0.4.0",
     "protocol": "1.1",
     "expr": "1",
     "services": {"orders": "transaction", "last_trade": "subpub", "all_orders": "query"},
@@ -774,7 +812,7 @@ Clients can check whether they're compatible with the server by sending expected
 
 ```json
 {"type": "request", "service": "_mkio", "reqid": "v1",
- "data": {"version": "2.0.0", "protocol": "1.0", "mkio": "0.3.0", "expr": "1"}}
+ "data": {"version": "2.0.0", "protocol": "1.0", "mkio": "0.4.0", "expr": "1"}}
 ```
 
 Reply:
@@ -783,7 +821,7 @@ Reply:
 {
   "type": "reply", "service": "_mkio", "reqid": "v1",
   "row": {
-    "name": "order-book-dev", "version": "2.3.0", "mkio": "0.3.0", "protocol": "1.1", "expr": "1",
+    "name": "order-book-dev", "version": "2.3.0", "mkio": "0.4.0", "protocol": "1.1", "expr": "1",
     "compatible": true,
     "compatibility": {"version": true, "protocol": true, "mkio": true, "expr": true},
     ...

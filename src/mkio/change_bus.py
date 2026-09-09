@@ -17,6 +17,18 @@ class ChangeEvent:
     row: dict[str, Any]
     ref: str
     raw_bytes: bytes  # Pre-serialized JSON envelope
+    cause: str | None = None
+    # cause: "undo" | "redo" when a version cursor move produced this change,
+    # None for an ordinary write.  ``op`` stays the shape of the change itself,
+    # so an undo of an insert arrives as a delete with cause "undo".
+    old: dict[str, Any] | None = None
+    # old: the row as it stood before the change, None when it did not exist.
+    # Only version cursor moves capture it; ordinary writes leave it None.
+
+    @property
+    def new(self) -> dict[str, Any] | None:
+        """The row as it stands after the change, None when it was removed."""
+        return None if self.op == "delete" else self.row
 
 
 class ChangeBus:
@@ -50,14 +62,34 @@ class ChangeBus:
                     pass  # Backpressure: slow consumer misses this event
 
     @staticmethod
-    def make_event(table: str, op: str, row: dict[str, Any], ref: str) -> ChangeEvent:
-        """Build a ChangeEvent with pre-serialized bytes."""
-        envelope = {
+    def make_event(
+        table: str,
+        op: str,
+        row: dict[str, Any],
+        ref: str,
+        *,
+        cause: str | None = None,
+        old: dict[str, Any] | None = None,
+    ) -> ChangeEvent:
+        """Build a ChangeEvent with pre-serialized bytes.
+
+        ``cause`` and ``old`` describe a version cursor move (see
+        :class:`ChangeEvent`); they are omitted from the envelope when unset,
+        so an ordinary write serializes exactly as before.
+        """
+        envelope: dict[str, Any] = {
             "type": "update",
             "table": table,
             "op": op,
             "row": row,
             "ref": ref,
         }
+        if cause is not None:
+            envelope["cause"] = cause
+        if old is not None:
+            envelope["old"] = old
         raw = dumps(envelope)
-        return ChangeEvent(table=table, op=op, row=row, ref=ref, raw_bytes=raw)
+        return ChangeEvent(
+            table=table, op=op, row=row, ref=ref, raw_bytes=raw,
+            cause=cause, old=old,
+        )

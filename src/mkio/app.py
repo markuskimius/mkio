@@ -65,6 +65,7 @@ class MkioApp:
         self._shutdown_hooks: list[Callable[[], Awaitable[None]]] = []
         self._connect_hooks: list[Callable[[web.WebSocketResponse], Awaitable[None]]] = []
         self._disconnect_hooks: list[Callable[[web.WebSocketResponse], Awaitable[None]]] = []
+        self._undo_redo_hooks: list[Callable[[ChangeEvent], Awaitable[None]]] = []
 
         # Auth handler (overrides table-backed auth)
         self._auth_handler: Callable[[dict], Awaitable[dict]] | None = None
@@ -134,6 +135,64 @@ class MkioApp:
     def on_disconnect(self, callback: Callable[[web.WebSocketResponse], Awaitable[None]]) -> None:
         """Register a callback invoked when a WebSocket client disconnects."""
         self._disconnect_hooks.append(callback)
+
+    def on_undo_redo(
+        self, callback: Callable[[ChangeEvent], Awaitable[None]]
+    ) -> None:
+        """Register a callback invoked after every undo or redo.
+
+        Undo and redo move a versioned row's cursor between recorded versions.
+        The row change itself is handled by the framework, but anything that
+        *followed* from the original write — a shipment booked when an order was
+        entered, a ledger entry, a downstream notification — is the
+        application's to unwind or reinstate.  This hook is where that happens.
+
+        The callback receives the :class:`ChangeEvent` for the moved row:
+
+        - ``event.cause`` is ``"undo"`` or ``"redo"``.
+        - ``event.old`` is the row as it stood before the move, ``None`` when
+          there was no row (a redo that rebuilds a row undone past version 1).
+        - ``event.new`` is the row as it stands after, ``None`` when the row was
+          removed (an undo of the insert that created it).
+        - ``event.op`` describes the shape of the change — ``"update"``,
+          ``"insert"`` or ``"delete"`` — and ``event.table`` which table moved.
+
+        Comparing the two shapes is what tells the application which dependent
+        action to take: which fields moved, and in which direction.
+
+        Callbacks run after the transaction commits and the change is published,
+        so they may write through :meth:`execute` — a dependent write made here
+        is a new transaction, versioned in its own right, not part of the undo.
+        Every registered callback is called in turn; one that raises is logged
+        and does not stop the others or the listener.
+
+        Example::
+
+            async def resync_shipment(event):
+                if event.table != "orders":
+                    return
+                if event.new is None:                      # order was withdrawn
+                    await app.execute("shipments", {"order_id": event.old["id"]},
+                                      op="cancel")
+                elif event.old is None:                    # order came back
+                    await app.execute("shipments", {"order_id": event.new["id"]},
+                                      op="book")
+                elif event.old["qty"] != event.new["qty"]:
+                    await app.execute("shipments",
+                                      {"order_id": event.new["id"],
+                                       "qty": event.new["qty"]}, op="amend")
+
+            app.on_undo_redo(resync_shipment)
+
+        Raises:
+            RuntimeError: If the server is already running.  The listener is
+                wired up at startup, so hooks must be registered before it.
+        """
+        if self._running:
+            raise RuntimeError(
+                "Cannot add undo/redo hooks after the server has started"
+            )
+        self._undo_redo_hooks.append(callback)
 
     def on_auth(self, callback: Callable[[dict], Awaitable[dict]]) -> None:
         """Register a custom auth handler, overriding table-backed auth.

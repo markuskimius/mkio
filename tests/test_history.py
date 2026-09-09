@@ -23,6 +23,8 @@ from mkio.history import (
     history_table_name,
     is_history_table,
     primary_key_columns,
+    redo_plan,
+    undo_plan,
     versioned_tables,
 )
 from mkio.migration import (
@@ -1045,6 +1047,442 @@ async def test_undo_and_redo_reach_subscribers(app):
 
     # The emitted op reflects what actually happened, not the op name.
     assert events == [("delete", 1), ("insert", 1)]
+
+
+# ---------------------------------------------------------------------------
+# Undo/redo plans: the pre-image read
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("plan_for", [undo_plan, redo_plan])
+def test_plans_read_the_pre_image_by_key(plan_for):
+    plan = plan_for("orders", VERSIONED_CONFIG["tables"]["orders"])
+    assert plan.current_sql == "SELECT * FROM orders WHERE id = ?"
+    assert plan.current_params == ("id",)
+
+
+@pytest.mark.parametrize("plan_for", [undo_plan, redo_plan])
+def test_plans_read_the_pre_image_by_composite_key(plan_for):
+    plan = plan_for("positions", COMPOSITE_CONFIG["tables"]["positions"])
+    assert plan.current_sql == (
+        "SELECT * FROM positions WHERE account = ? AND symbol = ?"
+    )
+    assert plan.current_params == ("account", "symbol")
+
+
+# ---------------------------------------------------------------------------
+# Undo/redo hook: cause and the before/after shapes
+# ---------------------------------------------------------------------------
+
+
+async def _collect(app, tables=("orders",)):
+    """Subscribe and return (events list, stop function)."""
+    import asyncio
+
+    events = []
+
+    async def on_change(event):
+        events.append(event)
+
+    unsub = await app.subscribe(list(tables), on_change)
+
+    async def stop():
+        await asyncio.sleep(0.05)
+        unsub()
+        return events
+
+    return events, stop
+
+
+async def test_change_event_names_undo_as_the_cause(app):
+    await _three_versions(app)
+    _, stop = await _collect(app)
+    await app.execute("ord", {"id": "O1"}, op="undo")
+    (event,) = await stop()
+
+    # op is the shape of the change; cause is why it happened.
+    assert (event.op, event.cause) == ("update", "undo")
+
+
+async def test_change_event_carries_both_shapes_across_an_undo(app):
+    await _three_versions(app)
+    _, stop = await _collect(app)
+    await app.execute("ord", {"id": "O1"}, op="undo")
+    (event,) = await stop()
+
+    # The pair is what an application diffs to deduce the dependent action.
+    assert (event.old["qty"], event.old[VERSION_COLUMN]) == (30, 3)
+    assert (event.new["qty"], event.new[VERSION_COLUMN]) == (20, 2)
+    assert event.new is event.row
+
+
+async def test_change_event_carries_both_shapes_across_a_redo(app):
+    await _three_versions(app)
+    await app.execute("ord", {"id": "O1"}, op="undo")
+    _, stop = await _collect(app)
+    await app.execute("ord", {"id": "O1"}, op="redo")
+    (event,) = await stop()
+
+    assert event.cause == "redo"
+    assert (event.old["qty"], event.old[VERSION_COLUMN]) == (20, 2)
+    assert (event.new["qty"], event.new[VERSION_COLUMN]) == (30, 3)
+
+
+async def test_undoing_an_insert_reports_no_new_shape(app):
+    await app.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+    _, stop = await _collect(app)
+    await app.execute("ord", {"id": "O1"}, op="undo")
+    (event,) = await stop()
+
+    assert (event.op, event.cause) == ("delete", "undo")
+    assert event.old["qty"] == 10
+    assert event.new is None          # the row is gone
+    assert event.row["qty"] == 10     # ...but a delete still names what went
+
+
+async def test_redoing_a_rebuilt_row_reports_no_old_shape(app):
+    await app.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+    await app.execute("ord", {"id": "O1"}, op="undo")
+    _, stop = await _collect(app)
+    await app.execute("ord", {"id": "O1"}, op="redo")
+    (event,) = await stop()
+
+    assert (event.op, event.cause) == ("insert", "redo")
+    assert event.old is None          # nothing was there to begin with
+    assert event.new["qty"] == 10
+
+
+async def test_ordinary_writes_carry_no_cause_or_old_shape(app):
+    _, stop = await _collect(app)
+    await app.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+    await app.execute("ord", {"id": "O1", "qty": 20}, op="amend")
+    await app.execute("ord", {"id": "O1"}, op="kill")
+    events = await stop()
+
+    assert [e.op for e in events] == ["insert", "update", "delete"]
+    assert all(e.cause is None and e.old is None for e in events)
+    # `new` still works: it is the row for anything but a delete.
+    assert [e.new is None for e in events] == [False, False, True]
+
+
+async def test_envelope_carries_cause_and_old_only_for_cursor_moves(app):
+    from mkio._json import loads
+
+    _, stop = await _collect(app)
+    await app.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+    await app.execute("ord", {"id": "O1", "qty": 20}, op="amend")
+    await app.execute("ord", {"id": "O1"}, op="undo")
+    plain, _, moved = await stop()
+
+    assert "cause" not in loads(plain.raw_bytes)
+    assert "old" not in loads(plain.raw_bytes)
+    envelope = loads(moved.raw_bytes)
+    assert envelope["cause"] == "undo"
+    assert envelope["old"]["qty"] == 20
+    assert envelope["row"]["qty"] == 10
+
+
+async def test_undo_of_a_multi_row_update_reports_each_rows_own_shapes(app):
+    await app.execute("ord", {"id": "O1", "sym": "A", "qty": 1}, op="new")
+    await app.execute("ord", {"id": "O2", "sym": "A", "qty": 2}, op="new")
+    await app.execute("ord", {"sym": "A", "qty": 9}, op="bump")   # both rows
+
+    _, stop = await _collect(app)
+    await app.execute("ord", {"id": "O1"}, op="undo")
+    await app.execute("ord", {"id": "O2"}, op="undo")
+    e1, e2 = await stop()
+
+    assert (e1.old["qty"], e1.new["qty"]) == (9, 1)
+    assert (e2.old["qty"], e2.new["qty"]) == (9, 2)
+
+
+# ---------------------------------------------------------------------------
+# Undo/redo hook: MkioApp.on_undo_redo
+# ---------------------------------------------------------------------------
+
+
+async def test_on_undo_redo_fires_with_both_shapes():
+    seen = []
+    a = create_app(_config())
+
+    async def hook(event):
+        seen.append((event.table, event.cause, event.old, event.new))
+
+    a.on_undo_redo(hook)
+    await a.start()
+    try:
+        await a.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+        await a.execute("ord", {"id": "O1", "qty": 20}, op="amend")
+        await a.execute("ord", {"id": "O1"}, op="undo")
+        await a.execute("ord", {"id": "O1"}, op="redo")
+        import asyncio
+        await asyncio.sleep(0.05)
+    finally:
+        await a.stop()
+
+    assert [(t, c) for t, c, _, _ in seen] == [
+        ("orders", "undo"), ("orders", "redo")]
+    (_, _, undo_old, undo_new), (_, _, redo_old, redo_new) = seen
+    assert (undo_old["qty"], undo_new["qty"]) == (20, 10)
+    assert (redo_old["qty"], redo_new["qty"]) == (10, 20)
+
+
+async def test_on_undo_redo_ignores_ordinary_writes():
+    seen = []
+    a = create_app(_config())
+
+    async def hook(event):
+        seen.append(event)
+
+    a.on_undo_redo(hook)
+    await a.start()
+    try:
+        await a.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+        await a.execute("ord", {"id": "O1", "qty": 20}, op="amend")
+        await a.execute("ord", {"id": "O1"}, op="kill")
+        await a.execute("pl", {"id": "P1", "v": "x"})
+        import asyncio
+        await asyncio.sleep(0.05)
+    finally:
+        await a.stop()
+
+    assert seen == []
+
+
+async def test_on_undo_redo_can_make_a_dependent_write():
+    """The canonical use: undo an order, unwind what the order caused."""
+    a = create_app(_config())
+
+    async def hook(event):
+        if event.new is None:
+            await a.execute("pl", {"id": event.old["id"], "v": "cancelled"})
+        else:
+            await a.execute("pl", {"id": event.new["id"], "v": "reinstated"})
+
+    a.on_undo_redo(hook)
+    await a.start()
+    try:
+        await a.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+        await a.execute("ord", {"id": "O1"}, op="undo")   # row withdrawn
+        import asyncio
+        await asyncio.sleep(0.05)
+        rows = await a.query("SELECT id, v FROM plain")
+    finally:
+        await a.stop()
+
+    assert rows == [{"id": "O1", "v": "cancelled"}]
+
+
+async def test_a_failing_undo_redo_hook_does_not_silence_the_rest(caplog):
+    seen = []
+    a = create_app(_config())
+
+    async def boom(event):
+        raise RuntimeError("dependent action failed")
+
+    async def after(event):
+        seen.append(event.cause)
+
+    a.on_undo_redo(boom)
+    a.on_undo_redo(after)
+    await a.start()
+    try:
+        await a.execute("ord", {"id": "O1", "sym": "A", "qty": 1}, op="new")
+        await a.execute("ord", {"id": "O1"}, op="undo")
+        await a.execute("ord", {"id": "O1"}, op="redo")
+        import asyncio
+        await asyncio.sleep(0.05)
+    finally:
+        await a.stop()
+
+    # The listener survives a raising hook, and later hooks still run.
+    assert seen == ["undo", "redo"]
+
+
+async def test_on_undo_redo_is_refused_once_running(app):
+    async def hook(event):
+        pass
+
+    with pytest.raises(RuntimeError, match="after the server has started"):
+        app.on_undo_redo(hook)
+
+
+async def test_old_shape_carries_the_ref_of_the_write_it_undoes(app):
+    """`old` is a full row, so it dates the state being stepped away from."""
+    first = await app.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+    second = await app.execute("ord", {"id": "O1", "qty": 20}, op="amend")
+    _, stop = await _collect(app)
+    moved = await app.execute("ord", {"id": "O1"}, op="undo")
+    (event,) = await stop()
+
+    assert event.old["_mkio_ref"] == second["ref"]
+    assert event.new["_mkio_ref"] == moved["ref"]   # the move restamps the row
+    assert event.ref == moved["ref"]
+    assert first["ref"] != second["ref"]
+
+
+async def test_each_step_of_a_deep_undo_reports_adjacent_versions(app):
+    await _three_versions(app)
+    _, stop = await _collect(app)
+    for _ in range(3):
+        await app.execute("ord", {"id": "O1"}, op="undo")
+    events = await stop()
+
+    steps = [
+        (e.cause, e.op,
+         e.old[VERSION_COLUMN],
+         e.new[VERSION_COLUMN] if e.new else None)
+        for e in events
+    ]
+    assert steps == [
+        ("undo", "update", 3, 2),
+        ("undo", "update", 2, 1),
+        ("undo", "delete", 1, None),   # past the bottom, the row goes
+    ]
+
+
+async def test_a_failed_undo_emits_nothing(app):
+    """A cursor move with nowhere to go rolls back, so no hook can fire."""
+    await app.execute("ord", {"id": "O1", "sym": "A", "qty": 1}, op="new")
+    await app.execute("ord", {"id": "O1"}, op="undo")
+    _, stop = await _collect(app)
+    with pytest.raises(Exception, match="nothing to undo"):
+        await app.execute("ord", {"id": "O1"}, op="undo")
+    assert await stop() == []
+
+
+async def test_undo_composed_with_another_op_tags_only_the_cursor_move():
+    """Undo composes with ordinary ops; cause marks just the one that moved."""
+    cfg = _config()
+    cfg["services"]["ord"]["ops"]["undo_logged"] = [
+        {"table": "orders", "op_type": "undo", "key": ["id"]},
+        {"table": "plain", "op_type": "insert", "fields": ["id", "v"]},
+    ]
+    a = create_app(cfg)
+    await a.start()
+    try:
+        await a.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+        await a.execute("ord", {"id": "O1", "qty": 20}, op="amend")
+        _, stop = await _collect(a, tables=("orders", "plain"))
+        await a.execute("ord", {"id": "O1", "v": "undone"}, op="undo_logged")
+        moved, logged = await stop()
+    finally:
+        await a.stop()
+
+    assert (moved.table, moved.cause) == ("orders", "undo")
+    assert (moved.old["qty"], moved.new["qty"]) == (20, 10)
+    assert (logged.table, logged.cause, logged.old) == ("plain", None, None)
+
+
+async def test_composite_key_undo_reports_both_shapes(composite_app):
+    app = composite_app
+    await app.execute("pos", {"account": "A1", "symbol": "X", "qty": 5}, op="open")
+    await app.execute("pos", {"account": "A1", "symbol": "X", "qty": 8}, op="adjust")
+    _, stop = await _collect(app, tables=("positions",))
+    await app.execute("pos", {"account": "A1", "symbol": "X"}, op="undo")
+    (event,) = await stop()
+
+    assert event.cause == "undo"
+    assert (event.old["qty"], event.new["qty"]) == (8, 5)
+    assert (event.new["account"], event.new["symbol"]) == ("A1", "X")
+
+
+async def test_on_undo_redo_spans_every_versioned_table():
+    """One listener covers them all; the event says which table moved."""
+    cfg = _config()
+    cfg["tables"]["plain"]["versioned"] = True
+    cfg["services"]["pl"]["ops"] = {
+        "add": [{"table": "plain", "op_type": "insert", "fields": ["id", "v"]}],
+        "undo": [{"table": "plain", "op_type": "undo", "key": ["id"]}],
+    }
+    seen = []
+    a = create_app(cfg)
+
+    async def hook(event):
+        seen.append((event.table, event.cause))
+
+    a.on_undo_redo(hook)
+    await a.start()
+    try:
+        await a.execute("ord", {"id": "O1", "sym": "A", "qty": 1}, op="new")
+        await a.execute("pl", {"id": "P1", "v": "x"}, op="add")
+        await a.execute("ord", {"id": "O1"}, op="undo")
+        await a.execute("pl", {"id": "P1"}, op="undo")
+        import asyncio
+        await asyncio.sleep(0.05)
+    finally:
+        await a.stop()
+
+    assert seen == [("orders", "undo"), ("plain", "undo")]
+
+
+async def test_on_undo_redo_hooks_run_in_registration_order():
+    order = []
+    a = create_app(_config())
+
+    for tag in ("first", "second", "third"):
+        async def hook(event, tag=tag):
+            order.append(tag)
+        a.on_undo_redo(hook)
+
+    await a.start()
+    try:
+        await a.execute("ord", {"id": "O1", "sym": "A", "qty": 1}, op="new")
+        await a.execute("ord", {"id": "O1"}, op="undo")
+        import asyncio
+        await asyncio.sleep(0.05)
+    finally:
+        await a.stop()
+
+    assert order == ["first", "second", "third"]
+
+
+async def test_a_server_with_hooks_but_no_versioned_tables_still_starts():
+    cfg = _config()
+    del cfg["tables"]["orders"]["versioned"]
+    for name in ("undo", "redo"):
+        del cfg["services"]["ord"]["ops"][name]
+    seen = []
+
+    a = create_app(cfg)
+
+    async def hook(event):
+        seen.append(event)
+
+    a.on_undo_redo(hook)
+    await a.start()
+    try:
+        await a.execute("ord", {"id": "O1", "sym": "A", "qty": 1}, op="new")
+        import asyncio
+        await asyncio.sleep(0.05)
+    finally:
+        await a.stop()
+
+    assert seen == []
+
+
+async def test_no_listener_is_started_when_no_hook_is_registered():
+    """The bus subscription is not paid for by servers that never asked."""
+    a = create_app(_config())
+    await a.start()
+    try:
+        assert a._aiohttp_app.get("_undo_redo_listener") is None
+    finally:
+        await a.stop()
+
+
+async def test_the_listener_is_stopped_with_the_server():
+    a = create_app(_config())
+
+    async def hook(event):
+        pass
+
+    a.on_undo_redo(hook)
+    await a.start()
+    task = a._aiohttp_app["_undo_redo_listener"]
+    assert not task.done()
+    await a.stop()
+    assert task.cancelled() or task.done()
 
 
 # ---------------------------------------------------------------------------

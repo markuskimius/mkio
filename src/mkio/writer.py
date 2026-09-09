@@ -184,16 +184,27 @@ class WriteBatcher:
         op: CompiledOp,
         req: WriteRequest,
         ref: str,
-    ) -> tuple[dict[str, Any], str]:
+    ) -> tuple[dict[str, Any], str, dict[str, Any] | None]:
         """Move a row's version cursor for an undo or redo.
 
         Runs the plan's primary statement — step back or forward onto an
         adjacent recorded version — and falls back to the edge case: undo at
         version 1 removes the row, redo from an absent row rebuilds version 1.
         History is left untouched either way, so the step stays reversible.
+
+        Returns the row the cursor landed on, the op that describes the move,
+        and the row as it stood beforehand (None if there was none).  The
+        before-and-after pair travels on the change event so an application can
+        work out the dependent action a given undo or redo implies.
         """
         plan = op.plan
         assert plan is not None
+        cursor = await conn.execute(
+            plan.current_sql, tuple(req.data[n] for n in plan.current_params)
+        )
+        before = await cursor.fetchone()
+        await cursor.close()
+        old = dict(before) if before is not None else None
         for sql, names, emit_op in (
             (plan.primary_sql, plan.primary_params, plan.primary_op),
             (plan.fallback_sql, plan.fallback_params, plan.fallback_op),
@@ -205,7 +216,7 @@ class WriteBatcher:
             row = await cursor.fetchone()
             await cursor.close()
             if row is not None:
-                return dict(row), emit_op
+                return dict(row), emit_op, old
         raise ValueError(
             f"{plan.empty_message}: no recorded version for the given key "
             f"in {op.table!r}"
@@ -273,9 +284,10 @@ class WriteBatcher:
                     await (await conn.execute(f"SAVEPOINT {savepoint}")).close()
                     returned_rows: list[tuple[CompiledOp, dict[str, Any]]] = []
                     history_events: list[ChangeEvent] = []
-                    # (table, op, row) per statement — undo/redo decide their op
-                    # at execution time, so it is not always op.op_type.
-                    emitted: list[tuple[str, str, dict[str, Any]]] = []
+                    # One event per statement, held back until the SAVEPOINT is
+                    # released.  Undo/redo decide their op at execution time, so
+                    # it is not always op.op_type.
+                    emitted: list[ChangeEvent] = []
                     for op_idx, (op, params) in enumerate(zip(req.ops, req.params_list)):
                         # Resolve cross-op bindings and _mkio_ref
                         resolved = list(params)
@@ -288,11 +300,14 @@ class WriteBatcher:
                         params = tuple(resolved)
                         hist = self._versioned.get(op.table)
                         if op.plan is not None:
-                            row, emit_op = await self._execute_version_op(
+                            row, emit_op, old_row = await self._execute_version_op(
                                 conn, op, req, ref
                             )
                             returned_rows.append((op, row))
-                            emitted.append((op.table, emit_op, row))
+                            emitted.append(ChangeBus.make_event(
+                                op.table, emit_op, row, ref,
+                                cause=op.op_type, old=old_row,
+                            ))
                             continue
                         cursor = await conn.execute(op.sql, params)
                         if hist is not None:
@@ -306,9 +321,9 @@ class WriteBatcher:
                             rows = []
                         await cursor.close()
                         returned_rows.append((op, rows[0] if rows else req.data))
-                        emitted.append(
-                            (op.table, op.op_type, rows[0] if rows else req.data)
-                        )
+                        emitted.append(ChangeBus.make_event(
+                            op.table, op.op_type, rows[0] if rows else req.data, ref
+                        ))
                         if hist is not None:
                             history_events.extend(
                                 await self._capture_history(conn, hist, op, rows, req, ref)
@@ -317,10 +332,7 @@ class WriteBatcher:
 
                     successful.append((req, ref))
 
-                    for table, emit_op, row_data in emitted:
-                        events.append(
-                            ChangeBus.make_event(table, emit_op, row_data, ref)
-                        )
+                    events.extend(emitted)
                     events.extend(history_events)
                 except Exception as exc:
                     try:

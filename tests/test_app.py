@@ -1695,6 +1695,63 @@ def test_change_event_fields():
     assert e.raw_bytes == b'{"x":1}'
 
 
+def test_change_event_cause_and_old_default_to_none():
+    """The version-move fields are optional, so 5-arg construction still works."""
+    e = ChangeEvent(table="t", op="insert", row={"a": 1}, ref="r", raw_bytes=b"")
+    assert e.cause is None
+    assert e.old is None
+
+
+def test_change_event_new_is_the_row_unless_deleted():
+    """`new` is defined for every event, not only for cursor moves."""
+    row = {"id": "1"}
+    for op in ("insert", "update"):
+        e = ChangeEvent(table="t", op=op, row=row, ref="r", raw_bytes=b"")
+        assert e.new is row
+    gone = ChangeEvent(table="t", op="delete", row=row, ref="r", raw_bytes=b"")
+    assert gone.new is None
+    assert gone.row is row      # a delete still names what went
+
+
+def test_make_event_omits_cause_and_old_when_unset():
+    """An ordinary write serializes exactly as it did before the fields existed."""
+    from mkio._json import loads
+    from mkio.change_bus import ChangeBus
+
+    e = ChangeBus.make_event("items", "update", {"id": "1"}, "ref1")
+    assert loads(e.raw_bytes) == {
+        "type": "update", "table": "items", "op": "update",
+        "row": {"id": "1"}, "ref": "ref1",
+    }
+
+
+def test_make_event_carries_cause_and_old_into_the_envelope():
+    from mkio._json import loads
+    from mkio.change_bus import ChangeBus
+
+    e = ChangeBus.make_event(
+        "items", "update", {"id": "1", "v": 2}, "ref2",
+        cause="undo", old={"id": "1", "v": 3},
+    )
+    assert (e.cause, e.old) == ("undo", {"id": "1", "v": 3})
+    assert e.new == {"id": "1", "v": 2}
+    envelope = loads(e.raw_bytes)
+    assert envelope["cause"] == "undo"
+    assert envelope["old"] == {"id": "1", "v": 3}
+
+
+def test_make_event_omits_old_alone_when_there_was_no_row():
+    """A redo that rebuilds a row has a cause but no prior shape."""
+    from mkio._json import loads
+    from mkio.change_bus import ChangeBus
+
+    e = ChangeBus.make_event("items", "insert", {"id": "1"}, "r", cause="redo")
+    envelope = loads(e.raw_bytes)
+    assert envelope["cause"] == "redo"
+    assert "old" not in envelope
+    assert e.old is None
+
+
 # ---- Integration: combined features ------------------------------------------
 
 
