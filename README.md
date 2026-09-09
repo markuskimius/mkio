@@ -510,6 +510,36 @@ The callback gets the `ChangeEvent` for the row that moved, carrying both shapes
 
 Callbacks run after the transaction commits and the change is published, so they are free to write through `execute()`. Such a write is a new transaction, versioned in its own right — it is not folded into the undo, and undoing the order again will fire the hook again. Hooks are called in registration order; one that raises is logged and does not stop the others.
 
+### `cause` reaches subscribers too
+
+Subpub, query and stream all forward the cause on the wire, so a browser or CLI subscriber can tell an undo apart from the edit it reverses without the server telling it twice. The `update` envelope gains one optional field:
+
+```json
+{"type": "update", "service": "all_orders", "op": "update",
+ "row": {"id": "O1", "qty": 10}, "cause": "undo"}
+```
+
+`cause` is present only for a version cursor move — an ordinary insert, update or delete omits it entirely, so existing clients see exactly the payload they always did.
+
+```js
+client.subscribe("all_orders", "query", {
+    onSnapshot: (rows) => renderTable(rows),
+    onUpdate: (op, row, info) => {
+        if (info.cause === "undo") flashUndone(row);
+        updateRow(op, row);
+    },
+});
+```
+
+The JS client passes an `info` object as a third argument to `onUpdate` — `{cause, ref, service, subid}`, with `cause` null for an ordinary write. It is additive: two-argument `(op, row)` handlers keep working unchanged. The Python client yields whole message dicts, so `msg["cause"]` is there already. The CLI labels it inline:
+
+```
+[2026-09-09 10:15:02.441] UPDATE update (undo)
+  {"id": "O1", "qty": 10}
+```
+
+The row itself is the new shape; the old one is whatever the subscriber last displayed, so a client needs only the label. Server-side listeners that want both shapes without keeping their own copy use [`on_undo_redo`](#reacting-to-an-undo-or-a-redo).
+
 ### Editing after an undo discards the redo branch
 
 Writing at version V removes the recorded versions at V and above. So an edit made while the cursor sits below the top abandons everything above it — the same as typing after undoing in an editor:
@@ -767,8 +797,8 @@ Reply:
   "row": {
     "name": "order-book-dev",
     "version": "2.1.0",
-    "mkio": "0.4.0",
-    "protocol": "1.1",
+    "mkio": "0.5.0",
+    "protocol": "1.2",
     "expr": "1",
     "services": {"orders": "transaction", "last_trade": "subpub", "all_orders": "query"},
     "tables": ["orders", "audit_log"],
@@ -812,7 +842,7 @@ Clients can check whether they're compatible with the server by sending expected
 
 ```json
 {"type": "request", "service": "_mkio", "reqid": "v1",
- "data": {"version": "2.0.0", "protocol": "1.0", "mkio": "0.4.0", "expr": "1"}}
+ "data": {"version": "2.0.0", "protocol": "1.0", "mkio": "0.5.0", "expr": "1"}}
 ```
 
 Reply:
@@ -821,7 +851,7 @@ Reply:
 {
   "type": "reply", "service": "_mkio", "reqid": "v1",
   "row": {
-    "name": "order-book-dev", "version": "2.3.0", "mkio": "0.4.0", "protocol": "1.1", "expr": "1",
+    "name": "order-book-dev", "version": "2.3.0", "mkio": "0.5.0", "protocol": "1.2", "expr": "1",
     "compatible": true,
     "compatibility": {"version": true, "protocol": true, "mkio": true, "expr": true},
     ...
@@ -1002,7 +1032,9 @@ client.subscribe("last_trade", "subpub", {
 client.subscribe("all_orders", "query", {
     filter: "status == 'pending'",
     onSnapshot: (rows) => renderTable(rows),
-    onUpdate: (op, row) => updateRow(op, row),
+    // Third argument carries {cause, ref, service, subid}. `cause` is
+    // "undo"/"redo" when a versioned row's cursor moved, null otherwise.
+    onUpdate: (op, row, info) => updateRow(op, row, {undone: info.cause === "undo"}),
 });
 
 // Paginated query (client auto-sends getmore; onSnapshot fires once with all rows)

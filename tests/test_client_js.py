@@ -526,3 +526,97 @@ setTimeout(() => { console.log(JSON.stringify(out)); }, 10);
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
     out = json.loads(result.stdout.strip().splitlines()[-1])
     assert out == {"a": "permission denied", "b": "boom"}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_js_client_onupdate_receives_the_cause():
+    """onUpdate gets a third `info` argument carrying the version-move cause."""
+    script = r"""
+global.WebSocket = class {
+  constructor(url) { this.url = url; this.readyState = 1; FakeWS.last = this; }
+  send() {}
+  close() { this.readyState = 3; }
+};
+global.WebSocket.OPEN = 1;
+const FakeWS = global.WebSocket;
+
+const { MkioClient } = require(PATH);
+const c = new MkioClient("ws://x/ws", { reconnect: false });
+
+const calls = [];
+c._subscriptions.set("orders", {
+  service: "orders", protocol: "query", filter: null, ref: null, subid: null,
+  onSnapshot: () => {}, onDelta: () => {}, onNack: null, onPage: null,
+  onUpdate: (op, row, info) => calls.push({ op, row, info }),
+});
+
+// An undo arriving on the wire.
+c._dispatch({
+  type: "update", service: "orders", op: "update",
+  row: { id: "O1", qty: 10 }, ref: "r1", cause: "undo",
+});
+// An ordinary edit: no cause on the wire.
+c._dispatch({
+  type: "update", service: "orders", op: "update",
+  row: { id: "O1", qty: 20 }, ref: "r2",
+});
+
+console.log(JSON.stringify(calls));
+process.exit(0);
+""".replace("PATH", json.dumps(str(JS_CLIENT_PATH)))
+
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, check=True
+    )
+    calls = json.loads(result.stdout.strip().splitlines()[-1])
+
+    assert len(calls) == 2
+    undo, plain = calls
+    # The move says why it happened, and still delivers op and row as before.
+    assert undo["op"] == "update"
+    assert undo["row"] == {"id": "O1", "qty": 10}
+    assert undo["info"]["cause"] == "undo"
+    assert undo["info"]["ref"] == "r1"
+    assert undo["info"]["service"] == "orders"
+    # An ordinary write reports no cause rather than omitting the argument.
+    assert plain["info"]["cause"] is None
+    assert plain["info"]["ref"] == "r2"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_js_client_two_argument_onupdate_still_works():
+    """The third argument is additive: existing (op, row) handlers are unaffected."""
+    script = r"""
+global.WebSocket = class {
+  constructor(url) { this.url = url; this.readyState = 1; }
+  send() {} close() {}
+};
+global.WebSocket.OPEN = 1;
+
+const { MkioClient } = require(PATH);
+const c = new MkioClient("ws://x/ws", { reconnect: false });
+
+const seen = [];
+c._subscriptions.set("orders", {
+  service: "orders", protocol: "query", filter: null, ref: null, subid: null,
+  onSnapshot: () => {}, onDelta: () => {}, onNack: null, onPage: null,
+  onUpdate: (op, row) => seen.push([op, row.qty]),
+});
+
+c._dispatch({ type: "update", service: "orders", op: "update",
+              row: { id: "O1", qty: 7 }, ref: "r1", cause: "redo" });
+
+console.log(JSON.stringify(seen));
+process.exit(0);
+""".replace("PATH", json.dumps(str(JS_CLIENT_PATH)))
+
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, check=True
+    )
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == [["update", 7]]
+
+
+def test_js_client_documents_the_cause_argument():
+    src = JS_CLIENT_PATH.read_text()
+    assert "(op, row, info) => void" in src
+    assert 'cause: data.cause || null' in src

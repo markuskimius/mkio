@@ -318,14 +318,16 @@ class QueryService(Service):
                     if sub.sent_rows is not None and rid is not None and rid in sub.sent_rows:
                         sub.sent_rows.discard(rid)
                         tagged = self._project(self._tag_row(row, out_row), sub.fields)
-                        msg_bytes = make_update(self.name, ref=None, op="delete", row=tagged, subid=sub.subid)
+                        msg_bytes = make_update(self.name, ref=None, op="delete", row=tagged,
+                                                  subid=sub.subid, cause=event.cause)
                         sub.buffered_updates.append(msg_bytes)
                     continue
                 else:
                     if sub.sent_rows is not None and rid is not None:
                         sub.sent_rows.add(rid)
                 tagged = self._project(self._tag_row(row, out_row), sub.fields)
-                msg_bytes = make_update(self.name, ref=None, op=event.op, row=tagged, subid=sub.subid)
+                msg_bytes = make_update(self.name, ref=None, op=event.op, row=tagged,
+                                        subid=sub.subid, cause=event.cause)
                 sub.buffered_updates.append(msg_bytes)
                 total = len(sub.pending_rows) + len(sub.buffered_updates)
                 if total > sub.max_buffer:
@@ -346,7 +348,8 @@ class QueryService(Service):
                         sub.sent_rows.discard(rid)
                         try:
                             tagged = self._project(self._tag_row(row, out_row), sub.fields)
-                            msg_bytes = make_update(self.name, ref=None, op="delete", row=tagged, subid=sub.subid)
+                            msg_bytes = make_update(self.name, ref=None, op="delete", row=tagged,
+                                                  subid=sub.subid, cause=event.cause)
                             await sub.ws.send_bytes(msg_bytes)
                             if not notified_monitor:
                                 await self.notify_monitors("out", msg_bytes)
@@ -359,7 +362,8 @@ class QueryService(Service):
                         sub.sent_rows.add(rid)
                 try:
                     tagged = self._project(self._tag_row(row, out_row), sub.fields)
-                    msg_bytes = make_update(self.name, ref=None, op=event.op, row=tagged, subid=sub.subid)
+                    msg_bytes = make_update(self.name, ref=None, op=event.op, row=tagged,
+                                        subid=sub.subid, cause=event.cause)
                     await sub.ws.send_bytes(msg_bytes)
                     if not notified_monitor:
                         await self.notify_monitors("out", msg_bytes)

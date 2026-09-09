@@ -116,7 +116,7 @@ async def test_reply_shape(db, bus, writer):
     row = msg["row"]
     assert set(row.keys()) == {"name", "version", "mkio", "protocol", "expr", "services", "tables", "versioned", "history_suffix", "config_hash", "uptime", "started"}
     assert row["expr"] == "1"
-    assert row["protocol"] == "1.1"
+    assert row["protocol"] == "1.2"
 
 
 async def test_reqid_echoed(db, bus, writer):

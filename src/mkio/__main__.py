@@ -912,11 +912,13 @@ def _print_subscribe_message(data: dict[str, Any]) -> None:
     elif msg_type == "update":
         op = data.get("op", "?")
         row = data.get("row", {})
+        # A version cursor move says so, so an undo is not read as a fresh edit.
+        cause = f" ({data['cause']})" if data.get("cause") else ""
         if is_tty:
             color = "\033[36m" if op == "insert" else "\033[33m" if op == "update" else "\033[31m"
-            print(f"{color}[{now}] UPDATE {op}{ver_suffix}\033[0m")
+            print(f"{color}[{now}] UPDATE {op}{cause}{ver_suffix}\033[0m")
         else:
-            print(f"[{now}] UPDATE {op}{ver_suffix}")
+            print(f"[{now}] UPDATE {op}{cause}{ver_suffix}")
         print(f"  {json.dumps(row, default=str)}")
     else:
         print(f"[{now}] {msg_type}: {json.dumps(data, default=str)}")

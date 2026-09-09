@@ -152,7 +152,14 @@ def make_update(
     row: dict[str, Any],
     *,
     subid: str | None = None,
+    cause: str | None = None,
 ) -> bytes:
+    """Envelope for one live row change.
+
+    ``cause`` is ``"undo"``/``"redo"`` when the change came from a version
+    cursor move rather than an ordinary write.  It is omitted when unset, so an
+    ordinary update serializes exactly as before.
+    """
     envelope: dict[str, Any] = {
         "type": "update",
         "service": service,
@@ -163,4 +170,6 @@ def make_update(
         envelope["ref"] = ref
     if subid is not None:
         envelope["subid"] = subid
+    if cause is not None:
+        envelope["cause"] = cause
     return dumps(envelope)

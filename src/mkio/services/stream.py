@@ -200,7 +200,9 @@ class StreamService(Service):
                 if sub.filter_fn and not sub.filter_fn(out_row):
                     continue
                 try:
-                    msg_bytes = make_update(self.name, ref=event.ref, op=event.op, row=self._project(out_row, sub.fields), subid=sub.subid)
+                    msg_bytes = make_update(self.name, ref=event.ref, op=event.op,
+                                            row=self._project(out_row, sub.fields),
+                                            subid=sub.subid, cause=event.cause)
                     await sub.ws.send_bytes(msg_bytes)
                     if not notified_monitor:
                         await self.notify_monitors("out", msg_bytes)

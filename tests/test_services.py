@@ -3137,3 +3137,145 @@ async def test_query_pagination_timeout_cleanup(query_svc_many):
         assert "q1" not in query_svc_many._pending
     finally:
         qmod._GETMORE_TIMEOUT = original_timeout
+
+
+# ---------------------------------------------------------------------------
+# `cause` on the wire: telling an undo apart from the edit it reverses
+# ---------------------------------------------------------------------------
+
+
+def _cursor_move(table, op, row, ref, cause):
+    """A change event as the writer emits one for an undo/redo."""
+    return ChangeBus.make_event(table, op, row, ref, cause=cause, old={"id": "x"})
+
+
+async def test_subpub_update_carries_the_cause(subpub_svc, bus):
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1"})
+    ws.clear()
+
+    bus.publish([_cursor_move(
+        "orders", "update",
+        {"id": "1", "symbol": "AAPL", "qty": 50, "status": "pending"},
+        "20260404 00:00:00.000000000001", "undo",
+    )])
+    await asyncio.sleep(0.1)
+
+    (msg,) = ws.get_messages()
+    assert msg["op"] == "update"          # subpub always says update
+    assert msg["cause"] == "undo"         # ...and now says why
+    assert msg["row"]["qty"] == 50
+
+
+async def test_subpub_update_omits_cause_for_an_ordinary_write(subpub_svc, bus):
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1"})
+    ws.clear()
+
+    bus.publish([ChangeBus.make_event(
+        "orders", "update",
+        {"id": "1", "symbol": "AAPL", "qty": 50, "status": "pending"},
+        "20260404 00:00:00.000000000001",
+    )])
+    await asyncio.sleep(0.1)
+
+    (msg,) = ws.get_messages()
+    assert "cause" not in msg
+
+
+async def test_subpub_undo_that_removes_a_row_carries_the_cause(subpub_svc, bus):
+    """An undo past version 1 deletes; subpub reports it as a not-found update."""
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1"})
+    ws.clear()
+
+    bus.publish([_cursor_move(
+        "orders", "delete", {"id": "1"},
+        "20260404 00:00:00.000000000002", "undo",
+    )])
+    await asyncio.sleep(0.1)
+
+    (msg,) = ws.get_messages()
+    assert msg["row"]["_mkio_exists"] is False
+    assert msg["cause"] == "undo"
+
+
+async def test_query_update_carries_the_cause(query_svc, bus):
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+
+    bus.publish([_cursor_move(
+        "orders", "update",
+        {"id": "1", "symbol": "AAPL", "qty": 50, "status": "pending"},
+        "20260404 00:00:00.000000000001", "redo",
+    )])
+    await asyncio.sleep(0.1)
+
+    (msg,) = ws.get_messages()
+    assert msg["cause"] == "redo"
+    assert msg["row"]["qty"] == 50
+
+
+async def test_query_delete_from_a_cursor_move_carries_the_cause(query_svc, bus):
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+
+    bus.publish([_cursor_move(
+        "orders", "delete", {"id": "1"},
+        "20260404 00:00:00.000000000002", "undo",
+    )])
+    await asyncio.sleep(0.1)
+
+    (msg,) = ws.get_messages()
+    assert (msg["op"], msg["cause"]) == ("delete", "undo")
+
+
+async def test_query_update_omits_cause_for_an_ordinary_write(query_svc, bus):
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+
+    bus.publish([ChangeBus.make_event(
+        "orders", "update",
+        {"id": "1", "symbol": "AAPL", "qty": 50, "status": "pending"},
+        "20260404 00:00:00.000000000001",
+    )])
+    await asyncio.sleep(0.1)
+
+    (msg,) = ws.get_messages()
+    assert "cause" not in msg
+
+
+async def test_stream_append_from_a_redo_carries_the_cause(stream_svc, bus):
+    """A redo rebuilding a row emits an insert, which a stream appends."""
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+
+    bus.publish([_cursor_move(
+        "audit_log", "insert",
+        {"id": 99, "event": "rebuilt", "order_id": "9"},
+        "20260404 00:00:00.000000000009", "redo",
+    )])
+    await asyncio.sleep(0.1)
+
+    (msg,) = ws.get_messages()
+    assert (msg["op"], msg["cause"]) == ("insert", "redo")
+
+
+async def test_stream_append_omits_cause_for_an_ordinary_insert(stream_svc, bus):
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+
+    bus.publish([ChangeBus.make_event(
+        "audit_log", "insert",
+        {"id": 98, "event": "plain", "order_id": "8"},
+        "20260404 00:00:00.000000000008",
+    )])
+    await asyncio.sleep(0.1)
+
+    (msg,) = ws.get_messages()
+    assert "cause" not in msg

@@ -166,21 +166,24 @@ class SubPubService(Service):
                     topic_val = str(event.row.get(self._topic_field))
                     notify = self._update_cache(event, topic_val)
                     if notify is not None:
-                        await self._notify_topic(topic_val, exists=notify)
+                        await self._notify_topic(
+                            topic_val, exists=notify, cause=event.cause
+                        )
                 else:
-                    old_cache = dict(self._cache)
-                    await self._requery_all()
-                    topics = {sub.topic for sub in self._subscribers}
-                    for topic in topics:
-                        if old_cache.get(topic) != self._cache.get(topic):
-                            await self._notify_topic(topic, exists=topic in self._cache)
+                    await self._requery_and_notify(event.cause)
             else:
-                old_cache = dict(self._cache)
-                await self._requery_all()
-                topics = {sub.topic for sub in self._subscribers}
-                for topic in topics:
-                    if old_cache.get(topic) != self._cache.get(topic):
-                        await self._notify_topic(topic, exists=topic in self._cache)
+                await self._requery_and_notify(event.cause)
+
+    async def _requery_and_notify(self, cause: str | None) -> None:
+        """Refresh the whole cache and notify topics whose row actually moved."""
+        old_cache = dict(self._cache)
+        await self._requery_all()
+        topics = {sub.topic for sub in self._subscribers}
+        for topic in topics:
+            if old_cache.get(topic) != self._cache.get(topic):
+                await self._notify_topic(
+                    topic, exists=topic in self._cache, cause=cause
+                )
 
     def _update_cache(self, event: ChangeEvent, topic_val: Any) -> bool | None:
         """Update cache for a primary-table change without JOINs.
@@ -202,8 +205,14 @@ class SubPubService(Service):
             return None
         return None
 
-    async def _notify_topic(self, topic_val: Any, *, exists: bool) -> None:
-        """Send update to all subscribers watching this topic."""
+    async def _notify_topic(
+        self, topic_val: Any, *, exists: bool, cause: str | None = None
+    ) -> None:
+        """Send update to all subscribers watching this topic.
+
+        ``cause`` carries through from the change that prompted the refresh, so
+        a subscriber can tell an undo apart from the edit it reverses.
+        """
         dead: list[Subscriber] = []
         notified_monitor = False
         for sub in self._subscribers:
@@ -214,7 +223,8 @@ class SubPubService(Service):
             else:
                 out_row = self._build_row(sub, {}, exists=False)
             try:
-                msg_bytes = make_update(self.name, ref=None, op="update", row=out_row, subid=sub.subid)
+                msg_bytes = make_update(self.name, ref=None, op="update", row=out_row,
+                                        subid=sub.subid, cause=cause)
                 await sub.ws.send_bytes(msg_bytes)
                 if not notified_monitor:
                     await self.notify_monitors("out", msg_bytes)

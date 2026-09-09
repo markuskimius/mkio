@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import sqlite3
 import subprocess
@@ -9,8 +10,10 @@ import sys
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from mkio import create_app, history_table
+from mkio._json import dumps
 from mkio.config import load_config
 from mkio.history import (
     HISTORY_SUFFIX,
@@ -658,7 +661,7 @@ async def test_info_reports_versioned_tables_and_the_convention(app):
     assert row["history_suffix"] == HISTORY_SUFFIX
     # History tables themselves stay out of the listing.
     assert row["tables"] == ["orders", "plain"]
-    assert row["protocol"] == "1.1"
+    assert row["protocol"] == "1.2"
 
 
 async def test_schema_query_points_at_the_history_table(app):
@@ -1921,3 +1924,128 @@ columns = {{ id = "TEXT PRIMARY KEY", sym = "TEXT NOT NULL", qty = "INTEGER" }}
     assert "orders__history" not in tables()
     # The base table and its rows are untouched.
     assert "orders" in tables()
+
+
+# ---------------------------------------------------------------------------
+# End to end: an undo reaches a WebSocket subscriber labelled as one
+# ---------------------------------------------------------------------------
+
+
+def _versioned_ws_app():
+    """A real aiohttp app over the versioned config, with subpub and query."""
+    from aiohttp import web
+
+    from mkio.config import load_config
+    from mkio.server import _on_shutdown, _on_startup, _ws_handler
+
+    cfg = _config()
+    cfg["services"]["watch"] = {
+        "protocol": "query",
+        "primary_table": "orders",
+        "watch_tables": ["orders"],
+        "change_log_size": 100,
+    }
+    cfg["services"]["one"] = {
+        "protocol": "subpub",
+        "primary_table": "orders",
+        "watch_tables": ["orders"],
+        "topic": "id",
+        "change_log_size": 100,
+    }
+    app = web.Application()
+    app["config"] = load_config(cfg)
+    app.on_startup.append(_on_startup)
+    app.on_shutdown.append(_on_shutdown)
+    app.router.add_get("/ws", _ws_handler)
+    return app
+
+
+@pytest_asyncio.fixture
+async def ws_client(aiohttp_client):
+    return await aiohttp_client(_versioned_ws_app())
+
+
+async def _send(ws, msg):
+    from mkio._json import dumps, loads
+    await ws.send_bytes(dumps(msg))
+    return loads((await ws.receive()).data)
+
+
+async def _next(ws):
+    from mkio._json import loads
+    return loads((await asyncio.wait_for(ws.receive(), timeout=2.0)).data)
+
+
+async def test_query_subscriber_sees_an_undo_labelled_end_to_end(ws_client):
+    ws = await ws_client.ws_connect("/ws")
+    await _send(ws, {"service": "ord", "op": "new",
+                     "data": {"id": "O1", "sym": "A", "qty": 10}})
+    await _send(ws, {"service": "ord", "op": "amend", "data": {"id": "O1", "qty": 20}})
+
+    snap = await _send(ws, {"service": "watch", "type": "subscribe",
+                            "protocol": "query"})
+    assert snap["type"] == "snapshot"
+    assert snap["rows"][0]["qty"] == 20
+
+    await ws.send_bytes(dumps({"service": "ord", "op": "undo", "data": {"id": "O1"}}))
+    msgs = [await _next(ws), await _next(ws)]
+    update = next(m for m in msgs if m["type"] == "update")
+
+    assert update["cause"] == "undo"
+    assert update["op"] == "update"
+    assert update["row"]["qty"] == 10          # the shape it stepped back to
+    await ws.close()
+
+
+async def test_query_subscriber_sees_an_ordinary_edit_unlabelled(ws_client):
+    ws = await ws_client.ws_connect("/ws")
+    await _send(ws, {"service": "ord", "op": "new",
+                     "data": {"id": "O1", "sym": "A", "qty": 10}})
+    await _send(ws, {"service": "watch", "type": "subscribe", "protocol": "query"})
+
+    await ws.send_bytes(dumps({"service": "ord", "op": "amend",
+                               "data": {"id": "O1", "qty": 20}}))
+    msgs = [await _next(ws), await _next(ws)]
+    update = next(m for m in msgs if m["type"] == "update")
+
+    assert "cause" not in update
+    assert update["row"]["qty"] == 20
+    await ws.close()
+
+
+async def test_subpub_subscriber_sees_a_redo_labelled_end_to_end(ws_client):
+    ws = await ws_client.ws_connect("/ws")
+    await _send(ws, {"service": "ord", "op": "new",
+                     "data": {"id": "O1", "sym": "A", "qty": 10}})
+    await _send(ws, {"service": "ord", "op": "amend", "data": {"id": "O1", "qty": 20}})
+    await _send(ws, {"service": "ord", "op": "undo", "data": {"id": "O1"}})
+
+    snap = await _send(ws, {"service": "one", "type": "subscribe",
+                            "protocol": "subpub", "topic": "O1"})
+    assert snap["rows"][0]["qty"] == 10
+
+    await ws.send_bytes(dumps({"service": "ord", "op": "redo", "data": {"id": "O1"}}))
+    msgs = [await _next(ws), await _next(ws)]
+    update = next(m for m in msgs if m["type"] == "update")
+
+    assert update["cause"] == "redo"
+    assert update["row"]["qty"] == 20
+    assert update["row"]["_mkio_exists"] is True
+    await ws.close()
+
+
+async def test_undo_that_removes_a_row_reaches_subpub_labelled(ws_client):
+    """Undo past version 1 deletes; subpub reports not-found, still labelled."""
+    ws = await ws_client.ws_connect("/ws")
+    await _send(ws, {"service": "ord", "op": "new",
+                     "data": {"id": "O1", "sym": "A", "qty": 10}})
+    await _send(ws, {"service": "one", "type": "subscribe",
+                     "protocol": "subpub", "topic": "O1"})
+
+    await ws.send_bytes(dumps({"service": "ord", "op": "undo", "data": {"id": "O1"}}))
+    msgs = [await _next(ws), await _next(ws)]
+    update = next(m for m in msgs if m["type"] == "update")
+
+    assert update["cause"] == "undo"
+    assert update["row"]["_mkio_exists"] is False
+    await ws.close()

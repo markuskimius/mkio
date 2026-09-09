@@ -165,7 +165,7 @@ class InfoService(Service):
                 "name": self._server_config.get("name", ""),
                 "version": self._server_config.get("version", ""),
                 "mkio": mkio_version,
-                "protocol": "1.1",
+                "protocol": "1.2",
                 "expr": LANGUAGE_VERSION,
                 "services": services_map,
                 "tables": tables,

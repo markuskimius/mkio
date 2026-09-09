@@ -1092,3 +1092,42 @@ def test_adduser_respects_env_var(tmp_path):
     assert row is not None
     from mkio.auth import verify_password
     assert verify_password("secret123", row[0])
+
+
+# ---------------------------------------------------------------------------
+# Update rendering: a version cursor move is labelled as one
+# ---------------------------------------------------------------------------
+
+
+def test_cli_update_labels_an_undo(capsys):
+    from mkio.__main__ import _print_subscribe_message
+
+    _print_subscribe_message({
+        "type": "update", "service": "orders", "op": "update",
+        "row": {"id": "O1", "qty": 10}, "ref": "r1", "cause": "undo",
+    })
+    out = capsys.readouterr().out
+    assert "UPDATE update (undo)" in out
+    assert '"qty": 10' in out
+
+
+def test_cli_update_labels_a_redo(capsys):
+    from mkio.__main__ import _print_subscribe_message
+
+    _print_subscribe_message({
+        "type": "update", "service": "orders", "op": "insert",
+        "row": {"id": "O1"}, "cause": "redo",
+    })
+    assert "UPDATE insert (redo)" in capsys.readouterr().out
+
+
+def test_cli_update_says_nothing_extra_for_an_ordinary_write(capsys):
+    from mkio.__main__ import _print_subscribe_message
+
+    _print_subscribe_message({
+        "type": "update", "service": "orders", "op": "update",
+        "row": {"id": "O1", "qty": 20}, "ref": "r2",
+    })
+    out = capsys.readouterr().out
+    assert "UPDATE update" in out
+    assert "(" not in out.splitlines()[0]

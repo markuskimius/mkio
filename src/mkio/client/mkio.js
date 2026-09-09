@@ -317,7 +317,9 @@ class MkioClient {
    * @param {boolean} [opts.updates=true] - Whether to receive live updates
    * @param {string[]} [opts.fields] - Restrict rows to these fields only
    * @param {Function} [opts.onSnapshot] - (rows) => void
-   * @param {Function} [opts.onUpdate] - (op, row) => void
+   * @param {Function} [opts.onUpdate] - (op, row, info) => void; info is
+   *   {cause, ref, service, subid}. `cause` is "undo"/"redo" when the change
+   *   came from a version cursor move, null for an ordinary write.
    * @param {Function} [opts.onPage] - (rows, {hasmore, ref}) => void; disables auto-paging when set with maxcount
    */
   subscribe(service, protocol, opts = {}) {
@@ -592,7 +594,12 @@ class MkioClient {
       } else if (type === "delta") {
         sub.onDelta(data.changes);
       } else if (type === "update") {
-        sub.onUpdate(data.op, data.row);
+        sub.onUpdate(data.op, data.row, {
+          cause: data.cause || null,
+          ref: data.ref || null,
+          service: data.service,
+          subid: data.subid || null,
+        });
       }
     }
   }
@@ -932,7 +939,10 @@ function _mkioSubscribe(service, protocol, opts) {
     o.onDelta = (changes) => console.log(`[${makeLocalTs()}] \u2190 ${service} delta`, changes);
   }
   if (!o.onUpdate) {
-    o.onUpdate = (op, row) => console.log(`[${makeLocalTs()}] \u2190 ${service} update ${op}`, row);
+    o.onUpdate = (op, row, info) => console.log(
+      `[${makeLocalTs()}] \u2190 ${service} update ${op}${info && info.cause ? ` (${info.cause})` : ""}`,
+      row,
+    );
   }
   if (!o.onNack) {
     o.onNack = (message) => {
