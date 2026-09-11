@@ -1317,7 +1317,7 @@ The JavaScript module exposes the same API with camelCase names — `compile`, `
 ## Performance
 
 - **Write batching** — collects writes over a 2ms window, commits as single SQLite transaction with per-request SAVEPOINTs
-- **WAL mode** — dual connections (write + read) for concurrent reads during writes
+- **WAL mode** — dual connections (write + read) for concurrent reads during writes. An in-memory database cannot use WAL: its two connections share a cache, which locks per table, so its read connection sets `read_uncommitted` — without it a read of a table the writer holds open fails with `SQLITE_LOCKED` rather than waiting
 - **Zero-copy fan-out** — change events serialized once, same bytes sent to all subscribers
 - **Optional acceleration** — `pip install mkio[fast]` for orjson (5-10x JSON) and uvloop (2-4x I/O)
 

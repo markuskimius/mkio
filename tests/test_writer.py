@@ -318,3 +318,4 @@ async def test_change_event_includes_db_defaults(writer, bus):
     assert "id" in event.row
     assert isinstance(event.row["id"], int)
     assert event.row["id"] > 0
+

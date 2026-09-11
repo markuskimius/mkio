@@ -54,6 +54,16 @@ class Database:
             await (await conn.execute("PRAGMA synchronous=NORMAL")).close()
             await (await conn.execute("PRAGMA cache_size=-64000")).close()
 
+        if is_memory:
+            # WAL is a no-op for an in-memory database, so the shared cache the
+            # two connections need falls back to table-level locking: a read of
+            # a table the writer holds open fails outright with SQLITE_LOCKED
+            # ("database table is locked"), which no busy timeout retries — the
+            # remedy needs sqlite3_unlock_notify, which Python does not expose.
+            # Reading uncommitted lets the read through; at worst it sees a row
+            # from a savepoint the batch goes on to roll back.
+            await (await self._read_conn.execute("PRAGMA read_uncommitted=1")).close()
+
         self._write_conn.row_factory = aiosqlite.Row
         self._read_conn.row_factory = aiosqlite.Row
 
