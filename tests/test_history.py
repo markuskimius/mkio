@@ -1804,10 +1804,11 @@ async def test_multi_row_delete_truncates_every_chain(app):
 
 
 async def test_two_writes_to_one_row_in_a_single_transaction(app):
-    """Both ops run under one ref, and the counter advances once per op."""
+    """Both ops run under one ref, and the counter advances once per op that
+    changes the row — the insert leaves qty unset, the update fills it."""
     cfg = _config()
     cfg["services"]["ord"]["ops"]["new_then_amend"] = [
-        {"table": "orders", "op_type": "insert", "fields": ["id", "sym", "qty"]},
+        {"table": "orders", "op_type": "insert", "fields": ["id", "sym"]},
         {"table": "orders", "op_type": "update", "key": ["id"], "fields": ["qty"]},
     ]
     a = create_app(cfg)
@@ -2049,3 +2050,321 @@ async def test_undo_that_removes_a_row_reaches_subpub_labelled(ws_client):
     assert update["cause"] == "undo"
     assert update["row"]["_mkio_exists"] is False
     await ws.close()
+
+
+# ---------------------------------------------------------------------------
+# Writer-owned versioning
+# ---------------------------------------------------------------------------
+#
+# The statement never touches _mkio_version. The writer compares each returned
+# row with the history row at its own version — the pre-image — and steps the
+# counter only when a versioned column changed. So hand-written SQL is
+# versioned exactly like compiled ops, and a write that changes nothing
+# records nothing.
+
+
+def _hand_op(table, op_type, sql, params):
+    from mkio.writer import CompiledOp
+    return CompiledOp(table=table, op_type=op_type, sql=sql, param_names=params)
+
+
+HAND_UPDATE = _hand_op(
+    "orders", "update",
+    "UPDATE orders SET qty = ?, _mkio_ref = ? WHERE id = ? RETURNING *",
+    ("qty", "_mkio_ref", "id"),
+)
+
+HAND_UPSERT = _hand_op(
+    "orders", "upsert",
+    "INSERT INTO orders (id, sym, qty, _mkio_ref) VALUES (?, ?, ?, ?) "
+    "ON CONFLICT(id) DO UPDATE SET sym = excluded.sym, qty = excluded.qty, "
+    "_mkio_ref = excluded._mkio_ref RETURNING *",
+    ("id", "sym", "qty", "_mkio_ref"),
+)
+
+
+async def _hand(app, op, *params):
+    """Submit a hand-written op the way an embedding engine does: straight to
+    the writer, with `None` where the ref goes (the writer fills it)."""
+    params = list(params)
+    params.insert(op.param_names.index("_mkio_ref"), None)
+    return await app.writer.submit((op,), (tuple(params),), {})
+
+
+def test_compiled_ops_never_touch_the_counter():
+    from mkio.services.transaction import _compile_op
+    versioned = {"orders": VERSIONED_CONFIG["tables"]["orders"]}
+    for spec in (
+        {"table": "orders", "op_type": "insert", "fields": ["id", "sym"]},
+        {"table": "orders", "op_type": "update", "key": ["id"], "fields": ["qty"]},
+        {"table": "orders", "op_type": "upsert", "key": ["id"], "fields": ["qty"]},
+    ):
+        sql = _compile_op(spec, versioned).sql
+        assert VERSION_COLUMN not in sql
+        assert sql.endswith("RETURNING *")
+
+
+async def test_identical_write_records_nothing(app):
+    await app.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+    await app.execute("ord", {"id": "O1", "qty": 25}, op="amend")
+    await app.execute("ord", {"id": "O1", "qty": 25}, op="amend")
+
+    live = (await app.query("SELECT * FROM orders"))[0]
+    assert live[VERSION_COLUMN] == 2
+    assert [r[VERSION_COLUMN] for r in await _history(app)] == [1, 2]
+
+
+async def test_identical_write_still_stamps_the_ref(app):
+    """The row is written as before; only the history is left alone."""
+    await app.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+    r = await app.execute("ord", {"id": "O1", "qty": 10}, op="amend")
+    live = (await app.query("SELECT * FROM orders"))[0]
+    assert live["_mkio_ref"] == r["ref"]
+    assert (await _history(app))[-1]["_mkio_ref"] != r["ref"]
+
+
+async def test_identical_write_keeps_the_redo_branch(app):
+    await app.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+    await app.execute("ord", {"id": "O1", "qty": 25}, op="amend")
+    await app.execute("ord", {"id": "O1"}, op="undo")
+    # Re-saving what version 1 already holds is not an edit.
+    await app.execute("ord", {"id": "O1", "qty": 10}, op="amend")
+
+    assert (await app.query("SELECT * FROM orders"))[0][VERSION_COLUMN] == 1
+    assert [r[VERSION_COLUMN] for r in await _history(app)] == [1, 2]
+    await app.execute("ord", {"id": "O1"}, op="redo")
+    assert (await app.query("SELECT * FROM orders"))[0]["qty"] == 25
+
+
+async def test_hand_written_update_is_versioned_by_the_writer(app):
+    await app.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+    await _hand(app, HAND_UPDATE, 25, "O1")
+    await _hand(app, HAND_UPDATE, 25, "O1")   # nothing changed
+    await _hand(app, HAND_UPDATE, 30, "O1")
+
+    live = (await app.query("SELECT * FROM orders"))[0]
+    assert live[VERSION_COLUMN] == 3
+    rows = await _history(app)
+    assert [(r[VERSION_COLUMN], r["qty"]) for r in rows] == [(1, 10), (2, 25), (3, 30)]
+    assert [r["_mkio_op"] for r in rows] == ["insert", "update", "update"]
+
+
+async def test_hand_written_upsert_starts_at_one_then_increments(app):
+    await _hand(app, HAND_UPSERT, "O1", "A", 1)
+    assert (await app.query("SELECT * FROM orders"))[0][VERSION_COLUMN] == 1
+    await _hand(app, HAND_UPSERT, "O1", "A", 2)
+    assert (await app.query("SELECT * FROM orders"))[0][VERSION_COLUMN] == 2
+    await _hand(app, HAND_UPSERT, "O1", "A", 2)
+    assert (await app.query("SELECT * FROM orders"))[0][VERSION_COLUMN] == 2
+    assert [r[VERSION_COLUMN] for r in await _history(app)] == [1, 2]
+
+
+async def test_upsert_records_what_it_did_not_what_it_was(app):
+    """A history row's op is insert or update: the pre-image tells the writer
+    which side of the upsert ran."""
+    await _hand(app, HAND_UPSERT, "O1", "A", 1)
+    await _hand(app, HAND_UPSERT, "O1", "A", 2)
+    assert [r["_mkio_op"] for r in await _history(app)] == ["insert", "update"]
+
+
+async def test_hand_written_edit_after_undo_cuts_the_branch_at_the_cursor(app):
+    await app.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+    await app.execute("ord", {"id": "O1", "qty": 20}, op="amend")
+    await app.execute("ord", {"id": "O1", "qty": 30}, op="amend")
+    await app.execute("ord", {"id": "O1"}, op="undo")   # cursor 2, v3 is redo
+    await _hand(app, HAND_UPDATE, 99, "O1")
+
+    rows = await _history(app)
+    assert [(r[VERSION_COLUMN], r["qty"]) for r in rows] == [(1, 10), (2, 20), (3, 99)]
+    assert (await app.query("SELECT * FROM orders"))[0][VERSION_COLUMN] == 3
+
+
+async def test_multi_row_hand_written_update_versions_each_row(app):
+    await app.execute("ord", {"id": "O1", "sym": "AAPL", "qty": 1}, op="new")
+    await app.execute("ord", {"id": "O2", "sym": "AAPL", "qty": 2}, op="new")
+    await app.execute("ord", {"id": "O3", "sym": "MSFT", "qty": 3}, op="new")
+    op = _hand_op("orders", "update",
+                  "UPDATE orders SET qty = ?, _mkio_ref = ? WHERE sym = ? RETURNING *",
+                  ("qty", "_mkio_ref", "sym"))
+    await app.writer.submit((op,), ((99, None, "AAPL"),), {})
+
+    live = await app.query("SELECT id, _mkio_version FROM orders ORDER BY id")
+    assert [(r["id"], r[VERSION_COLUMN]) for r in live] == [("O1", 2), ("O2", 2), ("O3", 1)]
+
+
+async def test_change_event_carries_the_bumped_version(app):
+    seen = []
+
+    async def cb(event):
+        seen.append(event)
+
+    unsub = await app.subscribe(["orders"], cb)
+    try:
+        await app.execute("ord", {"id": "O1", "sym": "A", "qty": 10}, op="new")
+        await app.execute("ord", {"id": "O1", "qty": 25}, op="amend")
+        await asyncio.sleep(0.05)
+    finally:
+        unsub()
+    assert [e.row[VERSION_COLUMN] for e in seen] == [1, 2]
+
+
+async def test_bind_sees_the_bumped_version(app):
+    """A later op bound to the row reads the version the writer settled on."""
+    cfg = _config()
+    cfg["tables"]["log"] = {"columns": {"id": "INTEGER PRIMARY KEY AUTOINCREMENT",
+                                        "v": "INTEGER"}}
+    cfg["services"]["ord"]["ops"]["amend_logged"] = [
+        {"table": "orders", "op_type": "update", "key": ["id"], "fields": ["qty"]},
+        {"table": "log", "op_type": "insert", "fields": [],
+         "bind": {"v": f"$0.{VERSION_COLUMN}"}},
+    ]
+    a = create_app(cfg)
+    await a.start()
+    try:
+        await a.execute("ord", {"id": "O1", "sym": "A", "qty": 1}, op="new")
+        await a.execute("ord", {"id": "O1", "qty": 2}, op="amend_logged")
+        assert [r["v"] for r in await a.query("SELECT v FROM log")] == [2]
+    finally:
+        await a.stop()
+
+
+# --- unversioned columns ----------------------------------------------------
+
+
+def _mirror_config():
+    cfg = _config()
+    cfg["tables"]["orders"]["columns"]["touched"] = "TEXT DEFAULT ''"
+    cfg["tables"]["orders"]["unversioned"] = ["touched"]
+    cfg["services"]["ord"]["ops"]["touch"] = [
+        {"table": "orders", "op_type": "update", "key": ["id"], "fields": ["touched"]}
+    ]
+    return cfg
+
+
+@pytest.fixture
+async def mirror_app():
+    a = create_app(_mirror_config())
+    await a.start()
+    yield a
+    await a.stop()
+
+
+def test_unversioned_columns_are_left_out_of_the_history_schema():
+    cfg = load_config(_mirror_config())
+    hist = cfg["_history_tables"][history_table("orders")]
+    assert "touched" not in hist["columns"]
+    assert "qty" in hist["columns"]
+
+
+async def test_writes_to_unversioned_columns_record_nothing(mirror_app):
+    a = mirror_app
+    await a.execute("ord", {"id": "O1", "sym": "A", "qty": 1}, op="new")
+    await a.execute("ord", {"id": "O1", "touched": "t1"}, op="touch")
+    await a.execute("ord", {"id": "O1", "touched": "t2"}, op="touch")
+
+    live = (await a.query("SELECT * FROM orders"))[0]
+    assert live["touched"] == "t2"
+    assert live[VERSION_COLUMN] == 1
+    rows = await a.history("orders")
+    assert len(rows) == 1
+    assert "touched" not in rows[0]
+
+
+async def test_undo_leaves_unversioned_columns_alone(mirror_app):
+    a = mirror_app
+    await a.execute("ord", {"id": "O1", "sym": "A", "qty": 1}, op="new")
+    await a.execute("ord", {"id": "O1", "qty": 2}, op="amend")
+    await a.execute("ord", {"id": "O1", "touched": "live"}, op="touch")
+    await a.execute("ord", {"id": "O1"}, op="undo")
+
+    live = (await a.query("SELECT * FROM orders"))[0]
+    assert (live["qty"], live[VERSION_COLUMN], live["touched"]) == (1, 1, "live")
+    await a.execute("ord", {"id": "O1"}, op="redo")
+    live = (await a.query("SELECT * FROM orders"))[0]
+    assert (live["qty"], live["touched"]) == (2, "live")
+
+
+async def test_redo_rebuilds_unversioned_columns_from_their_defaults(mirror_app):
+    a = mirror_app
+    await a.execute("ord", {"id": "O1", "sym": "A", "qty": 1}, op="new")
+    await a.execute("ord", {"id": "O1", "touched": "live"}, op="touch")
+    await a.execute("ord", {"id": "O1"}, op="undo")      # row gone
+    await a.execute("ord", {"id": "O1"}, op="redo")      # rebuilt from v1
+    live = (await a.query("SELECT * FROM orders"))[0]
+    assert (live["qty"], live["touched"]) == (1, "")
+
+
+async def test_schema_query_reports_unversioned_columns(mirror_app):
+    row = (await _info(mirror_app, {"table": "orders"}))["row"]
+    assert row["unversioned"] == ["touched"]
+
+
+def test_unversioned_requires_a_versioned_table():
+    cfg = _config()
+    cfg["tables"]["plain"]["unversioned"] = ["v"]
+    with pytest.raises(ValueError, match="only applies to a versioned table"):
+        load_config(cfg)
+
+
+def test_unversioned_must_name_declared_columns():
+    cfg = _config()
+    cfg["tables"]["orders"]["unversioned"] = ["nope"]
+    with pytest.raises(ValueError, match="not a column"):
+        load_config(cfg)
+
+
+def test_unversioned_cannot_name_the_key():
+    cfg = _config()
+    cfg["tables"]["orders"]["unversioned"] = ["id"]
+    with pytest.raises(ValueError, match="primary key"):
+        load_config(cfg)
+
+
+def test_unversioned_must_be_a_list_of_names():
+    cfg = _config()
+    cfg["tables"]["orders"]["unversioned"] = "qty"
+    with pytest.raises(ValueError, match="list of column names"):
+        load_config(cfg)
+
+
+async def test_history_feed_reports_the_recorded_op_for_an_upsert(app):
+    """A subscriber to the history table sees insert/update, never upsert."""
+    seen = []
+
+    async def cb(event):
+        seen.append(event)
+
+    unsub = await app.subscribe([history_table("orders")], cb)
+    try:
+        await _hand(app, HAND_UPSERT, "O1", "A", 1)
+        await _hand(app, HAND_UPSERT, "O1", "A", 2)
+        await _hand(app, HAND_UPSERT, "O1", "A", 2)   # unchanged: no event
+        await asyncio.sleep(0.05)
+    finally:
+        unsub()
+    assert [(e.row["_mkio_op"], e.row[VERSION_COLUMN]) for e in seen] == [
+        ("insert", 1), ("update", 2)]
+
+
+def test_a_column_recorded_before_being_unversioned_keeps_its_old_values(tmp_path):
+    """History tables are additive-only: listing a column as unversioned
+    stops recording it, but the versions already holding it stay intact."""
+    cfg = _disk_config(tmp_path, columns={"id": "TEXT PRIMARY KEY", "sym": "TEXT",
+                                          "qty": "INTEGER", "touched": "TEXT"})
+    conn = sqlite3.connect(cfg["db_path"])
+    _migrate(conn, cfg)
+    conn.execute("INSERT INTO orders (id, sym, qty, touched, _mkio_version) "
+                 "VALUES ('O1', 'A', 1, 'yes', 1)")
+    conn.execute(f"INSERT INTO {history_table('orders')} "
+                 "(_mkio_version, _mkio_op, _mkio_ref, id, sym, qty, touched) "
+                 "VALUES (1, 'insert', 'r1', 'O1', 'A', 1, 'yes')")
+    conn.commit()
+
+    cfg["tables"]["orders"]["unversioned"] = ["touched"]
+    cfg = load_config(cfg)
+    _migrate(conn, cfg)
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({history_table('orders')})")}
+    assert "touched" in cols, "the column is kept, not dropped"
+    row = conn.execute(f"SELECT touched FROM {history_table('orders')} WHERE id = 'O1'").fetchone()
+    assert row[0] == "yes"
+    conn.close()

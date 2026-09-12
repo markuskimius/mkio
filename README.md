@@ -80,7 +80,7 @@ For programmatic control (custom routes, non-blocking lifecycle), see [Programma
 - **Query** — snapshot + change feed from SQLite
 - **ReqRep** — one-shot request-reply with parameterized SQL and/or expression evaluation, returning scalar values, single records, or result sets
 - **Expression language** — one safe, extensible language for filters and formatters (`qty > 100 && status == 'pending'`), implemented identically in Python and JavaScript
-- **Versioned tables** — set `versioned = true` on a table and every row gets a `_mkio_version` counter and a full history of its versions in `<table>__history`, stamped with the ref, the user and the service. Built-in `undo`/`redo` ops step a row along its own history, with an `on_undo_redo` hook carrying the before and after shapes so an application can unwind what the write caused; `mkio archive` moves old versions to CSV
+- **Versioned tables** — set `versioned = true` on a table and every row gets a `_mkio_version` counter and a full history of its versions in `<table>__history`, stamped with the ref, the user and the service. The writer maintains the counter, so hand-written ops are versioned like compiled ones and a write that changes nothing records nothing; `unversioned = [...]` keeps live mirror columns out of the chain. Built-in `undo`/`redo` ops step a row along its own history, with an `on_undo_redo` hook carrying the before and after shapes so an application can unwind what the write caused; `mkio archive` moves old versions to CSV
 - **Schema migration** — automatic detection of safe/destructive changes with interactive confirmation
 - **Write batching** — hundreds of writes committed in a single SQLite transaction for high throughput
 - **Reconnection recovery** — stream services use ref-based cursor reconnection persisted across server restarts via `_mkio_ref` column; subpub and query always replay a full snapshot
@@ -429,16 +429,43 @@ base row:                        ▲
                                       └── v4 is redo, still reachable
 ```
 
-Every versioned row carries a `_mkio_version` counter: **1** when inserted, **+1** on every edit. The base row's source columns always equal the history row with the same key and that version number — normally the highest one. After an undo the cursor sits lower, and the versions above it remain as redo.
+Every versioned row carries a `_mkio_version` counter: **1** when inserted, **+1** on every edit that changes something. The base row's source columns always equal the history row with the same key and that version number — normally the highest one. After an undo the cursor sits lower, and the versions above it remain as redo.
 
 An absent base row means the cursor is at 0: the row was undone past version 1, and redo can rebuild it.
+
+### The writer owns the counter
+
+No statement touches `_mkio_version` — not the ops mkio compiles from config, and not yours. After a statement against a versioned table runs, the writer reads each returned row, looks up the history row at the row's own version (its pre-image), and decides:
+
+| The returned row… | The writer… |
+|---|---|
+| has no recorded version at its number | records it as inserted (version 1 from the column default) |
+| matches its pre-image in every versioned column | records nothing — the row is written, `_mkio_ref` and all, but the chain is left alone |
+| differs from its pre-image | steps the counter forward, cuts any redo branch at the new number, records the new version |
+
+Two things follow. A write that changes nothing makes no version, so a re-save is not an edit and does not discard a redo branch. And any hand-written op works the same way as a compiled one: an application that builds its own `CompiledOp` (an embedded engine writing through `app.writer`) needs only `RETURNING *` on the statement, and must never set or increment `_mkio_version` itself. Rows an `INSERT` creates take version 1 from the column default.
+
+One edge to know about: an *upsert* landing on a key that was undone past version 1 finds that row's old version 1 and continues its chain as version 2, because the writer cannot see that the base row was absent. A plain `insert` starts a fresh chain, as before.
+
+### Columns outside the history
+
+A versioned table can keep some columns out of its history — a live mirror the engine rewrites constantly, a status the framework maintains, anything that is not an edit of the record:
+
+```toml
+[tables.sessions]
+columns = { id = "TEXT PRIMARY KEY", host = "TEXT", port = "INTEGER", status = "TEXT", seq = "INTEGER" }
+versioned = true
+unversioned = ["status", "seq"]
+```
+
+Unversioned columns are absent from the history table, ignored when the writer decides whether a write changed anything, and left untouched by undo and redo — a session's history is then its configuration edits, and a heartbeat that bumps `seq` records nothing. They must be columns of the table and cannot be part of the primary key. The `_mkio` schema reply lists them as `unversioned`. A column that was recorded before being listed keeps its old values in the history table (history tables are additive-only); new versions simply leave it `NULL`.
 
 ### What a history row holds
 
 | Column | Description |
 |--------|-------------|
 | `_mkio_version` | Version number; part of the primary key with the base table's own key |
-| `_mkio_op` | `insert`, `update`, or `baseline` |
+| `_mkio_op` | `insert`, `update`, or `baseline` — an upsert records whichever it did |
 | `_mkio_ref` | Ref of the transaction that recorded this version |
 | `_mkio_user` | Authenticated user who made it (`NULL` when auth is disabled) |
 | `_mkio_service` | Service the change came through |
@@ -549,7 +576,7 @@ v1 ── v2 ── v3        undo, undo        v1 ── v2 ── v3        ed
             ▲                            ▲                                      ▲
 ```
 
-A fresh `insert` is version 1, so it discards the whole prior chain — which is what makes "undo to nothing, then insert again" behave sensibly. A `delete` is a real delete: the row goes and its history goes with it.
+A fresh `insert` is version 1, so it discards the whole prior chain — which is what makes "undo to nothing, then insert again" behave sensibly. A `delete` is a real delete: the row goes and its history goes with it. A write that leaves every versioned column as it was is not an edit and cuts nothing.
 
 **This means truncation destroys audit history.** If you need the abandoned versions kept for audit, record application events separately — the `order_book` example's `audit_log` pattern does exactly that, and survives truncation because it is an ordinary table.
 

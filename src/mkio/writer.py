@@ -10,7 +10,7 @@ from typing import Any
 from mkio._ref import next_ref
 from mkio.change_bus import ChangeBus, ChangeEvent
 from mkio.database import Database
-from mkio.history import HistorySpec, VersionPlan
+from mkio.history import VERSION_COLUMN, HistorySpec, VersionPlan
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +233,15 @@ class WriteBatcher:
     ) -> list[ChangeEvent]:
         """Record changed rows in a history table, inside the caller's SAVEPOINT.
 
+        The statement leaves ``_mkio_version`` alone, so the returned row still
+        carries the version it sat on before — and the history row at that
+        version is its pre-image.  An update or upsert whose pre-image exists
+        and matches records nothing; one whose pre-image differs has the base
+        row's counter stepped forward first (the returned dict is patched to
+        match, so the change event and any cross-op bind see the new number).
+        No pre-image means the statement inserted the row, which starts at
+        version 1 from the column default.
+
         Writing at version V first discards the recorded versions at V and
         above: an edit made after an undo abandons the redo branch it left
         behind.  A delete drops the row's history outright.
@@ -248,17 +257,34 @@ class WriteBatcher:
                     hist.truncate_all_sql, hist.key_params(row_data)
                 )).close()
                 continue
+            # The pre-image says what an upsert did, so the recorded op is
+            # always "insert" or "update" (plus "baseline" from migration).
+            recorded_op = "insert"
+            if op.op_type != "insert":
+                cursor = await conn.execute(
+                    hist.lookup_sql, hist.lookup_params(row_data)
+                )
+                previous = await cursor.fetchone()
+                await cursor.close()
+                if previous is not None:
+                    if not hist.changed(previous, row_data):
+                        continue
+                    await (await conn.execute(
+                        hist.bump_sql, hist.key_params(row_data)
+                    )).close()
+                    row_data[VERSION_COLUMN] = (row_data.get(VERSION_COLUMN) or 0) + 1
+                    recorded_op = "update"
             await (await conn.execute(
                 hist.truncate_sql, hist.truncate_params(row_data)
             )).close()
             await (await conn.execute(
                 hist.insert_sql,
-                hist.insert_params(row_data, op.op_type, ref, req.user, req.service),
+                hist.insert_params(row_data, recorded_op, ref, req.user, req.service),
             )).close()
             if publish:
                 hist_row = {
                     "_mkio_version": row_data.get("_mkio_version"),
-                    "_mkio_op": op.op_type,
+                    "_mkio_op": recorded_op,
                     "_mkio_ref": ref,
                     "_mkio_user": req.user,
                     "_mkio_service": req.service,
@@ -320,14 +346,17 @@ class WriteBatcher:
                         else:
                             rows = []
                         await cursor.close()
-                        returned_rows.append((op, rows[0] if rows else req.data))
-                        emitted.append(ChangeBus.make_event(
-                            op.table, op.op_type, rows[0] if rows else req.data, ref
-                        ))
+                        # Capture may step a row's version forward, so the
+                        # event and the bind row are built from the rows only
+                        # after it has run.
                         if hist is not None:
                             history_events.extend(
                                 await self._capture_history(conn, hist, op, rows, req, ref)
                             )
+                        returned_rows.append((op, rows[0] if rows else req.data))
+                        emitted.append(ChangeBus.make_event(
+                            op.table, op.op_type, rows[0] if rows else req.data, ref
+                        ))
                     await (await conn.execute(f"RELEASE {savepoint}")).close()
 
                     successful.append((req, ref))

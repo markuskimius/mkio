@@ -70,7 +70,7 @@ _VALID_SERVICE_KEYS: dict[str, frozenset[str]] = {
 
 _VALID_PROTOCOLS = frozenset({"transaction", "subpub", "stream", "query", "reqrep"})
 
-_VALID_TABLE_KEYS = frozenset({"columns", "primary_key", "seed", "versioned"})
+_VALID_TABLE_KEYS = frozenset({"columns", "primary_key", "seed", "versioned", "unversioned"})
 
 
 def load_config(source: str | Path | dict[str, Any]) -> dict[str, Any]:
@@ -545,6 +545,34 @@ def _validate_table(table_name: str, table_config: dict[str, Any]) -> None:
                 f"the history table is keyed by (primary key, _mkio_version). "
                 f"Add PRIMARY KEY to a column, or a primary_key = [...] entry."
             )
+
+    unversioned = table_config.get("unversioned")
+    if unversioned is not None:
+        if not versioned:
+            raise ValueError(
+                f"Table {table_name!r}: 'unversioned' only applies to a versioned "
+                f"table. Set versioned = true, or remove the list."
+            )
+        if not isinstance(unversioned, list) or not all(
+            isinstance(c, str) and c for c in unversioned
+        ):
+            raise ValueError(
+                f"Table {table_name!r}: 'unversioned' must be a list of column "
+                f"names, got {unversioned!r}"
+            )
+        columns = table_config.get("columns", {})
+        pk = set(primary_key_columns(table_config))
+        for col in unversioned:
+            if col not in columns:
+                raise ValueError(
+                    f"Table {table_name!r}: unversioned column {col!r} is not a "
+                    f"column of the table"
+                )
+            if col in pk:
+                raise ValueError(
+                    f"Table {table_name!r}: unversioned column {col!r} is part of "
+                    f"the primary key, which identifies a row's versions"
+                )
 
     _warn_unknown_keys(f"table '{table_name}'", table_config, _VALID_TABLE_KEYS,
                        exclude_prefixes=("_",))

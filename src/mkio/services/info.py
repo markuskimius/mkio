@@ -124,6 +124,9 @@ class InfoService(Service):
         elif all_tables[table].get("versioned"):
             row["versioned"] = True
             row["history_table"] = history_table_name(table)
+            unversioned = list(all_tables[table].get("unversioned", []) or [])
+            if unversioned:
+                row["unversioned"] = unversioned
         resp = make_reply(self.name, row=row, reqid=reqid)
         await ws.send_bytes(resp)
         await self.notify_monitors("out", resp)

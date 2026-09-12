@@ -13,6 +13,16 @@ The base row's ``_mkio_version`` says which version is current; its source
 columns equal that history row's.  An absent base row means the cursor is at 0.
 Writing at version V discards history at V and above, so a new edit after an
 undo drops the abandoned redo branch.
+
+The writer owns the counter.  A statement against a versioned table never
+touches ``_mkio_version``: after it runs, the writer compares each returned
+row with the history row at the row's own version — the pre-image — and
+bumps the counter only when a versioned column changed (``HistorySpec``).
+So a hand-written ``RETURNING *`` op is versioned exactly like a compiled one,
+and a write that changes nothing records nothing.  Columns listed under a
+table's ``unversioned`` key are left out of the history table and out of
+that comparison: a live mirror that only ever touches those columns leaves
+the chain alone.
 """
 
 from __future__ import annotations
@@ -118,15 +128,22 @@ def primary_key_columns(table_cfg: dict[str, Any]) -> list[str]:
     return result
 
 
+def unversioned_columns(table_cfg: dict[str, Any]) -> tuple[str, ...]:
+    """Columns the table keeps out of its history (``unversioned = [...]``)."""
+    return tuple(table_cfg.get("unversioned", []) or [])
+
+
 def source_columns(table_cfg: dict[str, Any]) -> tuple[str, ...]:
     """Base table columns carried into history, in declaration order.
 
     ``_mkio_``-prefixed columns are excluded: they are framework-managed and
-    already present as history metadata.
+    already present as history metadata.  So are the table's ``unversioned``
+    columns: they are never recorded, never compared, and never restored.
     """
+    skip = set(unversioned_columns(table_cfg))
     return tuple(
         name for name in table_cfg.get("columns", {})
-        if not name.startswith("_mkio_")
+        if not name.startswith("_mkio_") and name not in skip
     )
 
 
@@ -316,13 +333,21 @@ def redo_plan(table: str, table_cfg: dict[str, Any]) -> VersionPlan:
 
 @dataclass(frozen=True, slots=True)
 class HistorySpec:
-    """Precompiled statements the writer uses to record one changed row."""
+    """Precompiled statements the writer uses to record one changed row.
+
+    ``lookup_sql`` reads the versioned columns of the history row at a key and
+    version — the pre-image of a write that left the counter alone — and
+    ``bump_sql`` steps the base row's counter forward when that write changed
+    something.  Both take the key; ``lookup_sql`` takes the version too.
+    """
 
     base_table: str
     table: str
     insert_sql: str
     truncate_sql: str
     truncate_all_sql: str
+    lookup_sql: str
+    bump_sql: str
     columns: tuple[str, ...]
     pk: tuple[str, ...]
 
@@ -345,6 +370,12 @@ class HistorySpec:
         """Key values plus the version at which the redo branch is cut."""
         return self.key_params(row) + (row.get(VERSION_COLUMN),)
 
+    lookup_params = truncate_params
+
+    def changed(self, previous: Any, row: dict[str, Any]) -> bool:
+        """True if any versioned column differs from the recorded pre-image."""
+        return any(previous[c] != row.get(c) for c in self.columns)
+
 
 def history_spec(table: str, table_cfg: dict[str, Any]) -> HistorySpec:
     """Compile the history statements for a versioned table."""
@@ -364,6 +395,14 @@ def history_spec(table: str, table_cfg: dict[str, Any]) -> HistorySpec:
             f"DELETE FROM {hist} WHERE {key_filter} AND {VERSION_COLUMN} >= ?"
         ),
         truncate_all_sql=f"DELETE FROM {hist} WHERE {key_filter}",
+        lookup_sql=(
+            f"SELECT {', '.join(cols) if cols else '1'} FROM {hist} "
+            f"WHERE {key_filter} AND {VERSION_COLUMN} = ?"
+        ),
+        bump_sql=(
+            f"UPDATE {table} SET {VERSION_COLUMN} = {VERSION_COLUMN} + 1 "
+            f"WHERE {key_filter}"
+        ),
         columns=cols,
         pk=pk,
     )

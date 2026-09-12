@@ -12,7 +12,8 @@ monitor_access = "trade"
 columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", side = "TEXT NOT NULL", symbol = "TEXT NOT NULL", qty = "INTEGER", price = "REAL DEFAULT 0", status = "TEXT DEFAULT 'pending'" }
 # Record every version of every row in orders__history, stamped with the
 # ref, the authenticated user and the service it came through. Rows gain a
-# _mkio_version counter: 1 on insert, +1 on every edit. The undo/redo ops below
+# _mkio_version counter: 1 on insert, +1 on every edit that changes something
+# (the writer maintains it; a re-save records nothing). The undo/redo ops below
 # move a row back and forth along its recorded versions.
 versioned = true
 

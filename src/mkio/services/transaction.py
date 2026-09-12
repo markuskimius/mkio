@@ -8,7 +8,7 @@ from typing import Any
 from aiohttp.web import WebSocketResponse
 
 from mkio._ref import next_ref
-from mkio.history import VERSION_COLUMN, redo_plan, undo_plan
+from mkio.history import redo_plan, undo_plan
 from mkio.services.base import Service
 from mkio.writer import CompiledOp
 from mkio.ws_protocol import make_result, make_error
@@ -139,9 +139,10 @@ def _compile_op(
     but their parameter values are resolved at execution time by the writer.
 
     ``versioned`` maps versioned table names to their config.  Ops against one
-    maintain the ``_mkio_version`` counter and return every affected row so the
-    writer can record it; ``undo``/``redo`` compile to a two-step plan that
-    moves the cursor without writing history.
+    return every affected row so the writer can record it and step its
+    ``_mkio_version`` counter — the SQL never touches the counter itself;
+    ``undo``/``redo`` compile to a two-step plan that moves the cursor without
+    writing history.
     """
     op_type = spec["op_type"]
     table = spec["table"]
@@ -175,19 +176,13 @@ def _compile_op(
     # _mkio_ref is always the last parameter (filled by writer at execution time)
     REF_COL = "_mkio_ref"
 
-    # A new row always starts at version 1; an edit steps the counter forward,
-    # which is what the writer uses to cut the abandoned redo branch.
-    version_col = f", {VERSION_COLUMN}" if is_versioned else ""
-    version_value = ", 1" if is_versioned else ""
-    version_set = f", {VERSION_COLUMN} = {VERSION_COLUMN} + 1" if is_versioned else ""
-
     if op_type == "insert":
         cols = all_fields + [REF_COL]
         col_list = ", ".join(cols)
         placeholders = ", ".join("?" for _ in cols)
         sql = (
-            f"INSERT INTO {table} ({col_list}{version_col}) "
-            f"VALUES ({placeholders}{version_value}) RETURNING *"
+            f"INSERT INTO {table} ({col_list}) "
+            f"VALUES ({placeholders}) RETURNING *"
         )
         return CompiledOp(table, op_type, sql, tuple(cols), bind, defaults)
 
@@ -196,7 +191,7 @@ def _compile_op(
         set_clause = ", ".join(f"{f} = ?" for f in set_fields)
         where_clause = " AND ".join(f"{k} = ?" for k in key)
         sql = (
-            f"UPDATE {table} SET {set_clause}{version_set} "
+            f"UPDATE {table} SET {set_clause} "
             f"WHERE {where_clause} RETURNING *"
         )
         return CompiledOp(table, op_type, sql, tuple(set_fields) + tuple(key), bind, defaults)
@@ -213,12 +208,10 @@ def _compile_op(
         placeholders = ", ".join("?" for _ in all_upsert)
         non_key = [f for f in all_upsert if f not in key]
         update_clause = ", ".join(f"{f} = excluded.{f}" for f in non_key)
-        if is_versioned:
-            update_clause += f", {VERSION_COLUMN} = {table}.{VERSION_COLUMN} + 1"
         key_list = ", ".join(key)
         sql = (
-            f"INSERT INTO {table} ({col_list}{version_col}) "
-            f"VALUES ({placeholders}{version_value}) "
+            f"INSERT INTO {table} ({col_list}) "
+            f"VALUES ({placeholders}) "
             f"ON CONFLICT({key_list}) DO UPDATE SET {update_clause} RETURNING *"
         )
         return CompiledOp(table, op_type, sql, tuple(all_upsert), bind, defaults)
