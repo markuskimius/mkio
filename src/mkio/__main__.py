@@ -7,6 +7,7 @@ import csv
 import io
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Any
@@ -25,7 +26,7 @@ _PROTOCOL_CLI_HINT = {
 }
 
 
-_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep", "check", "dbupdate", "archive", "init", "schema", "adduser", "hashpass")
+_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep", "check", "dbupdate", "archive", "restore", "init", "schema", "adduser", "hashpass")
 
 
 def main() -> None:
@@ -65,6 +66,8 @@ def main() -> None:
         _cmd_dbupdate()
     elif cmd == "archive":
         _cmd_archive()
+    elif cmd == "restore":
+        _cmd_restore()
     elif cmd == "schema":
         _cmd_schema()
     elif cmd == "init":
@@ -102,9 +105,15 @@ def _usage() -> None:
     print("                                   Check version compatibility with server")
     print("  mkio dbupdate [server.toml] [--allow-risky] [--allow-destructive] [--drop-history]")
     print("                                   Apply pending schema migrations")
+    print("  mkio archive <server.toml|url> [--tables a,b | --group <g> | --all] [--cutoff <when>]")
+    print("               [--cutoff-literal <text>] [--out <dir>] [--dry-run] [--yes]")
+    print("                                   Archive rows to CSV and delete them (tables opt in with")
+    print("                                   archive = {...}); a url archives through the running server")
     print("  mkio archive [server.toml] [--table <name>] --older-than <N>d|<ref>")
     print("               [--out <dir>] [--delete] [--prune-source] [--dry-run] [--yes]")
-    print("                                   Archive history rows to CSV, optionally purging them")
+    print("                                   Archive old history versions only, optionally purging them")
+    print("  mkio restore <server.toml> <archive-dir> [--tables a,b] [--dry-run]")
+    print("                                   Put an archive's rows back (server stopped)")
     print("  mkio init [directory] [--no-static]")
     print("  mkio adduser <username> <role> [server.toml]")
     print("                                   Add a user to _mkio_users (prompts for password)")
@@ -1348,6 +1357,233 @@ def _archive_table(
 
 
 def _cmd_archive() -> None:
+    """Two modes: ``--older-than`` keeps the history-only archiver; anything
+    else is a row archive of the tables that opted in."""
+    if "--older-than" in sys.argv[2:]:
+        _cmd_archive_history()
+    else:
+        _cmd_archive_rows()
+
+
+def _looks_like_url(arg: str) -> bool:
+    from pathlib import Path
+    if Path(arg).exists():
+        return False
+    return (
+        "://" in arg or arg.isdigit()
+        or bool(re.fullmatch(r"[A-Za-z0-9.\-\[\]:]+:\d+(/.*)?", arg))
+    )
+
+
+def _confirm(prompt: str) -> bool:
+    if not sys.stdin.isatty():
+        print("Error: pass --yes to confirm (stdin is not a terminal)")
+        sys.exit(1)
+    try:
+        answer = input(f"{prompt} [y/N] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _print_archive_summary(summary: dict[str, Any], *, cutoff_desc: str, dry_run: bool) -> None:
+    tables = summary.get("tables", {})
+    verb = "would be archived" if dry_run else "to archive"
+    print(f"Cutoff: {cutoff_desc}")
+    for name, t in tables.items():
+        parts = [f"{t['rows']:,} rows"]
+        if t.get("history") is not None:
+            parts.append(f"{t['history']:,} history rows")
+        for comp, n in (t.get("companions") or {}).items():
+            parts.append(f"{n:,} {comp} rows")
+        if t.get("cutoff_column"):
+            scope = f"{t['cutoff_column']} < {t['cutoff_value']}"
+        else:
+            scope = "whole table, cutoff ignored"
+        print(f"  {name}: {', '.join(parts)} {verb} ({scope})")
+    if summary.get("dir"):
+        print(f"  Written to {summary['dir']}")
+
+
+def _cmd_archive_rows() -> None:
+    usage = (
+        "mkio archive <server.toml|url> [--tables a,b | --group <g> | --all] "
+        "[--cutoff <when>] [--cutoff-literal <text>] [--out <dir>] [--dry-run] [--yes]"
+    )
+    args = sys.argv[2:]
+    dry_run = "--dry-run" in args
+    assume_yes = "--yes" in args
+    everything = "--all" in args
+    args = [a for a in args if a not in ("--dry-run", "--yes", "--all")]
+    tables_arg = _extract_flag(args, "--tables")
+    group = _extract_flag(args, "--group")
+    cutoff = _extract_flag(args, "--cutoff")
+    cutoff_literal = _extract_flag(args, "--cutoff-literal")
+    out_dir = _extract_flag(args, "--out") or "."
+    username, password = _extract_auth(args)
+    _check_unknown_flags(
+        args, {"--tables", "--group", "--all", "--cutoff", "--cutoff-literal",
+               "--out", "--dry-run", "--yes", "--username"}, usage,
+    )
+    if len(args) > 1:
+        print(f"Error: 'archive' takes one argument (config path or server url), got {len(args)}")
+        print(f"Usage: {usage}")
+        sys.exit(1)
+    if everything and (tables_arg or group):
+        print("Error: --all cannot be combined with --tables or --group")
+        sys.exit(1)
+    if cutoff and cutoff_literal:
+        print("Error: give either --cutoff or --cutoff-literal, not both")
+        sys.exit(1)
+    if everything:
+        group = "all"
+    tables = [t.strip() for t in tables_arg.split(",") if t.strip()] if tables_arg else None
+    target = args[0] if args else "server.toml"
+    cutoff_desc = cutoff_literal or cutoff or "(none — whole tables only)"
+
+    from mkio.archive import ArchiveError
+    from pathlib import Path
+
+    if _looks_like_url(target):
+        ws_url = _normalize_ws_url(target)
+        out_abs = str(Path(out_dir).resolve())
+        _run_client_command(ws_url, _archive_via_server(
+            ws_url, tables, group, cutoff, cutoff_literal, out_abs, dry_run, assume_yes,
+            cutoff_desc, username=username, password=password,
+        ))
+        return
+
+    if not Path(target).exists():
+        print(f"Config file not found: {target}")
+        sys.exit(1)
+    from mkio.archive import archive_offline, parse_cutoff
+    from mkio.config import load_config
+    try:
+        config = load_config(target)
+        instant = parse_cutoff(cutoff) if cutoff else None
+        kwargs = dict(
+            tables=tables, group=group, cutoff=instant, cutoff_literal=cutoff_literal,
+            cutoff_given=cutoff or cutoff_literal, out_dir=out_dir,
+            mkio_version=_mkio_version(),
+        )
+        preview = archive_offline(config, dry_run=True, **kwargs)
+        _print_archive_summary(preview, cutoff_desc=cutoff_desc, dry_run=dry_run)
+        if dry_run:
+            return
+        if not any(t["rows"] for t in preview["tables"].values()):
+            print("Nothing to archive.")
+            return
+        print("  The server must be stopped: offline deletes bypass its change bus.")
+        if not assume_yes and not _confirm("Archive and delete these rows?"):
+            print("Aborted.")
+            sys.exit(1)
+        result = archive_offline(config, dry_run=False, **kwargs)
+        total = sum(t["rows"] for t in result["tables"].values())
+    except ArchiveError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+    except Exception as exc:
+        if _TRACEBACK:
+            raise
+        print(f"Error: {exc}")
+        sys.exit(1)
+    print(f"  Archived {total:,} rows to {result['dir']}")
+    print("  Done.")
+
+
+def _mkio_version() -> str:
+    import importlib.metadata
+    try:
+        return importlib.metadata.version("mkio")
+    except importlib.metadata.PackageNotFoundError:
+        return "dev"
+
+
+async def _archive_via_server(
+    ws_url: str, tables: list[str] | None, group: str | None, cutoff: str | None,
+    cutoff_literal: str | None, out_dir: str, dry_run: bool, assume_yes: bool,
+    cutoff_desc: str, *, username: str | None, password: str | None,
+) -> None:
+    from mkio.client import MkioClient
+
+    spec: dict[str, Any] = {
+        "tables": tables, "group": group, "cutoff": cutoff,
+        "cutoff_literal": cutoff_literal, "out": out_dir,
+    }
+    async with MkioClient(ws_url, reconnect=False) as client:
+        if username:
+            await _authenticate(client, username, password)
+        preview = await client.request("_mkio", {"archive": {**spec, "dry_run": True}})
+        if preview.get("type") == "error":
+            print(f"Error: {preview.get('message', 'unknown error')}")
+            sys.exit(1)
+        _print_archive_summary(preview["row"], cutoff_desc=cutoff_desc, dry_run=dry_run)
+        if dry_run:
+            return
+        if not any(t["rows"] for t in preview["row"]["tables"].values()):
+            print("Nothing to archive.")
+            return
+        print(f"  Files are written by the server, under {out_dir} on its host.")
+        if not assume_yes and not _confirm("Archive and delete these rows?"):
+            print("Aborted.")
+            sys.exit(1)
+        result = await client.request("_mkio", {"archive": {**spec, "dry_run": False}})
+        if result.get("type") == "error":
+            print(f"Error: {result.get('message', 'unknown error')}")
+            sys.exit(1)
+        total = sum(t["rows"] for t in result["row"]["tables"].values())
+        print(f"  Archived {total:,} rows to {result['row']['dir']}")
+        print("  Done.")
+
+
+def _cmd_restore() -> None:
+    usage = "mkio restore <server.toml> <archive-dir> [--tables a,b] [--dry-run]"
+    args = sys.argv[2:]
+    dry_run = "--dry-run" in args
+    args = [a for a in args if a != "--dry-run"]
+    tables_arg = _extract_flag(args, "--tables")
+    _check_unknown_flags(args, {"--tables", "--dry-run"}, usage)
+    if len(args) != 2:
+        print(f"Error: 'restore' takes 2 arguments (config path, archive directory), got {len(args)}")
+        print(f"Usage: {usage}")
+        sys.exit(1)
+    config_path, archive_dir = args
+    from pathlib import Path
+    if not Path(config_path).exists():
+        print(f"Config file not found: {config_path}")
+        sys.exit(1)
+    tables = [t.strip() for t in tables_arg.split(",") if t.strip()] if tables_arg else None
+
+    from mkio.archive import ArchiveError, restore_offline
+    from mkio.config import load_config
+    try:
+        config = load_config(config_path)
+        result = restore_offline(config, archive_dir, tables=tables, dry_run=dry_run)
+    except ArchiveError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+    except Exception as exc:
+        if _TRACEBACK:
+            raise
+        print(f"Error: {exc}")
+        sys.exit(1)
+    verb = "would be restored" if dry_run else "restored"
+    print(f"Restoring from {archive_dir}" + (" (dry run)" if dry_run else ""))
+    for name, t in result["tables"].items():
+        parts = [f"{t['rows']:,} rows"]
+        if t.get("history"):
+            parts.append(f"{t['history']:,} history rows")
+        for comp, n in (t.get("companions") or {}).items():
+            parts.append(f"{n:,} {comp} rows")
+        note = f", {t['replaced']:,} existing replaced" if t.get("replaced") else ""
+        print(f"  {name}: {', '.join(parts)} {verb}{note}")
+        if t.get("history_skipped"):
+            print(f"    note: {t['history_skipped']}")
+    print("  The server must be stopped while restoring." if not dry_run else "")
+    print("  Done." if not dry_run else "  Nothing changed.")
+
+
+def _cmd_archive_history() -> None:
     usage = (
         "mkio archive [server.toml] [--table <name>] --older-than <N>d|<ref> "
         "[--out <dir>] [--delete] [--prune-source] [--dry-run] [--yes]"

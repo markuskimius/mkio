@@ -74,6 +74,7 @@ class InfoService(Service):
         self._server_services: dict[str, Service] = {}
         self._started_ref: str = ""
         self._started_monotonic: float = 0.0
+        self._mkio_app: Any = None
 
     async def on_subscribe(
         self, ws: WebSocketResponse, msg: dict[str, Any]
@@ -131,6 +132,33 @@ class InfoService(Service):
         await ws.send_bytes(resp)
         await self.notify_monitors("out", resp)
 
+    async def _handle_archive(
+        self, ws: WebSocketResponse, spec: Any, reqid: str | None
+    ) -> None:
+        """Run ``MkioApp.archive`` for a client: ``{"archive": {"tables":
+        [...], "group": ..., "cutoff": ..., "cutoff_literal": ..., "out":
+        ..., "dry_run": bool}}``.  The reply row is the run's summary."""
+        from mkio.archive import ArchiveError
+
+        app = self._mkio_app
+        if app is None or not isinstance(spec, dict):
+            resp = make_error(None, "archive is not available on this server", reqid=reqid, service=self.name)
+        else:
+            try:
+                summary = await app.archive(
+                    tables=spec.get("tables") or None,
+                    group=spec.get("group") or None,
+                    cutoff=spec.get("cutoff") or None,
+                    cutoff_literal=spec.get("cutoff_literal"),
+                    out_dir=spec.get("out") or ".",
+                    dry_run=bool(spec.get("dry_run")),
+                )
+                resp = make_reply(self.name, row=summary, reqid=reqid)
+            except ArchiveError as exc:
+                resp = make_error(None, str(exc), reqid=reqid, service=self.name)
+        await ws.send_bytes(resp)
+        await self.notify_monitors("out", resp)
+
     async def on_message(
         self, ws: WebSocketResponse, msg: dict[str, Any]
     ) -> None:
@@ -141,6 +169,15 @@ class InfoService(Service):
             # compatibility only — enough to pick and verify a server before
             # logging in, without exposing service or table names.
             limited = bool(self._server_config.get("auth")) and getattr(ws, "_mkio_auth", None) is None
+
+            if isinstance(data, dict) and "archive" in data:
+                if limited:
+                    resp = make_error(None, "authentication required", reqid=reqid, service=self.name)
+                    await ws.send_bytes(resp)
+                    await self.notify_monitors("out", resp)
+                    return
+                await self._handle_archive(ws, data["archive"], reqid)
+                return
 
             if isinstance(data, dict) and "table" in data:
                 if limited:

@@ -702,6 +702,8 @@ async def _archive_fixture(tmp_path):
     """A DB with three orders: one still changing, one settled, one deleted."""
     cfg_path = tmp_path / "server.toml"
     cfg_path.write_text(f"""
+host = "127.0.0.1"
+port = 0
 db_path = "{tmp_path / 'a.db'}"
 auto_migrate = "safe"
 
@@ -1561,6 +1563,8 @@ def _gc_config(tmp_path) -> Path:
     """A config file with a single versioned table."""
     cfg_path = tmp_path / "server.toml"
     cfg_path.write_text(f"""
+host = "127.0.0.1"
+port = 0
 db_path = "{tmp_path / 'g.db'}"
 auto_migrate = "safe"
 
@@ -1896,6 +1900,8 @@ async def test_dbupdate_drop_history_removes_the_orphan(tmp_path):
     # Stop versioning. The undo/redo ops have to go with it — they are only
     # valid against a versioned table — but the history table is retained.
     cfg_path.write_text(f"""
+host = "127.0.0.1"
+port = 0
 db_path = "{db_path}"
 
 [tables.orders]

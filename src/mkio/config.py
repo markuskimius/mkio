@@ -70,7 +70,7 @@ _VALID_SERVICE_KEYS: dict[str, frozenset[str]] = {
 
 _VALID_PROTOCOLS = frozenset({"transaction", "subpub", "stream", "query", "reqrep"})
 
-_VALID_TABLE_KEYS = frozenset({"columns", "primary_key", "seed", "versioned", "unversioned"})
+_VALID_TABLE_KEYS = frozenset({"columns", "primary_key", "seed", "versioned", "unversioned", "archive"})
 
 
 def load_config(source: str | Path | dict[str, Any]) -> dict[str, Any]:
@@ -117,6 +117,11 @@ def load_config(source: str | Path | dict[str, Any]) -> dict[str, Any]:
         _validate_table(tbl_name, tbl_config)
         if "seed" in tbl_config:
             _validate_seed(tbl_name, tbl_config, config_dir)
+    # Archive companions name other tables, so the key is checked once every
+    # table is known.
+    from mkio.archive import validate_archive_key
+    for tbl_name, tbl_config in tables.items():
+        validate_archive_key(tbl_name, tbl_config, tables)
 
     # Derive history tables for versioned tables.  Stored under an underscore
     # key so they stay out of config_hash and the _mkio service's table list —

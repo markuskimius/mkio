@@ -47,9 +47,24 @@ class StreamService(Service):
 
         # Ring buffer: (ref, row_dict)
         self._buffer: deque[tuple[str, dict[str, Any]]] = deque(maxlen=self._buffer_size)
+        # Refs of buffered rows deleted since they were buffered (an archive
+        # run).  Filtered out on subscribe; the buffer is rebuilt without them
+        # once the set grows, so a burst of deletes costs one pass.
+        self._deleted: set[str] = set()
         self._subscribers: list[StreamSubscriber] = []
         self._bus_queue: asyncio.Queue[ChangeEvent] | None = None
         self._listener_task: asyncio.Task[None] | None = None
+
+    def _compact(self) -> None:
+        kept = [(v, r) for v, r in self._buffer if v not in self._deleted]
+        self._buffer = deque(kept, maxlen=self._buffer_size)
+        self._deleted.clear()
+
+    def _buffered(self) -> list[tuple[str, dict[str, Any]]]:
+        """The buffer minus rows deleted since they were buffered."""
+        if not self._deleted:
+            return list(self._buffer)
+        return [(v, r) for v, r in self._buffer if v not in self._deleted]
 
     async def start(self) -> None:
         # Pre-fill buffer with recent rows, using stored _mkio_ref for
@@ -100,31 +115,32 @@ class StreamService(Service):
 
         rows_to_send: list[tuple[str, dict[str, Any]]] = []
 
-        if self._buffer:
+        buffered = self._buffered()
+        if buffered:
             if before and client_ref:
-                for ver, row in self._buffer:
+                for ver, row in buffered:
                     if compare_refs(ver, client_ref) < 0:
                         out_row = sub.formatter(row) if sub.formatter else row
                         if sub.filter_fn and not sub.filter_fn(out_row):
                             continue
                         rows_to_send.append((ver, self._project(out_row, fields)))
             elif client_ref:
-                buffer_start_ver = self._buffer[0][0]
+                buffer_start_ver = buffered[0][0]
                 if compare_refs(client_ref, buffer_start_ver) >= 0:
-                    for ver, row in self._buffer:
+                    for ver, row in buffered:
                         if compare_refs(ver, client_ref) > 0:
                             out_row = sub.formatter(row) if sub.formatter else row
                             if sub.filter_fn and not sub.filter_fn(out_row):
                                 continue
                             rows_to_send.append((ver, self._project(out_row, fields)))
                 else:
-                    for ver, row in self._buffer:
+                    for ver, row in buffered:
                         out_row = sub.formatter(row) if sub.formatter else row
                         if sub.filter_fn and not sub.filter_fn(out_row):
                             continue
                         rows_to_send.append((ver, self._project(out_row, fields)))
             else:
-                for ver, row in self._buffer:
+                for ver, row in buffered:
                     out_row = sub.formatter(row) if sub.formatter else row
                     if sub.filter_fn and not sub.filter_fn(out_row):
                         continue
@@ -151,7 +167,7 @@ class StreamService(Service):
             await self.notify_monitors("out", resp)
             return 0
 
-        latest_ref = self._buffer[-1][0] if self._buffer else ""
+        latest_ref = buffered[-1][0] if buffered else ""
         resp = make_snapshot(latest_ref, self.name, [r for _, r in rows_to_send], subid=subid, hasmore=False)
         await ws.send_bytes(resp)
         await self.notify_monitors("out", resp)
@@ -179,7 +195,14 @@ class StreamService(Service):
         while True:
             event: ChangeEvent = await self._bus_queue.get()
 
-            # Only process inserts for append-only tables
+            if event.op == "delete":
+                ref = (event.row or {}).get("_mkio_ref")
+                if ref:
+                    self._deleted.add(ref)
+                    if len(self._deleted) * 10 > self._buffer_size:
+                        self._compact()
+                continue
+            # Only inserts append to an append-only table
             if event.op != "insert":
                 continue
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
+import logging
 import signal
 import sys
 from pathlib import Path
@@ -66,6 +68,7 @@ class MkioApp:
         self._connect_hooks: list[Callable[[web.WebSocketResponse], Awaitable[None]]] = []
         self._disconnect_hooks: list[Callable[[web.WebSocketResponse], Awaitable[None]]] = []
         self._undo_redo_hooks: list[Callable[[ChangeEvent], Awaitable[None]]] = []
+        self._archive_hooks: list[Callable[[str, dict[str, list[dict[str, Any]]]], Awaitable[None]]] = []
 
         # Auth handler (overrides table-backed auth)
         self._auth_handler: Callable[[dict], Awaitable[dict]] | None = None
@@ -194,6 +197,32 @@ class MkioApp:
             )
         self._undo_redo_hooks.append(callback)
 
+    def on_archive(
+        self,
+        callback: Callable[[str, dict[str, list[dict[str, Any]]]], Awaitable[None]],
+    ) -> None:
+        """Register a callback around every online archive run (:meth:`archive`).
+
+        Called twice per run with the selected live rows per table: once with
+        stage ``"before"``, after selection and before anything is written —
+        raising there refuses the run, and the exception's message is what the
+        caller sees — and once with stage ``"after"``, once the deletes have
+        committed, for releasing whatever the application held for those rows.
+        A dry run calls only ``"before"``.
+
+        Example::
+
+            async def guard_sessions(stage, selection):
+                for row in selection.get("sessions", []):
+                    if stage == "before" and row["status"] != "DOWN":
+                        raise RuntimeError(f"session {row['id']} is running")
+                    if stage == "after":
+                        engine.forget(row["id"])
+
+            app.on_archive(guard_sessions)
+        """
+        self._archive_hooks.append(callback)
+
     def on_auth(self, callback: Callable[[dict], Awaitable[dict]]) -> None:
         """Register a custom auth handler, overriding table-backed auth.
 
@@ -285,6 +314,126 @@ class MkioApp:
         return await writer.submit(
             compiled_ops, params_list, data, user=user, service=service
         )
+
+    async def archive(
+        self,
+        *,
+        tables: list[str] | None = None,
+        group: str | None = None,
+        cutoff: str | None = None,
+        cutoff_literal: str | None = None,
+        out_dir: str | Path = ".",
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Archive rows while the server runs: export them to CSV under
+        ``out_dir``, then delete them through the write path.
+
+        Tables come from their ``archive`` config keys — named ones, a
+        ``group``, ``group="all"``, or the ``data`` group by default.
+        ``cutoff`` is ``Nd``/``Nh``/``Nm`` or an ISO date or date-time (local
+        unless it carries a zone); ``cutoff_literal`` is compared as given.
+        Deletes go through the writer one op per row, so query subscribers
+        drop each row live and stream buffers forget it.  The rows are
+        selected once, before export, and a row that changes between the
+        export and its delete is archived as exported.
+
+        Returns ``{"dir", "dry_run", "tables": {name: {"rows", "history",
+        "companions", "cutoff_column", "cutoff_value"}}}``.
+
+        Raises:
+            mkio.archive.ArchiveError: On a bad selection or when an
+                :meth:`on_archive` hook refuses the run.
+        """
+        from mkio import archive as arc
+        from mkio.writer import CompiledOp
+
+        db = self.db
+        writer = self.writer
+        if db is None or writer is None:
+            raise RuntimeError("Server is not running")
+        cfg = self._config
+        if cfg.get("db_path", "mkio.db") == ":memory:":
+            raise arc.ArchiveError("archive does not apply to in-memory databases")
+        specs = arc.select_specs(cfg, tables, group)
+        instant = arc.parse_cutoff(cutoff) if cutoff else None
+
+        selections: list[arc.TableSelection] = []
+        for spec in specs:
+            value = arc.cutoff_value(spec, instant, cutoff_literal)
+            sql, params = arc.live_select_sql(spec, value)
+            live = await db.read(sql, params)
+            history: list[dict[str, Any]] = []
+            if spec.versioned:
+                sql, params = arc.dependent_select_sql(
+                    spec, spec.history_table or "", value, extra_order=arc.VERSION_COLUMN
+                )
+                history = await db.read(sql, params)
+            companions = {}
+            for comp in spec.companions:
+                sql, params = arc.dependent_select_sql(spec, comp, value)
+                companions[comp] = await db.read(sql, params)
+            selections.append(arc.TableSelection(spec, value, live, history, companions))
+
+        selected = {sel.spec.table: sel.live for sel in selections}
+        for hook in self._archive_hooks:
+            try:
+                await hook("before", selected)
+            except Exception as exc:
+                raise arc.ArchiveError(str(exc)) from exc
+
+        summary = arc._summary(selections, dry_run=dry_run)
+        if dry_run:
+            return summary
+
+        db_path = cfg.get("db_path", "mkio.db")
+        run_dir = Path(out_dir) / arc.run_dir_name(cfg.get("name", "") or Path(db_path).stem)
+        try:
+            mkio_version = importlib.metadata.version("mkio")
+        except importlib.metadata.PackageNotFoundError:
+            mkio_version = "dev"
+        arc.write_archive(
+            run_dir, selections,
+            app_name=cfg.get("name", ""), app_version=str(cfg.get("version", "")),
+            mkio_version=mkio_version, mode="online", cutoff=instant,
+            cutoff_given=cutoff or cutoff_literal, db_path=db_path,
+        )
+
+        chunk = max(1, int(cfg.get("batch_max_size", 500)))
+        for sel in selections:
+            spec = sel.spec
+            # Companions go first within a row's ops so a subscriber joining
+            # them never sees a parent without its companion.
+            ops: list[CompiledOp] = []
+            params_list: list[tuple[Any, ...]] = []
+            for key in sel.keys:
+                for comp in spec.companions:
+                    ops.append(CompiledOp(
+                        table=comp, op_type="delete",
+                        sql=arc.delete_sql(comp, spec.pk, returning=True),
+                        param_names=spec.pk,
+                    ))
+                    params_list.append(key)
+                ops.append(CompiledOp(
+                    table=spec.table, op_type="delete",
+                    sql=arc.delete_sql(spec.table, spec.pk, returning=True),
+                    param_names=spec.pk,
+                ))
+                params_list.append(key)
+            per_row = len(spec.companions) + 1
+            step = max(per_row, (chunk // per_row) * per_row)
+            for i in range(0, len(ops), step):
+                await writer.submit(
+                    tuple(ops[i:i + step]), tuple(params_list[i:i + step]), {},
+                    service="_mkio",
+                )
+
+        for hook in self._archive_hooks:
+            try:
+                await hook("after", selected)
+            except Exception:
+                logging.getLogger("mkio").exception("on_archive hook failed after archive")
+        summary["dir"] = str(run_dir)
+        return summary
 
     async def query(
         self,

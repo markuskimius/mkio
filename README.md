@@ -15,6 +15,7 @@ A single TCP port serves HTTP and WebSocket, backed by an embedded SQLite databa
 - [Authentication & Access Control](#authentication--access-control)
 - [Programmatic API](#programmatic-api)
 - [Versioned Tables](#versioned-tables)
+- [Archiving](#archiving)
 - [Service Types](#service-types)
 - [WebSocket Protocol](#websocket-protocol)
 - [Client Libraries](#client-libraries)
@@ -80,7 +81,8 @@ For programmatic control (custom routes, non-blocking lifecycle), see [Programma
 - **Query** — snapshot + change feed from SQLite
 - **ReqRep** — one-shot request-reply with parameterized SQL and/or expression evaluation, returning scalar values, single records, or result sets
 - **Expression language** — one safe, extensible language for filters and formatters (`qty > 100 && status == 'pending'`), implemented identically in Python and JavaScript
-- **Versioned tables** — set `versioned = true` on a table and every row gets a `_mkio_version` counter and a full history of its versions in `<table>__history`, stamped with the ref, the user and the service. The writer maintains the counter, so hand-written ops are versioned like compiled ones and a write that changes nothing records nothing; `unversioned = [...]` keeps live mirror columns out of the chain. Built-in `undo`/`redo` ops step a row along its own history, with an `on_undo_redo` hook carrying the before and after shapes so an application can unwind what the write caused; `mkio archive` moves old versions to CSV
+- **Versioned tables** — set `versioned = true` on a table and every row gets a `_mkio_version` counter and a full history of its versions in `<table>__history`, stamped with the ref, the user and the service. The writer maintains the counter, so hand-written ops are versioned like compiled ones and a write that changes nothing records nothing; `unversioned = [...]` keeps live mirror columns out of the chain. Built-in `undo`/`redo` ops step a row along its own history, with an `on_undo_redo` hook carrying the before and after shapes so an application can unwind what the write caused; `mkio archive --older-than` moves old versions to CSV
+- **Archiving** — tables that opt in with `archive = { cutoff = "created_at" }` can be exported to CSV and cleared down by a cutoff (`mkio archive`), offline in one transaction or through a running server so every subscriber sees the rows go; versioned tables take their history along, companion tables travel with their parent, and `mkio restore` puts a run back exactly as it was
 - **Schema migration** — automatic detection of safe/destructive changes with interactive confirmation
 - **Write batching** — hundreds of writes committed in a single SQLite transaction for high throughput
 - **Reconnection recovery** — stream services use ref-based cursor reconnection persisted across server restarts via `_mkio_ref` column; subpub and query always replay a full snapshot
@@ -267,9 +269,11 @@ asyncio.run(main())
 | `on_connect(callback)` | Register an async `(ws) -> None` callback invoked when a WebSocket client connects. |
 | `on_disconnect(callback)` | Register an async `(ws) -> None` callback invoked when a WebSocket client disconnects. |
 | `on_undo_redo(callback)` | Register an async `(ChangeEvent) -> None` callback invoked after every undo or redo on a [versioned table](#versioned-tables). Raises `RuntimeError` if already running. |
+| `on_archive(callback)` | Register an async `(stage, selection) -> None` callback called around every online [archive](#archiving) run: `"before"` to refuse it (raise), `"after"` to release what the application held for the rows. |
 | `on_auth(callback)` | Register a custom async auth handler `(data) -> {"user", "role", ...}`. Overrides table-backed auth. Raise to reject. |
 | `async execute(service, data, *, op=None, user=None)` | Submit a transaction through the write path. Returns `{"ok": True, "ref": "..."}`. `user` is recorded on history rows of [versioned tables](#versioned-tables). |
 | `async query(sql, params=())` | Read query on the read connection. Returns `list[dict]`. |
+| `async archive(*, tables=None, group=None, cutoff=None, cutoff_literal=None, out_dir=".", dry_run=False)` | [Archive](#archiving) rows while running: CSV under `out_dir`, then deletes through the write path, one per row. Returns the run summary. |
 | `async history(table, *, pk=None, since=None, until=None, limit=1000, newest_first=False)` | Recorded versions of a [versioned table](#versioned-tables). Returns `list[dict]`. |
 | `async subscribe(tables, callback)` | Subscribe to `ChangeEvent`s. Returns an unsubscribe function. |
 | `async start()` | Non-blocking start — runs migration, preflight, binds the port. |
@@ -643,9 +647,9 @@ await app.history("orders", pk={"id": "O1"})
 await app.history("orders", since=start_ref, until=end_ref, limit=50, newest_first=True)
 ```
 
-### Archiving
+### Archiving old versions
 
-`mkio archive` writes versions older than a cutoff to CSV, and optionally purges them. Refs sort lexicographically, so the age cutoff is an indexed range scan.
+`mkio archive --older-than` writes versions older than a cutoff to CSV, and optionally purges them. (Archiving whole *rows* — live rows, history and all — is a separate mode of the same command, described under [Archiving](#archiving).) Refs sort lexicographically, so the age cutoff is an indexed range scan.
 
 ```bash
 # See what would be archived
@@ -690,6 +694,93 @@ Removing `versioned = true` stops recording. The history table is **never** drop
 ### Scope
 
 Versioning covers every write through mkio's write path — the transaction services and `MkioApp.execute()`. Writes made to the database file by another process are not recorded, and would leave the counter and the history out of step. Capture happens inside the same SAVEPOINT as the change itself, so a rolled-back transaction records nothing.
+
+## Archiving
+
+Tables fill up. Archiving moves rows out of the database into CSV files that can be put back later — a clear-down that keeps the data. A table opts in with an `archive` key:
+
+```toml
+[tables.orders]
+columns = { id = "TEXT PRIMARY KEY", symbol = "TEXT", created_at = "TEXT" }
+versioned = true
+archive = { cutoff = "created_at" }                  # rows with created_at before the cutoff
+
+[tables.messages]
+columns = { id = "INTEGER PRIMARY KEY AUTOINCREMENT", ts = "TEXT", body = "TEXT" }
+archive = { cutoff = "ts", format = "%Y%m%d-%H:%M:%S.000" }   # ts in its own convention
+
+[tables.sessions]
+columns = { session_id = "TEXT PRIMARY KEY", host = "TEXT" }
+archive = { group = "config", with = ["session_state"] }     # whole table, state rows travel with it
+
+[tables.session_state]
+columns = { session_id = "TEXT PRIMARY KEY", seq = "INTEGER" }
+```
+
+| Option | Meaning |
+|--------|---------|
+| `cutoff` | Column the run's cutoff is compared against, as text (`column < cutoff`). Without one the table is archived whole and the cutoff is ignored. |
+| `format` | strftime pattern rendering the cutoff instant in the column's convention. Default `%Y-%m-%d %H:%M:%S`, SQLite's `CURRENT_TIMESTAMP` shape. Every comparison is in UTC. |
+| `group` | Free label a run selects by. Default `data`; `all` is reserved for "every group". |
+| `with` | Companion tables sharing the table's primary key columns. Their matching rows are archived, deleted and restored with the parent row. A companion cannot itself be versioned. |
+
+An archivable table needs a primary key: rows are deleted and restored by key.
+
+### Running an archive
+
+```bash
+mkio archive server.toml --cutoff 2026-09-11 --out ./archive --dry-run   # what would go
+mkio archive server.toml --cutoff 2026-09-11 --out ./archive             # asks, then does it
+mkio archive server.toml --cutoff 30d --group config --yes               # a group, no prompt
+mkio archive server.toml --all --cutoff 2026-09-11T00:00:00Z --yes       # every archivable table
+mkio archive localhost:8080 --cutoff 1d --out /srv/archive --yes         # through the running server
+```
+
+`--cutoff` takes `Nd`/`Nh`/`Nm` back from now, a date, or a date-time (local time unless it carries a zone or `Z`); `--cutoff-literal` passes text through untouched for a column in a format of its own. `--tables a,b` names tables, `--group` selects one group, `--all` takes every archivable table; with none, the `data` group. A run without `--dry-run` shows the counts and asks for confirmation unless `--yes` is given (or stdin is not a terminal, where `--yes` is required).
+
+Given a config path, the run is **offline**: it opens the database file directly and must not race a running server — the deletes bypass its change bus, so its subscribers would keep showing rows that are gone. Given a URL, the run is **online**: the server selects, exports and deletes through its write path, one delete per row, so query subscribers drop each row live and stream buffers forget it. The server writes the files, so `--out` is a directory on its host. Rows are selected once, before the export; a row that changes between the export and its delete is archived as exported.
+
+### What is written
+
+One directory per run, `<name>_<YYYYMMDD-HHMMSS>/` under `--out`:
+
+| File | Contents |
+|------|----------|
+| `manifest.json` | mkio and app versions, mode, cutoff (as given and in UTC), and per table its file, primary key, cutoff column and value, row count and every column's declared type. |
+| `<table>.csv` | The archived live rows — every column, `_mkio_ref` and `_mkio_version` included. |
+| `<table>__history.csv` | For a versioned table, the archived rows' whole version chains. Deleting a live row drops its chain, so the chain leaves with it. |
+| `<companion>.csv` | The companion rows matched to the archived parents. |
+
+CSV cannot tell NULL from an empty string, so NULL is written as `\N` (a text value starting with a backslash gets one more in front, and loses it on the way back). Numbers come back by the declared column type in the manifest.
+
+### Restoring
+
+```bash
+mkio restore server.toml ./archive/myapp_20260912-020000 --dry-run
+mkio restore server.toml ./archive/myapp_20260912-020000
+mkio restore server.toml ./archive/myapp_20260912-020000 --tables orders
+```
+
+Restore is offline only — stop the server first. It writes `_mkio_version` and `_mkio_ref` back verbatim, which the write path would not, and it needs the schema the archive was taken from: an archived column the table no longer has aborts the run, a column added since takes its default. A table archived by cutoff must not already hold any of the restored keys; a collision aborts the whole run (one transaction) naming the keys. A table archived whole — settings, counters — may: its rows are replaced and reported. A history file for a table that is no longer versioned is skipped with a note.
+
+### Guarding a run from the application
+
+Rows often have live state behind them — a session the engine is running, a counter it holds in memory. `on_archive` is called around every online run with the selected rows per table:
+
+```python
+async def guard(stage, selection):
+    for row in selection.get("sessions", []):
+        if stage == "before" and row["status"] != "DOWN":
+            raise RuntimeError(f"session {row['session_id']} is running — stop it first")
+        if stage == "after":
+            engine.forget(row["session_id"])
+
+app.on_archive(guard)
+```
+
+`"before"` runs after selection and before anything is written; raising refuses the run and the message reaches the caller. `"after"` runs once the deletes have committed. A dry run calls only `"before"`. Offline runs have no application to ask, which is the other reason to prefer the online path while a server is up.
+
+Clients trigger an online run through the built-in `_mkio` service: `{"type": "request", "service": "_mkio", "data": {"archive": {"tables": [...], "group": "...", "cutoff": "...", "out": "...", "dry_run": true}}}` replies with the run summary, or an error naming what refused it. With auth enabled it needs an authenticated connection.
 
 ## Service Types
 
@@ -1404,9 +1495,20 @@ mkio reqrep localhost:8080 tax '{"qty": 10, "price": 99.95, "rate": 0.08}'
 mkio reqrep localhost:8080 search symbol=AAPL
 ```
 
+### Archive and restore rows
+
+Move rows of the tables that opted in (see [Archiving](#archiving)) to CSV and delete them, offline or through a running server, and put them back:
+
+```bash
+mkio archive server.toml --cutoff 2026-09-11 --out ./archive --dry-run
+mkio archive server.toml --all --cutoff 2026-09-11 --out ./archive --yes
+mkio archive localhost:8080 --group data --cutoff 1d --out /srv/archive --yes
+mkio restore server.toml ./archive/myapp_20260912-020000
+```
+
 ### Archive change history
 
-Write a [versioned table's](#versioned-tables) old versions to CSV, optionally purging them:
+Write a [versioned table's](#versioned-tables) old versions to CSV, optionally purging them (the older, history-only mode, selected by `--older-than`):
 
 ```bash
 mkio archive server.toml --older-than 90d --out ./archive --dry-run

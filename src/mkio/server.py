@@ -614,6 +614,7 @@ async def _on_startup(app: web.Application) -> None:
     info_svc._server_services = services
     info_svc._started_ref = started_ref
     info_svc._started_monotonic = started_monotonic
+    info_svc._mkio_app = app.get("mkio_app")
     info_svc._monitor_notifier = lambda sn, d, data, _app=app: _notify_monitors(_app, sn, d, data)
     services["_mkio"] = info_svc
 

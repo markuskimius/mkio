@@ -340,11 +340,11 @@ class WriteBatcher:
                             # Versioned ops RETURN every affected row (deletes
                             # included) so each one is recorded.
                             rows = [dict(r) for r in await cursor.fetchall()]
-                        elif op.op_type != "delete":
-                            row = await cursor.fetchone()
-                            rows = [dict(row)] if row else []
                         else:
-                            rows = []
+                            # A delete written with RETURNING hands its row to
+                            # the event too, so subscribers learn what went.
+                            row = await cursor.fetchone() if cursor.description else None
+                            rows = [dict(row)] if row else []
                         await cursor.close()
                         # Capture may step a row's version forward, so the
                         # event and the bind row are built from the rows only
