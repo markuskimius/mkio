@@ -1494,6 +1494,281 @@ async def test_query_mkio_row_join_includes_secondary_pk(db, bus, writer):
     await svc.stop()
 
 
+# ---- Query re-read through a custom sql ------------------------------------
+
+REF = "20260404 00:00:00.000000000001"
+
+
+async def _reviews_db(db):
+    """products (one) -> reviews (many), the join the tests below read."""
+    await db.write_conn.execute(
+        "CREATE TABLE IF NOT EXISTS products ("
+        "product_id TEXT PRIMARY KEY, name TEXT, _mkio_ref TEXT DEFAULT '')"
+    )
+    await db.write_conn.execute(
+        "CREATE TABLE IF NOT EXISTS reviews ("
+        "review_id INTEGER PRIMARY KEY, product_id TEXT, rating INTEGER, "
+        "_mkio_ref TEXT DEFAULT '')"
+    )
+    await db.write_conn.execute("INSERT INTO products (product_id, name) VALUES ('P1', 'Widget')")
+    await db.write_conn.execute("INSERT INTO products (product_id, name) VALUES ('P2', 'Gizmo')")
+    await db.write_conn.execute("INSERT INTO reviews (review_id, product_id, rating) VALUES (10, 'P1', 5)")
+    await db.write_conn.execute("INSERT INTO reviews (review_id, product_id, rating) VALUES (11, 'P1', 3)")
+    await db.write_conn.execute("INSERT INTO reviews (review_id, product_id, rating) VALUES (20, 'P2', 4)")
+    await db.write_conn.commit()
+
+
+async def _query(db, bus, writer, **config):
+    svc = QueryService(config={"protocol": "query", "change_log_size": 100, **config},
+                       db=db, change_bus=bus, writer=writer)
+    svc.name = "q"
+    await svc.start()
+    return svc
+
+
+async def test_query_custom_sql_rereads_the_changed_row(db, bus, writer):
+    """A change event carries the writer's bare row; a subscriber to a custom
+    sql is owed the row *as the sql shapes it* — computed columns included."""
+    await db.write_conn.execute(
+        "INSERT INTO orders (id, symbol, qty, status) VALUES ('1', 'AAPL', 100, 'pending')"
+    )
+    await db.write_conn.commit()
+    svc = await _query(db, bus, writer, primary_table="orders", watch_tables=["orders"],
+                       sql="SELECT id, symbol, qty * 2 AS twice FROM orders")
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe"})
+    assert ws.get_messages()[0]["rows"] == [
+        {"id": "1", "symbol": "AAPL", "twice": 200, "_mkio_ref": "", "_mkio_row": "1"}
+    ]
+    ws.clear()
+
+    await db.write_conn.execute(
+        "INSERT INTO orders (id, symbol, qty, status, _mkio_ref) VALUES ('3', 'GOOG', 7, 'new', ?)", (REF,)
+    )
+    await db.write_conn.commit()
+    bus.publish([ChangeBus.make_event(
+        "orders", "insert", {"id": "3", "symbol": "GOOG", "qty": 7, "status": "new"}, REF,
+    )])
+    await asyncio.sleep(0.1)
+    [msg] = ws.get_messages()
+    assert msg["op"] == "insert"
+    assert msg["row"] == {"id": "3", "symbol": "GOOG", "twice": 14, "_mkio_ref": REF, "_mkio_row": "3"}
+    await svc.stop()
+
+
+async def test_query_custom_sql_where_drop_is_a_delete(db, bus, writer):
+    """A row the sql stops returning leaves the subscriber's table."""
+    await db.write_conn.execute(
+        "INSERT INTO orders (id, symbol, qty, status) VALUES ('1', 'AAPL', 100, 'pending')"
+    )
+    await db.write_conn.commit()
+    svc = await _query(db, bus, writer, primary_table="orders", watch_tables=["orders"],
+                       sql="SELECT * FROM orders WHERE status = 'pending'")
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe"})
+    assert [r["id"] for r in ws.get_messages()[0]["rows"]] == ["1"]
+    ws.clear()
+
+    await db.write_conn.execute("UPDATE orders SET status = 'filled' WHERE id = '1'")
+    await db.write_conn.commit()
+    bus.publish([ChangeBus.make_event(
+        "orders", "update", {"id": "1", "symbol": "AAPL", "qty": 100, "status": "filled"}, REF,
+    )])
+    await asyncio.sleep(0.1)
+    [msg] = ws.get_messages()
+    assert msg["op"] == "delete"
+    assert msg["row"]["_mkio_row"] == "1"
+
+    # And back in: the re-read finds it again, as an update (the op as written).
+    ws.clear()
+    await db.write_conn.execute("UPDATE orders SET status = 'pending' WHERE id = '1'")
+    await db.write_conn.commit()
+    bus.publish([ChangeBus.make_event(
+        "orders", "update", {"id": "1", "symbol": "AAPL", "qty": 100, "status": "pending"}, REF,
+    )])
+    await asyncio.sleep(0.1)
+    [msg] = ws.get_messages()
+    assert msg["op"] == "update" and msg["row"]["status"] == "pending"
+    await svc.stop()
+
+
+async def test_query_joined_column_follows_the_joined_table(db, bus, writer):
+    """The reason for re-query mode: a change to a table the sql joins reaches
+    the subscriber as an update to the primary rows it shows through — and
+    only those. Rows the change did not touch stay silent."""
+    await _reviews_db(db)
+    svc = await _query(
+        db, bus, writer, primary_table="reviews", watch_tables=["reviews", "products"],
+        sql="SELECT r.review_id, r.product_id, r.rating, p.name "
+            "FROM reviews r JOIN products p ON p.product_id = r.product_id",
+    )
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe"})
+    snap = ws.get_messages()[0]["rows"]
+    assert {r["name"] for r in snap} == {"Widget", "Gizmo"}
+    ws.clear()
+
+    await db.write_conn.execute("UPDATE products SET name = 'Wodget' WHERE product_id = 'P1'")
+    await db.write_conn.commit()
+    bus.publish([ChangeBus.make_event("products", "update", {"product_id": "P1", "name": "Wodget"}, REF)])
+    await asyncio.sleep(0.1)
+    msgs = ws.get_messages()
+    assert sorted(m["row"]["review_id"] for m in msgs) == [10, 11], "P2's review stays silent"
+    assert all(m["op"] == "update" and m["row"]["name"] == "Wodget" for m in msgs)
+    assert all(m["row"]["_mkio_ref"] == REF for m in msgs), "the change that caused it"
+
+    # A change that alters nothing the sql shows sends nothing.
+    ws.clear()
+    bus.publish([ChangeBus.make_event("products", "update", {"product_id": "P1", "name": "Wodget"}, REF)])
+    await asyncio.sleep(0.1)
+    assert ws.get_messages() == []
+
+    # A burst of changes to the joined table is one re-query: no duplicates.
+    ws.clear()
+    await db.write_conn.execute("UPDATE products SET name = 'Gadget' WHERE product_id = 'P2'")
+    await db.write_conn.commit()
+    bus.publish([
+        ChangeBus.make_event("products", "update", {"product_id": "P2", "name": "Gadget"}, REF)
+        for _ in range(5)
+    ])
+    await asyncio.sleep(0.1)
+    msgs = ws.get_messages()
+    assert [(m["op"], m["row"]["review_id"], m["row"]["name"]) for m in msgs] == [("update", 20, "Gadget")]
+    await svc.stop()
+
+
+async def test_query_joined_table_filter_still_applies(db, bus, writer):
+    """A filtered subscriber gets a joined-table update only for its rows."""
+    await _reviews_db(db)
+    svc = await _query(
+        db, bus, writer, primary_table="reviews", watch_tables=["reviews", "products"],
+        filterable=["product_id"],
+        sql="SELECT r.review_id, r.product_id, r.rating, p.name "
+            "FROM reviews r JOIN products p ON p.product_id = r.product_id",
+    )
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe", "filter": "product_id == 'P2'"})
+    assert [r["review_id"] for r in ws.get_messages()[0]["rows"]] == [20]
+    ws.clear()
+    await db.write_conn.execute("UPDATE products SET name = 'Wodget' WHERE product_id = 'P1'")
+    await db.write_conn.commit()
+    bus.publish([ChangeBus.make_event("products", "update", {"product_id": "P1", "name": "Wodget"}, REF)])
+    await asyncio.sleep(0.1)
+    assert ws.get_messages() == [], "P1's reviews are not this subscriber's"
+    await svc.stop()
+
+
+async def test_query_joined_update_keeps_cause_and_projection(db, bus, writer):
+    """What a joined-table change publishes is an ordinary update: it carries
+    the causing event's `cause` (an undo of the joined row reads as one) and
+    honours the subscriber's `fields`, with `_mkio_row` kept through it."""
+    await _reviews_db(db)
+    svc = await _query(
+        db, bus, writer, primary_table="reviews", watch_tables=["reviews", "products"],
+        sql="SELECT r.review_id, r.product_id, r.rating, p.name "
+            "FROM reviews r JOIN products p ON p.product_id = r.product_id",
+    )
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe", "fields": ["review_id", "name"]})
+    assert set(ws.get_messages()[0]["rows"][0]) == {"review_id", "name", "_mkio_ref", "_mkio_row"}
+    ws.clear()
+    await db.write_conn.execute("UPDATE products SET name = 'Gizmo II' WHERE product_id = 'P2'")
+    await db.write_conn.commit()
+    bus.publish([ChangeBus.make_event(
+        "products", "update", {"product_id": "P2", "name": "Gizmo II"}, REF,
+        cause="undo", old={"product_id": "P2", "name": "Gizmo"},
+    )])
+    await asyncio.sleep(0.1)
+    [msg] = ws.get_messages()
+    assert msg["cause"] == "undo"
+    assert msg["row"] == {"review_id": 20, "name": "Gizmo II", "_mkio_ref": REF, "_mkio_row": '[20,"P2"]'}
+    await svc.stop()
+
+
+async def test_query_joined_insert_and_delete_carry_the_joined_row(db, bus, writer):
+    """An insert on the primary table arrives with its joined columns, and a
+    delete — which the writer announces by key alone — arrives with the row
+    the subscriber holds, full _mkio_row included, so it can find it."""
+    await _reviews_db(db)
+    svc = await _query(
+        db, bus, writer, primary_table="reviews", watch_tables=["reviews", "products"],
+        sql="SELECT r.review_id, r.product_id, r.rating, p.name "
+            "FROM reviews r JOIN products p ON p.product_id = r.product_id",
+    )
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+
+    await db.write_conn.execute("INSERT INTO reviews (review_id, product_id, rating) VALUES (12, 'P1', 1)")
+    await db.write_conn.commit()
+    bus.publish([ChangeBus.make_event(
+        "reviews", "insert", {"review_id": 12, "product_id": "P1", "rating": 1}, REF,
+    )])
+    await asyncio.sleep(0.1)
+    [msg] = ws.get_messages()
+    assert msg["op"] == "insert"
+    assert msg["row"] == {"review_id": 12, "product_id": "P1", "rating": 1, "name": "Widget",
+                          "_mkio_ref": REF, "_mkio_row": '[12,"P1"]'}
+
+    ws.clear()
+    await db.write_conn.execute("DELETE FROM reviews WHERE review_id = 12")
+    await db.write_conn.commit()
+    bus.publish([ChangeBus.make_event("reviews", "delete", {"review_id": 12}, REF)])
+    await asyncio.sleep(0.1)
+    [msg] = ws.get_messages()
+    assert msg["op"] == "delete"
+    assert msg["row"]["_mkio_row"] == '[12,"P1"]'
+    assert msg["row"]["name"] == "Widget"
+
+    # A delete of a row the query never held goes out as it came.
+    ws.clear()
+    bus.publish([ChangeBus.make_event("reviews", "delete", {"review_id": 99}, REF)])
+    await asyncio.sleep(0.1)
+    [msg] = ws.get_messages()
+    assert msg["op"] == "delete" and msg["row"]["review_id"] == 99
+    await svc.stop()
+
+
+async def test_query_joined_rows_dropped_by_an_inner_join(db, bus, writer):
+    """Deleting the joined side takes the primary rows out of the query."""
+    await _reviews_db(db)
+    svc = await _query(
+        db, bus, writer, primary_table="reviews", watch_tables=["reviews", "products"],
+        sql="SELECT r.review_id, r.product_id, r.rating, p.name "
+            "FROM reviews r JOIN products p ON p.product_id = r.product_id",
+    )
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+    await db.write_conn.execute("DELETE FROM products WHERE product_id = 'P1'")
+    await db.write_conn.commit()
+    bus.publish([ChangeBus.make_event("products", "delete", {"product_id": "P1"}, REF)])
+    await asyncio.sleep(0.1)
+    msgs = ws.get_messages()
+    assert sorted((m["op"], m["row"]["review_id"]) for m in msgs) == [("delete", 10), ("delete", 11)]
+    await svc.stop()
+
+
+async def test_query_sql_without_the_key_is_served_bare(db, bus, writer, caplog):
+    """A sql that leaves the primary key out cannot be re-read by row: it
+    keeps the old behaviour (the event's row as it came) and says so."""
+    import logging
+    with caplog.at_level(logging.WARNING, logger="mkio.query"):
+        svc = await _query(db, bus, writer, primary_table="orders", watch_tables=["orders"],
+                           sql="SELECT symbol, qty FROM orders")
+    assert "does not return ['id']" in caplog.text
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+    bus.publish([ChangeBus.make_event(
+        "orders", "insert", {"id": "3", "symbol": "GOOG", "qty": 7, "status": "new"}, REF,
+    )])
+    await asyncio.sleep(0.1)
+    [msg] = ws.get_messages()
+    assert msg["row"]["status"] == "new", "the bare row, not the query's"
+    await svc.stop()
+
+
 # ---- Field projection -------------------------------------------------------
 
 async def test_subpub_fields_snapshot(subpub_svc):

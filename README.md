@@ -863,6 +863,31 @@ primary_table = "orders"
 filterable = ["status"]
 ```
 
+With the default SQL a live update is the row the writer returned. Since
+0.8.0 a custom `sql` can reshape the row — computed columns, a `WHERE`, a `JOIN` — and the
+service then re-reads the changed row through that SQL before publishing it,
+so subscribers get the row as the query shapes it; a row the SQL no longer
+returns is published as a delete. Name the joined tables in `watch_tables` and
+a change to one of them reaches subscribers too: the service keeps the
+query's result set in memory, re-runs the SQL after such a change (once per
+batch), and publishes only the rows that differ, as updates to the primary
+rows they belong to.
+
+```toml
+[services.order_lines]
+protocol = "query"
+primary_table = "orders"
+watch_tables = ["orders", "customers"]
+sql = "SELECT o.*, c.name AS customer FROM orders o JOIN customers c ON c.id = o.customer_id"
+```
+
+Here a customer rename publishes an update for each of that customer's
+orders, with the new `customer`. The SQL must return the primary table's key
+columns under their own names (`o.*` does); one that leaves them out is
+served the old way, with a warning at startup. A query that shows several
+rows per primary row (a one-to-many join) is fine — each row is identified by
+every watched table's key, which is what `_mkio_row` carries.
+
 ### ReqRep
 
 One-shot request-reply: the client sends a request with data, the server evaluates configured SQL and/or expressions, and returns a reply. No subscriptions or change feeds — pure request-reply. Supports three reply shapes determined by config:
