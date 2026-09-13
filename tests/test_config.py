@@ -226,6 +226,36 @@ def test_query_key_may_alias_under_a_custom_sql():
     assert config["services"]["svc"]["key"] == ["ident"]
 
 
+def _joined(watch_columns, **extra):
+    return {
+        "tables": {
+            "orders": {"columns": {"id": "TEXT PRIMARY KEY", "symbol": "TEXT"}},
+            "symbols": {"columns": {"symbol": "TEXT PRIMARY KEY", "name": "TEXT", "last": "REAL"}},
+        },
+        "services": {"svc": {
+            "protocol": "query", "primary_table": "orders",
+            "watch_tables": ["orders", "symbols"],
+            "sql": "SELECT o.*, s.name FROM orders o JOIN symbols s ON s.symbol = o.symbol",
+            "watch_columns": watch_columns, **extra,
+        }},
+    }
+
+
+def test_watch_columns_name_columns_of_a_watched_secondary_table():
+    config = load_config(_joined({"symbols": ["name"]}))
+    assert config["services"]["svc"]["watch_columns"] == {"symbols": ["name"]}
+    with pytest.raises(ValueError, match="watch_columns column 'nmae' not found in table 'symbols'"):
+        load_config(_joined({"symbols": ["nmae"]}))
+    with pytest.raises(ValueError, match="watch_columns table 'vendors' is not in watch_tables"):
+        load_config(_joined({"vendors": ["name"]}))
+    with pytest.raises(ValueError, match="cannot name the primary table 'orders'"):
+        load_config(_joined({"orders": ["symbol"]}))
+    with pytest.raises(ValueError, match=r"watch_columns\['symbols'\] must be a non-empty list"):
+        load_config(_joined({"symbols": "name"}))
+    with pytest.raises(ValueError, match="watch_columns must map"):
+        load_config(_joined(["name"]))
+
+
 def test_nonexistent_watch_table():
     with pytest.raises(ValueError, match="watch_tables entry 'bogus'.*not found"):
         load_config({

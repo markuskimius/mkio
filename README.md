@@ -892,6 +892,21 @@ key would lose them behind the composite identity: since 0.9.0 `key` names
 the columns `_mkio_row` is built from, so `key = ["id"]` keeps it the
 primary key however many tables the SQL joins.
 
+A joined table may change far more often than the columns the SQL reads
+from it — a status next to counters that move on every message. Since
+0.10.0 `watch_columns` names those columns per secondary table:
+
+```toml
+watch_tables = ["orders", "sessions"]
+watch_columns = { sessions = ["status"] }
+```
+
+The service remembers the last values it saw of those columns per row of
+that table and skips the re-query when an event leaves them as they were,
+so a counter tick costs a comparison. The first sighting of a row and a
+delete always re-query; a watched table left out of `watch_columns`
+re-queries on any change, as before.
+
 ### ReqRep
 
 One-shot request-reply: the client sends a request with data, the server evaluates configured SQL and/or expressions, and returns a reply. No subscriptions or change feeds — pure request-reply. Supports three reply shapes determined by config:
@@ -1638,7 +1653,7 @@ The `[config]` section maps routes to directories, with automatic TOML-to-JSON c
 mkio validates your TOML config at load time and fails fast with clear error messages:
 
 - **Table references** — `primary_table`, `watch_tables`, and op `table` fields must reference tables defined in `[tables]`
-- **Column references** — op `fields`, `key`, `defaults`, `bind` columns, `filterable`, query `key`, and subpub `topic` are checked against table schemas (a custom `sql` exempts `filterable` and `key`, which may name its aliases)
+- **Column references** — op `fields`, `key`, `defaults`, `bind` columns, `filterable`, query `key` and `watch_columns`, and subpub `topic` are checked against table schemas (a custom `sql` exempts `filterable` and `key`, which may name its aliases)
 - **Protocol validation** — service `protocol` must be a known type (`transaction`, `subpub`, `stream`, `query`, `reqrep`)
 - **Required fields** — missing `protocol`, `primary_table`, `topic`, `ops`, or `key` (for update/delete/upsert) are caught immediately
 - **Bind references** — forward references and out-of-bounds op indices in `$N.field` binds are rejected

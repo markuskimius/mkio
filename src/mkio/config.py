@@ -58,7 +58,7 @@ _VALID_SERVICE_KEYS: dict[str, frozenset[str]] = {
         "access",
     }),
     "query": frozenset({
-        "protocol", "primary_table", "watch_tables", "sql", "key",
+        "protocol", "primary_table", "watch_tables", "watch_columns", "sql", "key",
         "publish", "filterable", "where", "change_log_size", "description",
         "access",
     }),
@@ -312,6 +312,8 @@ def _normalize_service(
 
     if svc_type == "query" and "key" in svc:
         _validate_query_key(name, svc, config)
+    if svc_type == "query" and "watch_columns" in svc:
+        _validate_watch_columns(name, svc, config)
 
     # Validate access config
     if "access" in svc:
@@ -675,6 +677,47 @@ def _validate_query_key(
                 f"Service '{name}': key column '{col}' not found in table "
                 f"'{primary}'. Available columns: {', '.join(sorted(columns))}.{hint}"
             )
+
+
+def _validate_watch_columns(
+    name: str, svc: dict[str, Any], config: dict[str, Any]
+) -> None:
+    """``watch_columns`` names, per watched secondary table, the columns the
+    query's sql reads from it: a change leaving them as they were is not
+    re-queried. Each table must be in ``watch_tables`` and not the primary
+    one (its rows are re-read one by one, not re-queried), and each column
+    must exist on it."""
+    watch_columns = svc["watch_columns"]
+    if not isinstance(watch_columns, dict):
+        raise ValueError(
+            f"Service '{name}': watch_columns must map a watched table to a list of columns"
+        )
+    tables = _effective_tables(config)
+    watched = svc.get("watch_tables", [])
+    for table, columns in watch_columns.items():
+        if table == svc.get("primary_table"):
+            raise ValueError(
+                f"Service '{name}': watch_columns cannot name the primary table '{table}'"
+            )
+        if table not in watched:
+            raise ValueError(
+                f"Service '{name}': watch_columns table '{table}' is not in watch_tables {watched}"
+            )
+        if not isinstance(columns, list) or not columns or not all(
+            isinstance(c, str) and c for c in columns
+        ):
+            raise ValueError(
+                f"Service '{name}': watch_columns['{table}'] must be a non-empty list of column names"
+            )
+        known = tables.get(table, {}).get("columns", {})
+        for col in columns:
+            if col not in known:
+                close = difflib.get_close_matches(col, known, n=1, cutoff=0.6)
+                hint = f" Did you mean {close[0]!r}?" if close else ""
+                raise ValueError(
+                    f"Service '{name}': watch_columns column '{col}' not found in table "
+                    f"'{table}'. Available columns: {', '.join(sorted(known))}.{hint}"
+                )
 
 
 def _validate_filterable(

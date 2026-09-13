@@ -1808,6 +1808,119 @@ async def test_query_key_pins_row_identity_on_a_one_to_one_join(db, bus, writer)
     await svc.stop()
 
 
+async def test_query_watch_columns_skip_events_that_leave_them_alone(db, bus, writer):
+    """A secondary table can change far more often than the columns the sql
+    reads from it. With `watch_columns` the service remembers those values
+    per row and skips the re-query when an event leaves them as they were;
+    the first sighting of a row and a delete always re-query."""
+    await db.write_conn.execute(
+        "CREATE TABLE IF NOT EXISTS symbols ("
+        "symbol TEXT PRIMARY KEY, name TEXT, last INTEGER DEFAULT 0, _mkio_ref TEXT DEFAULT '')"
+    )
+    await db.write_conn.execute("INSERT INTO symbols (symbol, name, last) VALUES ('AAPL', 'Apple', 1)")
+    await db.write_conn.execute(
+        "INSERT INTO orders (id, symbol, qty, status) VALUES ('1', 'AAPL', 100, 'new')"
+    )
+    await db.write_conn.commit()
+    svc = await _query(
+        db, bus, writer, primary_table="orders", watch_tables=["orders", "symbols"],
+        watch_columns={"symbols": ["name"]}, key=["id"],
+        sql="SELECT o.*, s.name AS issuer FROM orders o LEFT JOIN symbols s ON s.symbol = o.symbol",
+    )
+    requeries = []
+    real = svc._on_secondary
+
+    async def counting(event):
+        requeries.append(event.row.get("last"))
+        await real(event)
+    svc._on_secondary = counting
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+
+    async def tick(last, name="Apple", op="update"):
+        await db.write_conn.execute(
+            "UPDATE symbols SET last = ?, name = ? WHERE symbol = 'AAPL'", (last, name))
+        await db.write_conn.commit()
+        bus.publish([ChangeBus.make_event(
+            "symbols", op, {"symbol": "AAPL", "name": name, "last": last}, REF)])
+        await asyncio.sleep(0.1)
+
+    await tick(2)
+    assert requeries == [2], "the first sighting of the row is a change"
+    assert ws.get_messages() == [], "but nothing the query shows moved"
+
+    await tick(3)
+    await tick(4)
+    assert requeries == [2], "the watched column is as it was: no re-query"
+    assert ws.get_messages() == []
+
+    await tick(5, name="Apple Inc")
+    assert requeries == [2, 5]
+    [msg] = ws.get_messages()
+    assert (msg["op"], msg["row"]["issuer"], msg["row"]["_mkio_row"]) == ("update", "Apple Inc", "1")
+    ws.clear()
+
+    await tick(6, name="Apple Inc")
+    assert requeries == [2, 5], "unchanged again after the change"
+
+    await db.write_conn.execute("DELETE FROM symbols WHERE symbol = 'AAPL'")
+    await db.write_conn.commit()
+    bus.publish([ChangeBus.make_event("symbols", "delete", {"symbol": "AAPL"}, REF)])
+    await asyncio.sleep(0.1)
+    assert requeries == [2, 5, None], "a delete always re-queries"
+    [msg] = ws.get_messages()
+    assert (msg["op"], msg["row"]["issuer"]) == ("update", None)
+    ws.clear()
+
+    await db.write_conn.execute("INSERT INTO symbols (symbol, name, last) VALUES ('AAPL', 'Apple', 7)")
+    await db.write_conn.commit()
+    bus.publish([ChangeBus.make_event(
+        "symbols", "insert", {"symbol": "AAPL", "name": "Apple", "last": 7}, REF)])
+    await asyncio.sleep(0.1)
+    assert requeries == [2, 5, None, 7], "forgotten on delete, so the row coming back is a change"
+    assert ws.get_messages()[0]["row"]["issuer"] == "Apple"
+    await svc.stop()
+
+
+async def test_query_watch_columns_leave_unlisted_tables_as_before(db, bus, writer):
+    """Only the tables named in `watch_columns` are filtered; another
+    watched table re-queries on any change, as it did without the key."""
+    await _reviews_db(db)
+    await db.write_conn.execute(
+        "CREATE TABLE IF NOT EXISTS vendors ("
+        "vendor_id TEXT PRIMARY KEY, name TEXT, note TEXT DEFAULT '', _mkio_ref TEXT DEFAULT '')"
+    )
+    await db.write_conn.execute("INSERT INTO vendors (vendor_id, name) VALUES ('V1', 'Acme')")
+    await db.write_conn.commit()
+    svc = await _query(
+        db, bus, writer, primary_table="reviews", watch_tables=["reviews", "products", "vendors"],
+        watch_columns={"vendors": ["name"]}, key=["review_id"],
+        sql="SELECT r.*, p.name AS product, v.name AS vendor FROM reviews r "
+            "JOIN products p ON p.product_id = r.product_id LEFT JOIN vendors v ON v.vendor_id = 'V1'",
+    )
+    calls = []
+    real = svc._on_secondary
+
+    async def counting(event):
+        calls.append(event.table)
+        await real(event)
+    svc._on_secondary = counting
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+
+    bus.publish([ChangeBus.make_event("vendors", "update", {"vendor_id": "V1", "name": "Acme", "note": "x"}, REF)])
+    await asyncio.sleep(0.1)
+    bus.publish([ChangeBus.make_event("vendors", "update", {"vendor_id": "V1", "name": "Acme", "note": "y"}, REF)])
+    await asyncio.sleep(0.1)
+    bus.publish([ChangeBus.make_event("products", "update", {"product_id": "P1", "name": "Widget"}, REF)])
+    await asyncio.sleep(0.1)
+    assert calls == ["vendors", "products"], \
+        "vendors: first sighting only; products: every change, being unlisted"
+    await svc.stop()
+
+
 async def test_query_sql_without_the_key_is_served_bare(db, bus, writer, caplog):
     """A sql that leaves the primary key out cannot be re-read by row: it
     keeps the old behaviour (the event's row as it came) and says so."""

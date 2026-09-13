@@ -47,6 +47,7 @@ class QueryService(Service):
         watch_tables: list[str]
         sql: str (optional, defaults to SELECT * FROM primary_table)
         key: list[str] (optional, the columns ``_mkio_row`` is built from)
+        watch_columns: dict[str, list[str]] (optional, per secondary table)
         filterable: list[str] (optional)
         publish: dict (optional)
         max_buffer: int (optional, default 1000)
@@ -66,6 +67,12 @@ class QueryService(Service):
     watched table's, which tells apart the rows of a one-to-many join. A
     one-to-one join wants ``key`` set to the primary key alone, so the
     identity a client tracks the record by does not change with the join.
+
+    A secondary table may change far more often than the columns the SQL
+    reads from it: ``watch_columns`` names those columns, and the service
+    remembers their last values per row of that table, so an event that
+    leaves them as they were costs a comparison and no re-query. The first
+    sighting of a row, and a delete, always re-query.
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -83,6 +90,11 @@ class QueryService(Service):
         self._listener_task: asyncio.Task[None] | None = None
         self._timeout_task: asyncio.Task[None] | None = None
         self._pk_cols: list[str] = []
+        # Secondary tables' key columns, and the last values seen of each
+        # one's watched columns, per row: table -> row key -> values.
+        self._table_pk: dict[str, list[str]] = {}
+        self._watch_columns: dict[str, list[str]] = dict(self.config.get("watch_columns", {}))
+        self._seen: dict[str, dict[str, tuple[Any, ...]]] = {t: {} for t in self._watch_columns}
         # Re-query mode (custom sql): the primary table's key columns, and
         # the SQL that reads one primary row's query rows by them.
         self._primary_pk: list[str] = []
@@ -99,6 +111,7 @@ class QueryService(Service):
         for table in ordered:
             info = await self.db.read(f"PRAGMA table_info({table})")
             pk = [r["name"] for r in sorted(info, key=lambda r: r["pk"]) if r["pk"] > 0]
+            self._table_pk[table] = pk
             if table == self._table:
                 self._primary_pk = pk
             for name in pk:
@@ -387,10 +400,29 @@ class QueryService(Service):
             for event in burst:
                 if event.table == self._table or self._cache is None:
                     await self._on_event(event)
-                else:
+                elif not self._unchanged(event):
                     secondary = event  # the last one stands for the burst
             if secondary is not None:
                 await self._on_secondary(secondary)
+
+    def _unchanged(self, event: ChangeEvent) -> bool:
+        """Whether a secondary-table event left its watched columns as the
+        service last saw them, so the SQL's result cannot have moved."""
+        columns = self._watch_columns.get(event.table)
+        if not columns:
+            return False
+        seen = self._seen[event.table]
+        key = self._key(event.row, self._table_pk.get(event.table, []))
+        if key is None:
+            return False
+        if event.op == "delete":
+            seen.pop(key, None)
+            return False
+        values = tuple(event.row.get(c) for c in columns)
+        if seen.get(key) == values:
+            return True
+        seen[key] = values
+        return False
 
     async def _on_event(self, event: ChangeEvent) -> None:
         """A change to the primary table (or, without re-query, any watched

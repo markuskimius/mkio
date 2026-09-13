@@ -107,6 +107,8 @@ async def _api_services(request: web.Request) -> web.Response:
             info["watch_tables"] = svc.config["watch_tables"]
         if "key" in svc.config:
             info["key"] = svc.config["key"]
+        if "watch_columns" in svc.config:
+            info["watch_columns"] = svc.config["watch_columns"]
         if "ops" in svc.config:
             ops = svc.config["ops"]
             if isinstance(ops, dict):
