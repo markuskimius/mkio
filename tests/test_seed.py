@@ -468,3 +468,43 @@ async def test_seed_full_server(tmp_path):
         assert len(set(refs)) == 2
     finally:
         await app.stop()
+
+
+def test_seed_absolute_path_by_is_absolute(tmp_path, monkeypatch):
+    """A path pathlib calls absolute is used as-is even without a leading "/"
+    (a drive-rooted Windows path); relative ones still resolve to the config dir."""
+    from mkio import config as config_mod
+    seen = {}
+
+    class FakePath(type(Path())):
+        def is_absolute(self):
+            return str(self).startswith("X:") or super().is_absolute()
+
+        def is_file(self):
+            seen["resolved"] = str(self)
+            return True
+
+    monkeypatch.setattr(config_mod, "Path", FakePath)
+    table = {"columns": {"id": "TEXT PRIMARY KEY"}, "seed": "X:/data/seed.csv"}
+    config_mod._validate_seed("t", table, str(tmp_path))
+    assert seen["resolved"].endswith("X:/data/seed.csv")
+    assert str(tmp_path) not in seen["resolved"]
+
+
+def test_seed_backslash_dot_prefix_is_cwd_relative(tmp_path, monkeypatch):
+    """A Windows-style ".\\" prefix means the current directory, like "./"."""
+    from mkio import config as config_mod
+    seen = {}
+
+    class FakePath(type(Path())):
+        def is_file(self):
+            seen["resolved"] = str(self)
+            return True
+
+    monkeypatch.setattr(config_mod, "Path", FakePath)
+    (tmp_path / "cwd").mkdir()
+    monkeypatch.chdir(tmp_path / "cwd")
+    table = {"columns": {"id": "TEXT PRIMARY KEY"}, "seed": ".\\seed.csv"}
+    config_mod._validate_seed("t", table, str(tmp_path / "config"))
+    assert seen["resolved"].startswith(str((tmp_path / "cwd").resolve()))
+    assert "config" not in seen["resolved"]

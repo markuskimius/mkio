@@ -35,6 +35,8 @@ A single TCP port serves HTTP and WebSocket, backed by an embedded SQLite databa
 pip install mkio
 ```
 
+Runs on Linux, macOS and Windows with the standard CPython 3.11+ interpreter. It has no compiled dependencies of its own; the optional `fast` and `auth` extras ship wheels for all three (uvloop is Unix-only and skipped on Windows).
+
 Create `server.toml`:
 
 ```toml
@@ -282,7 +284,7 @@ asyncio.run(main())
 | `async start()` | Non-blocking start — runs migration, preflight, binds the port. |
 | `async stop()` | Graceful shutdown — drains writes, closes WebSockets, checkpoints DB. Idempotent. |
 | `async wait()` | Blocks until `stop()` is called or a signal fires. |
-| `run()` | Blocking convenience: starts, installs signal handlers, waits. Tries uvloop if available. |
+| `run()` | Blocking convenience: starts, waits, stops on SIGINT/SIGTERM (Ctrl+C on Windows, whose event loop has no signal handlers). Tries uvloop if available. |
 | `.config` | The resolved config dict (read-only property). |
 | `.db` | `Database` instance (after start, `None` otherwise). **Unstable.** |
 | `.writer` | `WriteBatcher` instance (after start, `None` otherwise). **Unstable.** |
@@ -1484,7 +1486,7 @@ The JavaScript module exposes the same API with camelCase names — `compile`, `
 - **Write batching** — collects writes over a 2ms window, commits as single SQLite transaction with per-request SAVEPOINTs
 - **WAL mode** — dual connections (write + read) for concurrent reads during writes. An in-memory database cannot use WAL: its two connections share a cache, which locks per table, so its read connection sets `read_uncommitted` — without it a read of a table the writer holds open fails with `SQLITE_LOCKED` rather than waiting
 - **Zero-copy fan-out** — change events serialized once, same bytes sent to all subscribers
-- **Optional acceleration** — `pip install mkio[fast]` for orjson (5-10x JSON) and uvloop (2-4x I/O)
+- **Optional acceleration** — `pip install mkio[fast]` for orjson (5-10x JSON) and uvloop (2-4x I/O; Linux and macOS only, the extra skips it on Windows)
 
 ## CLI Tools
 
@@ -1687,8 +1689,8 @@ Seed data is loaded **only when the table is first created** — not on every re
 
 | Path starts with | Resolved relative to |
 |------------------|---------------------|
-| `/` | Absolute path |
-| `./` | Current working directory |
+| `/` (or a drive letter, e.g. `C:/`) | Absolute path |
+| `./` (or `.\`) | Current working directory |
 | anything else | Directory containing the config file |
 
 **Error handling:** Seed errors are fatal. Missing files, bad format, or unknown column names prevent the server from starting — same behavior as other config errors.

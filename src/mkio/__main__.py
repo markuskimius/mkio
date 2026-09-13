@@ -29,8 +29,30 @@ _PROTOCOL_CLI_HINT = {
 _VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep", "check", "dbupdate", "archive", "restore", "init", "schema", "adduser", "hashpass")
 
 
+def _enable_ansi_colors() -> None:
+    """Turn on escape-sequence processing in the Windows console.
+
+    Windows Terminal handles ANSI colors already; the legacy console host
+    prints the raw sequences unless virtual-terminal mode is switched on.
+    A no-op elsewhere, and when stdout is not a console.
+    """
+    if sys.platform != "win32" or not sys.stdout.isatty():
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            enable_vt = 0x0004  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            kernel32.SetConsoleMode(handle, mode.value | enable_vt)
+    except Exception:
+        pass
+
+
 def main() -> None:
     global _TRACEBACK
+    _enable_ansi_colors()
     if "--traceback" in sys.argv:
         sys.argv.remove("--traceback")
         _TRACEBACK = True

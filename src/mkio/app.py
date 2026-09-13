@@ -700,6 +700,10 @@ class MkioApp:
         """Blocking convenience that starts the server and waits for shutdown.
 
         Handles SIGINT/SIGTERM for graceful shutdown. Tries uvloop if available.
+
+        On Windows the event loop has no signal handlers, so Ctrl+C reaches
+        the server as a cancellation of this task instead; both paths stop the
+        server and return normally.
         """
         try:
             import uvloop
@@ -710,9 +714,22 @@ class MkioApp:
         async def _run() -> None:
             loop = asyncio.get_running_loop()
             await self.start()
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, lambda: asyncio.ensure_future(self.stop()))
-            await self.wait()
+            try:
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    loop.add_signal_handler(sig, lambda: asyncio.ensure_future(self.stop()))
+            except NotImplementedError:
+                # ProactorEventLoop (Windows): asyncio.run() turns Ctrl+C into
+                # a cancellation of this task, handled below.
+                pass
+            try:
+                await self.wait()
+            except asyncio.CancelledError:
+                # Shutdown requested from outside the loop; finish it cleanly
+                # so run() returns the way it does after SIGINT on Unix.
+                task = asyncio.current_task()
+                if task is not None:
+                    task.uncancel()
+                await self.stop()
 
         asyncio.run(_run())
 

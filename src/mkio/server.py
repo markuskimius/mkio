@@ -66,7 +66,7 @@ def _make_config_handler(config_path: Path):
         if "\x00" in rel:
             raise web.HTTPForbidden()
         resolved = (config_path / rel).resolve()
-        if not str(resolved).startswith(str(config_path)):
+        if not resolved.is_relative_to(config_path):
             raise web.HTTPForbidden()
 
         if resolved.suffix == ".json":

@@ -1821,3 +1821,65 @@ async def test_execute_from_startup_hook():
         assert rows[0]["val"] == "initial"
     finally:
         await app.stop()
+
+
+# ---------------------------------------------------------------------------
+# run(): blocking entry point, on loops with and without signal handlers
+# ---------------------------------------------------------------------------
+
+def _no_uvloop(monkeypatch):
+    """Keep run() from installing the uvloop policy for the rest of the session."""
+    import sys
+    monkeypatch.setitem(sys.modules, "uvloop", None)
+    policy = asyncio.get_event_loop_policy()
+    yield
+    asyncio.set_event_loop_policy(policy)
+
+
+@pytest.fixture
+def plain_asyncio(monkeypatch):
+    yield from _no_uvloop(monkeypatch)
+
+
+def test_run_returns_after_stop(plain_asyncio):
+    """run() returns once stop() is called (the signal handler path on Unix)."""
+    app = create_app(MINIMAL_CONFIG)
+
+    async def stop_soon():
+        asyncio.get_running_loop().call_later(0.05, lambda: asyncio.ensure_future(app.stop()))
+
+    app.on_startup(stop_soon)
+    app.run()
+    assert app.db is None
+
+
+def test_run_without_loop_signal_handlers(plain_asyncio, monkeypatch):
+    """On Windows the loop has no add_signal_handler and asyncio.run() turns
+    Ctrl+C into a cancellation of the main task; run() must still stop the
+    server and return normally instead of dying after binding the port."""
+    loop = asyncio.new_event_loop()
+    loop_cls = type(loop)
+    loop.close()
+
+    def unsupported(self, sig, callback, *args):
+        raise NotImplementedError
+
+    monkeypatch.setattr(loop_cls, "add_signal_handler", unsupported)
+
+    app = create_app(MINIMAL_CONFIG)
+    seen = []
+
+    async def cancel_main_task_soon():
+        # The startup hook runs inside run()'s main task; cancelling it later
+        # mimics what asyncio.run() does on Ctrl+C.
+        task = asyncio.current_task()
+        asyncio.get_running_loop().call_later(0.05, task.cancel)
+
+    async def note_shutdown():
+        seen.append("shutdown")
+
+    app.on_startup(cancel_main_task_soon)
+    app.on_shutdown(note_shutdown)
+    app.run()
+    assert seen == ["shutdown"]
+    assert app.db is None

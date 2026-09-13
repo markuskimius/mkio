@@ -634,9 +634,11 @@ def _validate_seed(
         )
 
     seed_path = Path(seed)
-    if seed.startswith("/"):
+    # "/" is absolute everywhere; is_absolute() also accepts a drive-rooted
+    # Windows path such as "C:/data/seed.csv".
+    if seed.startswith("/") or seed_path.is_absolute():
         resolved = seed_path
-    elif seed.startswith("./"):
+    elif seed.startswith(("./", ".\\")):
         resolved = Path.cwd() / seed_path
     elif config_dir:
         resolved = Path(config_dir) / seed_path

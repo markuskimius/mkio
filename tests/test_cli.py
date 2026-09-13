@@ -1131,3 +1131,65 @@ def test_cli_update_says_nothing_extra_for_an_ordinary_write(capsys):
     out = capsys.readouterr().out
     assert "UPDATE update" in out
     assert "(" not in out.splitlines()[0]
+
+
+def test_enable_ansi_colors_is_safe_everywhere(monkeypatch):
+    """A no-op off Windows and on a non-console stdout; never raises."""
+    from mkio.__main__ import _enable_ansi_colors
+    _enable_ansi_colors()
+    monkeypatch.setattr("sys.platform", "win32")
+    _enable_ansi_colors()  # stdout is captured (not a tty) → returns early
+
+
+def test_enable_ansi_colors_sets_vt_mode_on_windows_console(monkeypatch):
+    """On a Windows console it ORs ENABLE_VIRTUAL_TERMINAL_PROCESSING into the
+    existing mode, leaving the other flags alone."""
+    import sys, types
+    from mkio.__main__ import _enable_ansi_colors
+
+    calls = []
+
+    class Kernel32:
+        def GetStdHandle(self, which):
+            calls.append(("handle", which))
+            return 42
+
+        def GetConsoleMode(self, handle, mode_ref):
+            mode_ref._obj.value = 0x0003  # some pre-existing flags
+            return 1
+
+        def SetConsoleMode(self, handle, mode):
+            calls.append(("set", handle, mode))
+            return 1
+
+    class Ref:
+        def __init__(self, obj):
+            self._obj = obj
+
+    fake_ctypes = types.SimpleNamespace(
+        windll=types.SimpleNamespace(kernel32=Kernel32()),
+        c_uint32=lambda: types.SimpleNamespace(value=0),
+        byref=Ref,
+    )
+    monkeypatch.setitem(sys.modules, "ctypes", fake_ctypes)
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    _enable_ansi_colors()
+    assert calls == [("handle", -11), ("set", 42, 0x0003 | 0x0004)]
+
+
+def test_enable_ansi_colors_swallows_console_errors(monkeypatch):
+    """A console API that fails must not take the CLI down."""
+    import sys, types
+    from mkio.__main__ import _enable_ansi_colors
+
+    class Kernel32:
+        def GetStdHandle(self, which):
+            raise OSError("no console")
+
+    fake_ctypes = types.SimpleNamespace(windll=types.SimpleNamespace(kernel32=Kernel32()))
+    monkeypatch.setitem(sys.modules, "ctypes", fake_ctypes)
+    monkeypatch.setattr("sys.platform", "win32")
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    _enable_ansi_colors()

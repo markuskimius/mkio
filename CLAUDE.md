@@ -130,7 +130,7 @@ The `mkio` package exports a stable programmatic API for embedding mkio in other
 
 ## Conventions
 
-- Python 3.11+ required (for `asyncio.TaskGroup`, `tomllib`)
+- Python 3.11+ required (for `asyncio.TaskGroup`, `tomllib`); Linux, macOS and Windows
 - All async tests use `pytest-asyncio` with `asyncio_mode = "auto"`
 - `from mkio._json import dumps, loads` everywhere (never raw json/orjson)
 - Services communicate changes via `ChangeBus` (never direct DB polling)
