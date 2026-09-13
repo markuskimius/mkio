@@ -886,7 +886,11 @@ orders, with the new `customer`. The SQL must return the primary table's key
 columns under their own names (`o.*` does); one that leaves them out is
 served the old way, with a warning at startup. A query that shows several
 rows per primary row (a one-to-many join) is fine — each row is identified by
-every watched table's key, which is what `_mkio_row` carries.
+every watched table's key, which is what `_mkio_row` carries. A one-to-one
+join has nothing to tell apart, and a client tracking records by the primary
+key would lose them behind the composite identity: since 0.9.0 `key` names
+the columns `_mkio_row` is built from, so `key = ["id"]` keeps it the
+primary key however many tables the SQL joins.
 
 ### ReqRep
 
@@ -1634,7 +1638,7 @@ The `[config]` section maps routes to directories, with automatic TOML-to-JSON c
 mkio validates your TOML config at load time and fails fast with clear error messages:
 
 - **Table references** — `primary_table`, `watch_tables`, and op `table` fields must reference tables defined in `[tables]`
-- **Column references** — op `fields`, `key`, `defaults`, `bind` columns, `filterable`, and subpub `topic` are checked against table schemas
+- **Column references** — op `fields`, `key`, `defaults`, `bind` columns, `filterable`, query `key`, and subpub `topic` are checked against table schemas (a custom `sql` exempts `filterable` and `key`, which may name its aliases)
 - **Protocol validation** — service `protocol` must be a known type (`transaction`, `subpub`, `stream`, `query`, `reqrep`)
 - **Required fields** — missing `protocol`, `primary_table`, `topic`, `ops`, or `key` (for update/delete/upsert) are caught immediately
 - **Bind references** — forward references and out-of-bounds op indices in `$N.field` binds are rejected

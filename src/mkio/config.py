@@ -58,7 +58,7 @@ _VALID_SERVICE_KEYS: dict[str, frozenset[str]] = {
         "access",
     }),
     "query": frozenset({
-        "protocol", "primary_table", "watch_tables", "sql",
+        "protocol", "primary_table", "watch_tables", "sql", "key",
         "publish", "filterable", "where", "change_log_size", "description",
         "access",
     }),
@@ -309,6 +309,9 @@ def _normalize_service(
     # Validate filterable fields (query only — subpub uses topic instead)
     if "filterable" in svc and svc_type != "subpub":
         _validate_filterable(name, svc, config)
+
+    if svc_type == "query" and "key" in svc:
+        _validate_query_key(name, svc, config)
 
     # Validate access config
     if "access" in svc:
@@ -645,6 +648,33 @@ def _validate_seed(
         )
 
     table_config["_seed_path"] = str(resolved)
+
+
+def _validate_query_key(
+    name: str, svc: dict[str, Any], config: dict[str, Any]
+) -> None:
+    """``key`` names the columns a query row is identified by (`_mkio_row`).
+    With the default SQL they must be columns of the primary table; a custom
+    ``sql`` may alias, so only the shape is checked there."""
+    key = svc["key"]
+    if not isinstance(key, list) or not key or not all(
+        isinstance(c, str) and c for c in key
+    ):
+        raise ValueError(
+            f"Service '{name}': key must be a non-empty list of column names"
+        )
+    if "sql" in svc:
+        return
+    primary = svc.get("primary_table")
+    columns = _effective_tables(config).get(primary, {}).get("columns", {})
+    for col in key:
+        if col not in columns:
+            close = difflib.get_close_matches(col, columns, n=1, cutoff=0.6)
+            hint = f" Did you mean {close[0]!r}?" if close else ""
+            raise ValueError(
+                f"Service '{name}': key column '{col}' not found in table "
+                f"'{primary}'. Available columns: {', '.join(sorted(columns))}.{hint}"
+            )
 
 
 def _validate_filterable(

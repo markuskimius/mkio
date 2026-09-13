@@ -46,6 +46,7 @@ class QueryService(Service):
         primary_table: str
         watch_tables: list[str]
         sql: str (optional, defaults to SELECT * FROM primary_table)
+        key: list[str] (optional, the columns ``_mkio_row`` is built from)
         filterable: list[str] (optional)
         publish: dict (optional)
         max_buffer: int (optional, default 1000)
@@ -60,6 +61,11 @@ class QueryService(Service):
     one of them, re-runs the SQL and sends only the rows that differ. A
     subscriber therefore sees a joined column change live, as an update to
     the primary row it belongs to.
+
+    ``_mkio_row`` is built from the primary table's key followed by each
+    watched table's, which tells apart the rows of a one-to-many join. A
+    one-to-one join wants ``key`` set to the primary key alone, so the
+    identity a client tracks the record by does not change with the join.
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -99,6 +105,8 @@ class QueryService(Service):
                 if name not in seen:
                     self._pk_cols.append(name)
                     seen.add(name)
+        if self.config.get("key"):
+            self._pk_cols = list(self.config["key"])
 
         if "sql" in self.config:
             await self._setup_requery(secondary=[t for t in ordered if t != self._table])

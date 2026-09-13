@@ -188,6 +188,44 @@ def test_nonexistent_primary_table():
         })
 
 
+def test_query_key_must_name_primary_table_columns():
+    with pytest.raises(ValueError, match="key column 'bogus' not found in table 't'"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY", "name": "TEXT"}}},
+            "services": {
+                "svc": {"protocol": "query", "primary_table": "t", "key": ["bogus"]},
+            },
+        })
+    with pytest.raises(ValueError, match="key must be a non-empty list"):
+        load_config({
+            "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+            "services": {
+                "svc": {"protocol": "query", "primary_table": "t", "key": "id"},
+            },
+        })
+    config = load_config({
+        "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+        "services": {
+            "svc": {"protocol": "query", "primary_table": "t", "key": ["id"]},
+        },
+    })
+    assert config["services"]["svc"]["key"] == ["id"]
+
+
+def test_query_key_may_alias_under_a_custom_sql():
+    """A custom sql may rename columns, so only the shape is checked."""
+    config = load_config({
+        "tables": {"t": {"columns": {"id": "TEXT PRIMARY KEY"}}},
+        "services": {
+            "svc": {
+                "protocol": "query", "primary_table": "t",
+                "sql": "SELECT id AS ident FROM t", "key": ["ident"],
+            },
+        },
+    })
+    assert config["services"]["svc"]["key"] == ["ident"]
+
+
 def test_nonexistent_watch_table():
     with pytest.raises(ValueError, match="watch_tables entry 'bogus'.*not found"):
         load_config({

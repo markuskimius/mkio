@@ -1749,6 +1749,65 @@ async def test_query_joined_rows_dropped_by_an_inner_join(db, bus, writer):
     await svc.stop()
 
 
+async def test_query_key_pins_row_identity_on_a_one_to_one_join(db, bus, writer):
+    """A join adds the joined table's key to `_mkio_row`, which tells apart
+    the rows of a one-to-many. A one-to-one join has nothing to tell apart,
+    and a client tracking the record by its primary key would lose it; `key`
+    names the identity columns, and every path — snapshot, primary re-read,
+    joined-table diff, delete — stamps the same value."""
+    await db.write_conn.execute(
+        "CREATE TABLE IF NOT EXISTS symbols ("
+        "symbol TEXT PRIMARY KEY, name TEXT, _mkio_ref TEXT DEFAULT '')"
+    )
+    await db.write_conn.execute("INSERT INTO symbols (symbol, name) VALUES ('AAPL', 'Apple')")
+    await db.write_conn.execute(
+        "INSERT INTO orders (id, symbol, qty, status) VALUES ('1', 'AAPL', 100, 'new')"
+    )
+    await db.write_conn.commit()
+    sql = ("SELECT o.*, s.name AS issuer FROM orders o "
+           "LEFT JOIN symbols s ON s.symbol = o.symbol")
+    plain = await _query(db, bus, writer, primary_table="orders",
+                         watch_tables=["orders", "symbols"], sql=sql)
+    ws = MockWebSocket()
+    await plain.on_subscribe(ws, {"type": "subscribe"})
+    assert ws.get_messages()[0]["rows"][0]["_mkio_row"] == '["1","AAPL"]'
+    await plain.stop()
+
+    svc = await _query(db, bus, writer, primary_table="orders",
+                       watch_tables=["orders", "symbols"], sql=sql, key=["id"])
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe"})
+    [row] = ws.get_messages()[0]["rows"]
+    assert (row["_mkio_row"], row["issuer"]) == ("1", "Apple")
+    ws.clear()
+
+    await db.write_conn.execute("UPDATE orders SET qty = 5, _mkio_ref = ? WHERE id = '1'", (REF,))
+    await db.write_conn.commit()
+    bus.publish([ChangeBus.make_event(
+        "orders", "update", {"id": "1", "symbol": "AAPL", "qty": 5, "status": "new"}, REF,
+    )])
+    await asyncio.sleep(0.1)
+    [msg] = ws.get_messages()
+    assert (msg["op"], msg["row"]["_mkio_row"], msg["row"]["qty"]) == ("update", "1", 5)
+    ws.clear()
+
+    await db.write_conn.execute("UPDATE symbols SET name = 'Apple Inc' WHERE symbol = 'AAPL'")
+    await db.write_conn.commit()
+    bus.publish([ChangeBus.make_event("symbols", "update", {"symbol": "AAPL", "name": "Apple Inc"}, REF)])
+    await asyncio.sleep(0.1)
+    [msg] = ws.get_messages()
+    assert (msg["op"], msg["row"]["_mkio_row"], msg["row"]["issuer"]) == ("update", "1", "Apple Inc")
+    ws.clear()
+
+    await db.write_conn.execute("DELETE FROM orders WHERE id = '1'")
+    await db.write_conn.commit()
+    bus.publish([ChangeBus.make_event("orders", "delete", {"id": "1"}, REF)])
+    await asyncio.sleep(0.1)
+    [msg] = ws.get_messages()
+    assert (msg["op"], msg["row"]["_mkio_row"]) == ("delete", "1")
+    await svc.stop()
+
+
 async def test_query_sql_without_the_key_is_served_bare(db, bus, writer, caplog):
     """A sql that leaves the primary key out cannot be re-read by row: it
     keeps the old behaviour (the event's row as it came) and says so."""
