@@ -22,8 +22,11 @@ A single TCP port serves HTTP and WebSocket, backed by an embedded SQLite databa
 - [Expression Language](#expression-language)
 - [Performance](#performance)
 - [CLI Tools](#cli-tools)
-- [Using mkio from a Claude-Based Project](#using-mkio-from-a-claude-based-project)
+- [Config Endpoint](#config-endpoint)
+- [Config Validation](#config-validation)
+- [Table Seeding](#table-seeding)
 - [Schema Migration](#schema-migration)
+- [Versioning](#versioning)
 - [License](#license)
 
 ## Quick Start
@@ -1000,11 +1003,11 @@ From the CLI: `mkio reqrep 8080 _mkio`. From the browser console: `mkio.reqrep("
 
 #### Version Compatibility
 
-Clients can check whether they're compatible with the server by sending expected version(s) in the request `data`. The server replies with a `compatible` boolean (AND of all checks) and a `compatibility` dict with per-version results. `version`, `protocol`, and `mkio` use semantic versioning (caret `^` convention); `expr` must match exactly.
+Clients can check whether they're compatible with the server by sending expected version(s) in the request `data`. The server replies with a `compatible` boolean (AND of all checks) and a `compatibility` dict with per-version results. `version`, `protocol`, and `mkio` use semantic versioning (caret `^` convention: same major, and at least the requested minor and patch; for a `0.x` expectation, same minor); `expr` must match exactly.
 
 ```json
 {"type": "request", "service": "_mkio", "reqid": "v1",
- "data": {"version": "2.0.0", "protocol": "1.0", "mkio": "0.5.0", "expr": "1"}}
+ "data": {"version": "2.0.0", "protocol": "1.0", "mkio": "1.0.0", "expr": "1"}}
 ```
 
 Reply:
@@ -1013,7 +1016,7 @@ Reply:
 {
   "type": "reply", "service": "_mkio", "reqid": "v1",
   "row": {
-    "name": "order-book-dev", "version": "2.3.0", "mkio": "0.5.0", "protocol": "1.2", "expr": "1",
+    "name": "order-book-dev", "version": "2.3.0", "mkio": "1.0.0", "protocol": "1.2", "expr": "1",
     "compatible": true,
     "compatibility": {"version": true, "protocol": true, "mkio": true, "expr": true},
     ...
@@ -1721,6 +1724,25 @@ auto_migrate = "safe"          # Apply safe changes on startup (same as true)
 auto_migrate = "risky"         # Also apply potentially destructive
 auto_migrate = "destructive"   # Apply all changes on startup
 ```
+
+## Versioning
+
+mkio follows [Semantic Versioning](https://semver.org) from 1.0.0 on. The version reported by `pip` and by the `_mkio` service's `mkio` field is the release's semver string, and it promises:
+
+- **Major** releases may remove or change the meaning of anything below. Nothing else does.
+- **Minor** releases add features backward-compatibly: new config keys, new message fields, new CLI commands and flags, new exports, new keyword arguments, new expression functions.
+- **Patch** releases fix bugs without changing documented behavior.
+
+The compatibility promise covers the public surface a deployment or an embedding application depends on:
+
+- The `[project]` config format (TOML keys, service and op shapes, expression strings) and the meaning of existing keys.
+- The WebSocket protocol (message types, envelope fields, nack and error shapes) and the HTTP endpoints (`/api/services`, `/mkio.js`, `/mkio-expr.js`, static and config routes). The protocol carries its own `protocol` version, which moves with the same rules.
+- The `mkio` CLI: command names, arguments, flags, exit codes.
+- The Python exports of `mkio` and `mkio.client`, and the JS clients served at `/mkio.js` and `/mkio-expr.js`.
+- The expression language: syntax, semantics, and the standard libraries, pinned by `tests/expr_cases.json`. `expr` has its own exact-match version because a change there alters what stored expressions mean.
+- The on-disk layout: `_mkio_ref`, `_mkio_version`, the `__history` suffix, and archive CSV and manifest formats, so a database written by one 1.x release opens under any later 1.x.
+
+Not covered: anything marked **Unstable** (`MkioApp.db`, `.writer`, `.change_bus`, `.services`), `_`-prefixed modules and functions, exact log and error message text, and the output of `mkio` commands meant for a human rather than a pipe.
 
 ## License
 

@@ -124,9 +124,9 @@ The `mkio` package exports a stable programmatic API for embedding mkio in other
 - **`Service`** — Base class for custom service protocols. Constructor receives `(config, db, change_bus, writer)`. Override `start()`, `stop()`, `on_subscribe()`, `on_unsubscribe()`, `on_message()`.
 - **`register_function(name, fn, ...)`**, **`register_library`**, **`register_type`**, **`expr`** — Expression language extension points and the `mkio.expr` module (see Key Patterns).
 
-**Stability**: From mkio 1.0, exports follow semver — no removal or signature-breaking changes within a major version. New keyword arguments and new exports are allowed in minor versions. Properties marked **Unstable API** (`.db`, `.writer`, `.change_bus`, `.services`) are not covered by semver guarantees — their internal types may change. The data facade (`execute`, `query`, `subscribe`) is the stable interface for the same operations.
+**Stability**: mkio is 1.x and follows Semantic Versioning strictly (README "Versioning" lists the covered surface: config format, wire protocol, CLI, Python and JS clients, expression language, on-disk layout). Removing or changing the meaning of anything covered is a MAJOR bump; additions are MINOR; fixes are PATCH. Properties marked **Unstable API** (`.db`, `.writer`, `.change_bus`, `.services`) are exempt; the data facade (`execute`, `query`, `subscribe`) is the stable interface for the same operations.
 
-**Implementation**: `app.py` contains `MkioApp` and `create_app()`. `scaffold.py` contains `init()`, `get_default_config()`, and the template strings. `server.py` retains the internal aiohttp handlers (`_on_startup`, `_on_shutdown`, `_ws_handler`, etc.) imported by `app.py`. Pending services and lifecycle hooks are stored on `MkioApp` and consumed by `server.py` via `app["mkio_app"]`.
+**Implementation**: `app.py` holds `MkioApp` and `create_app()`; `scaffold.py` holds `init()`, `get_default_config()` and the templates; `server.py` keeps the aiohttp handlers `app.py` imports, reading pending services and hooks via `app["mkio_app"]`.
 
 ## Conventions
 

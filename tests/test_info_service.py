@@ -283,6 +283,14 @@ def test_parse_semver(input_val, expected):
     ("0.0.1", "0.0.1", True),
     ("0.0.2", "0.0.1", False),
     ("0.0.0", "0.0.1", False),
+    # 1.0.0 onward: the major line is the contract, minor and patch only move forward
+    ("1.0.0", "1.0.0", True),
+    ("1.9.9", "1.0.0", True),
+    ("1.0.0", "1.0.1", False),
+    ("1.0.0", "1.1.0", False),
+    ("2.0.0", "1.9.9", False),
+    ("1.0.0", "0.10.0", False),
+    ("0.10.0", "1.0.0", False),
     ("", "1.0.0", False),
     ("dev", "1.0.0", False),
     ("1.0.0", "bogus", False),
@@ -935,3 +943,56 @@ async def test_schema_and_info_same_ws(client):
     assert "services" in reply2["row"]
 
     await ws.close()
+
+
+# --- Release version -------------------------------------------------------
+
+
+def _pyproject_version() -> str:
+    import tomllib
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    with open(root / "pyproject.toml", "rb") as f:
+        return tomllib.load(f)["project"]["version"]
+
+
+def test_release_version_is_semver():
+    """From 1.0.0 on the package version is a plain MAJOR.MINOR.PATCH string."""
+    version = _pyproject_version()
+    parsed = _parse_semver(version)
+    assert parsed is not None, version
+    assert len(version.split(".")) == 3
+    assert parsed >= (1, 0, 0)
+
+
+def test_release_version_satisfies_its_own_major_line():
+    """A client expecting the current major.0.0 is compatible; the next major is not."""
+    version = _pyproject_version()
+    major = _parse_semver(version)[0]
+    assert _semver_compatible(version, f"{major}.0.0") is True
+    assert _semver_compatible(version, f"{major + 1}.0.0") is False
+    assert _semver_compatible(version, f"{major - 1}.0.0") is False
+
+
+async def test_reported_mkio_version_is_compatible_with_itself(db, bus, writer):
+    """Whatever version the server reports, a client expecting exactly that passes."""
+    svc = _make_info_svc(db, bus, writer)
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r1"})
+    reported = ws.get_messages()[0]["row"]["mkio"]
+    if _parse_semver(reported) is None:
+        pytest.skip(f"mkio metadata reports {reported!r}, not a semver string")
+
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r2", "data": {"mkio": reported}})
+    row = ws.get_messages()[0]["row"]
+    assert row["compatible"] is True
+    assert row["compatibility"] == {"mkio": True}
+
+    major = _parse_semver(reported)[0]
+    ws = MockWebSocket()
+    await svc.on_message(ws, {"type": "request", "reqid": "r3", "data": {"mkio": f"{major + 1}.0.0"}})
+    row = ws.get_messages()[0]["row"]
+    assert row["compatible"] is False
+    assert row["compatibility"] == {"mkio": False}
