@@ -95,7 +95,7 @@ For programmatic control (custom routes, non-blocking lifecycle), see [Programma
 - **Reconnection recovery** — stream services use ref-based cursor reconnection persisted across server restarts via `_mkio_ref` column; subpub and query always replay a full snapshot
 - **Field projection** — subscribers can request specific fields per subscription, reducing payload size. Framework fields (`_mkio_ref`, `_mkio_row`, `_mkio_topic`, `_mkio_exists`) are always preserved through projection
 - **Client libraries** — Python and JavaScript clients with auto-reconnect and ref tracking
-- **Graceful shutdown** — drains pending writes, checkpoints WAL, clean close
+- **Graceful shutdown** — drains pending writes, closes the reader, checkpoints WAL, clean close
 - **Service monitoring** — tap into any service's inbound/outbound message flow via CLI or WebSocket
 - **Service discovery** — `GET /api/services` list and `GET /api/services/<name>` detail endpoints, `mkio services` CLI
 - **Connection identity** — built-in `_mkio` reqrep service reports server name, version, framework version, protocol version, services, tables, config hash, and uptime — lets clients verify they're connected to the correct session. Also supports table schema introspection (columns, types, primary keys, defaults)
@@ -1486,7 +1486,7 @@ The JavaScript module exposes the same API with camelCase names — `compile`, `
 ## Performance
 
 - **Write batching** — collects writes over a 2ms window, commits as single SQLite transaction with per-request SAVEPOINTs
-- **WAL mode** — dual connections (write + read) for concurrent reads during writes. An in-memory database cannot use WAL: its two connections share a cache, which locks per table, so its read connection sets `read_uncommitted` — without it a read of a table the writer holds open fails with `SQLITE_LOCKED` rather than waiting
+- **WAL mode** — dual connections (write + read) for concurrent reads during writes. An in-memory database cannot use WAL: its two connections share a cache, which locks per table, so its read connection sets `read_uncommitted` — without it a read of a table the writer holds open fails with `SQLITE_LOCKED` rather than waiting. On shutdown the read connection closes before the final `wal_checkpoint(TRUNCATE)`: the checkpoint waits, up to SQLite's 5 s busy timeout, for any reader still holding a snapshot, and a query cancelled while its `execute()` was queued to the reader's thread leaves exactly such a cursor behind until that connection closes
 - **Zero-copy fan-out** — change events serialized once, same bytes sent to all subscribers
 - **Optional acceleration** — `pip install mkio[fast]` for orjson (5-10x JSON) and uvloop (2-4x I/O; Linux and macOS only, the extra skips it on Windows)
 

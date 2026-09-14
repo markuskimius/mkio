@@ -232,6 +232,16 @@ class Database:
             except asyncio.CancelledError:
                 pass
 
+        # The reader closes before the final checkpoint. A TRUNCATE
+        # checkpoint waits for every reader to leave its snapshot, up to the
+        # 5 s busy timeout, and a statement can outlive its cursor here: a
+        # task cancelled while its execute() was queued leaves the cursor
+        # alive in the aiosqlite thread's locals (the last function and its
+        # result stay referenced until the next request), its snapshot held
+        # until the connection closes. Closing the reader first finalizes it.
+        if self._read_conn:
+            await self._read_conn.close()
+
         # Final checkpoint to merge WAL
         if self._write_conn and self._path != ":memory:":
             try:
@@ -239,7 +249,5 @@ class Database:
             except Exception:
                 pass
 
-        if self._read_conn:
-            await self._read_conn.close()
         if self._write_conn:
             await self._write_conn.close()
