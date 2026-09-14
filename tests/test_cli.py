@@ -534,6 +534,69 @@ def test_unknown_command(capsys):
     assert "send" in result.stdout  # did-you-mean suggestion
 
 
+def test_version_flag():
+    import subprocess, sys
+    from mkio.__main__ import _mkio_version
+    for flag in ("--version", "-V"):
+        result = subprocess.run(
+            [sys.executable, "-m", "mkio", flag],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip() == f"mkio {_mkio_version()}"
+        assert result.stderr == ""
+
+
+def test_version_reports_installed_package():
+    import importlib.metadata
+    from mkio.__main__ import _mkio_version
+    assert _mkio_version() == importlib.metadata.version("mkio")
+
+
+def test_version_flag_with_traceback_flag():
+    # --traceback is stripped before dispatch, so it may sit on either side.
+    import subprocess, sys
+    from mkio.__main__ import _mkio_version
+    for argv in (["--traceback", "--version"], ["--version", "--traceback"]):
+        result = subprocess.run(
+            [sys.executable, "-m", "mkio", *argv],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert result.stdout.strip() == f"mkio {_mkio_version()}"
+
+
+def test_version_falls_back_to_dev_when_not_installed(monkeypatch):
+    import importlib.metadata
+    from mkio import __main__ as cli
+
+    def missing(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", missing)
+    assert cli._mkio_version() == "dev"
+
+
+def test_version_in_usage(capsys):
+    import pytest
+    from mkio.__main__ import _usage
+    with pytest.raises(SystemExit) as exc:
+        _usage()
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "--version, -V" in out
+
+
+def test_other_leading_flag_still_rejected():
+    import subprocess, sys
+    result = subprocess.run(
+        [sys.executable, "-m", "mkio", "--verbose"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "expected a command, got '--verbose'" in result.stdout
+
+
 def test_serve_extra_args(capsys):
     import subprocess, sys
     result = subprocess.run(

@@ -63,6 +63,9 @@ def main() -> None:
         _usage()
 
     cmd = sys.argv[1]
+    if cmd in ("--version", "-V"):
+        print(f"mkio {_mkio_version()}")
+        sys.exit(0)
     if cmd.startswith("-"):
         print(f"Error: expected a command, got {cmd!r}")
         _usage()
@@ -144,6 +147,7 @@ def _usage() -> None:
     print("  All WS commands accept --username <user> (password via MKIO_PASSWORD or prompt)")
     print()
     print("  --traceback            Show full Python traceback on errors")
+    print("  --version, -V          Print the mkio version and exit")
     sys.exit(1)
 
 

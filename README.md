@@ -1637,6 +1637,12 @@ All CLI commands show clean error messages instead of Python tracebacks. Common 
 
 Use `--traceback` (or `MKIO_TRACEBACK=1`) to show the full Python traceback for debugging.
 
+### Version
+
+```bash
+mkio --version                      # Print the installed mkio version (also -V)
+```
+
 ## Config Endpoint
 
 The `[config]` section maps routes to directories, with automatic TOML-to-JSON conversion. This keeps `[static]` strictly for static assets.
