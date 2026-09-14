@@ -37,7 +37,7 @@ pip install mkio
 
 Runs on Linux, macOS and Windows with the standard CPython 3.11+ interpreter. It has no compiled dependencies of its own; the optional `fast` and `auth` extras ship wheels for all three (uvloop is Unix-only and skipped on Windows).
 
-On Windows the server runs on asyncio's selector event loop rather than the default Proactor loop, whose transport teardown logs a `ConnectionResetError` traceback for every connection a browser opens ahead of a page load and drops. The selector loop handles at most 512 sockets at once there; a server that needs more can set `event_loop = "proactor"` in its config. The key also takes `"selector"` and `"uvloop"` to name a loop outright, and defaults to `"auto"`: uvloop where it is installed, the selector loop on Windows, asyncio's default elsewhere.
+On Windows the server runs on asyncio's selector event loop rather than the default Proactor loop, whose transport teardown logs a `ConnectionResetError` traceback for every connection a browser opens ahead of a page load and drops. That loop is mkio's `WindowsSelectorEventLoop`, the stock one plus the Proactor loop's Ctrl+C wiring: Windows does not interrupt a `select()` for a signal, so without it a Ctrl+C would wait for the next timer or packet. The selector loop handles at most 512 sockets at once there; a server that needs more can set `event_loop = "proactor"` in its config. The key also takes `"selector"` and `"uvloop"` to name a loop outright, and defaults to `"auto"`: uvloop where it is installed, the selector loop on Windows, asyncio's default elsewhere.
 
 Create `server.toml`:
 

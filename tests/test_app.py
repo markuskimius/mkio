@@ -10,7 +10,7 @@ from aiohttp import ClientSession
 
 from mkio import ChangeEvent, MkioApp, Service, create_app
 from mkio._json import dumps, loads
-from mkio.app import loop_factory
+from mkio.app import WindowsSelectorEventLoop, loop_factory
 
 
 MINIMAL_CONFIG = {
@@ -1902,13 +1902,22 @@ class TestLoopFactory:
         assert loop_factory("auto", sys.platform) is uvloop.new_event_loop
 
     def test_auto_without_uvloop_is_the_selector_loop_on_windows_only(self, plain_asyncio):
-        assert loop_factory("auto", "win32") is asyncio.SelectorEventLoop
+        assert loop_factory("auto", "win32") is WindowsSelectorEventLoop
         assert loop_factory("auto", "linux") is None
         assert loop_factory("auto", "darwin") is None
 
-    def test_selector_everywhere(self):
-        for platform in ("win32", "linux", "darwin"):
+    def test_selector_everywhere_the_wakeable_one_on_windows(self):
+        assert loop_factory("selector", "win32") is WindowsSelectorEventLoop
+        for platform in ("linux", "darwin"):
             assert loop_factory("selector", platform) is asyncio.SelectorEventLoop
+
+    def test_platform_is_read_when_called(self, plain_asyncio, monkeypatch):
+        """run() passes no platform, so a test can fake Windows for it."""
+        import sys
+        monkeypatch.setattr(sys, "platform", "win32")
+        assert loop_factory("auto") is WindowsSelectorEventLoop
+        monkeypatch.setattr(sys, "platform", "linux")
+        assert loop_factory("auto") is None
 
     def test_proactor_is_windows_only(self, monkeypatch):
         with pytest.raises(ValueError, match="Windows only"):
@@ -1962,3 +1971,97 @@ def test_run_on_uvloop_leaves_the_policy_alone():
         assert not isinstance(loop, uvloop.Loop)
     finally:
         loop.close()
+
+
+# ---------------------------------------------------------------------------
+# WindowsSelectorEventLoop: Ctrl+C reaches a select() on Windows
+# ---------------------------------------------------------------------------
+
+class TestWindowsSelectorEventLoop:
+    def test_registers_its_self_pipe_as_the_signal_wakeup_fd(self):
+        """What the Proactor loop does and the stock selector loop on Windows
+        does not: with the loop's own socket as the wakeup fd, the C-level
+        signal handler's byte ends a select() at once. Reset on close."""
+        import signal
+        before = signal.set_wakeup_fd(-1)
+        signal.set_wakeup_fd(before)
+        loop = WindowsSelectorEventLoop()
+        try:
+            registered = signal.set_wakeup_fd(-1)
+            assert registered == loop._csock.fileno()
+            signal.set_wakeup_fd(registered)
+        finally:
+            loop.close()
+        assert signal.set_wakeup_fd(-1) == -1
+        signal.set_wakeup_fd(before)
+
+    def test_a_wakeup_byte_ends_the_wait(self):
+        """The byte the signal handler writes lands in the self-pipe, whose
+        reader the loop already runs: a write from another thread during a
+        long select() returns control at once, and the loop keeps going."""
+        import threading
+        import time
+        loop = WindowsSelectorEventLoop()
+        try:
+            done = []
+
+            def poke():
+                time.sleep(0.05)
+                loop._csock.send(b"\x00")  # what the C-level signal handler writes
+
+            async def wait_then_note():
+                await asyncio.sleep(0.05)  # the first select() has a timeout to end it
+                done.append(time.monotonic())
+
+            threading.Thread(target=poke).start()
+            start = time.monotonic()
+            loop.run_until_complete(wait_then_note())
+            assert done and done[0] - start < 1
+        finally:
+            loop.close()
+
+    def test_off_the_main_thread_it_registers_nothing(self):
+        import signal
+        import threading
+        before = signal.set_wakeup_fd(-1)
+        signal.set_wakeup_fd(before)
+        outcome = {}
+
+        def build_and_close():
+            loop = WindowsSelectorEventLoop()
+            outcome["built"] = True
+            loop.close()
+
+        t = threading.Thread(target=build_and_close)
+        t.start()
+        t.join()
+        assert outcome == {"built": True}
+        assert signal.set_wakeup_fd(-1) == before
+        signal.set_wakeup_fd(before)
+
+
+def test_run_on_windows_returns_on_cancellation(plain_asyncio, monkeypatch):
+    """The whole Windows path at once: a fake win32 picks the wakeable
+    selector loop, whose add_signal_handler raises there, so Ctrl+C arrives
+    as the runner's cancellation of the main task; run() stops the server
+    and returns, on that loop."""
+    import sys
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    def unsupported(self, sig, callback, *args):
+        raise NotImplementedError
+
+    monkeypatch.setattr(WindowsSelectorEventLoop, "add_signal_handler", unsupported)
+
+    app = create_app(MINIMAL_CONFIG)
+    seen = []
+
+    async def note_loop_and_cancel_soon():
+        seen.append(type(asyncio.get_running_loop()))
+        task = asyncio.current_task()
+        asyncio.get_running_loop().call_later(0.05, task.cancel)
+
+    app.on_startup(note_loop_and_cancel_soon)
+    app.run()
+    assert seen == [WindowsSelectorEventLoop]
+    assert app.db is None

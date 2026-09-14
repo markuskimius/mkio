@@ -7,6 +7,7 @@ import importlib.metadata
 import logging
 import signal
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
@@ -31,29 +32,63 @@ if TYPE_CHECKING:
     from mkio.writer import WriteBatcher
 
 
+class WindowsSelectorEventLoop(asyncio.SelectorEventLoop):
+    """asyncio's selector loop with the Proactor loop's Ctrl+C wiring.
+
+    On Windows a signal only sets a flag, acted on when the main thread next
+    runs Python code, and `select()` there is not interrupted by one — so a
+    Ctrl+C would wait for the next timer or packet to end the wait, seconds
+    with a browser connected, minutes without. The Proactor loop registers
+    its self-pipe as the signal wakeup descriptor, so the C-level handler's
+    byte ends the wait at once; the stock selector loop on Windows never
+    does. This one does, the same way, and unregisters it on close.
+    """
+
+    def __init__(self, selector=None):
+        super().__init__(selector)
+        if threading.current_thread() is threading.main_thread():
+            # A wakeup fd can only be installed from the main thread.
+            signal.set_wakeup_fd(self._csock.fileno())
+
+    def close(self):
+        if self.is_running():
+            raise RuntimeError("Cannot close a running event loop")
+        if self.is_closed():
+            return
+        if threading.current_thread() is threading.main_thread():
+            signal.set_wakeup_fd(-1)
+        super().close()
+
+
 def loop_factory(
-    event_loop: str = "auto", platform: str = sys.platform,
+    event_loop: str = "auto", platform: str | None = None,
 ) -> Callable[[], asyncio.AbstractEventLoop] | None:
     """The event loop `run()` builds, as a factory for `asyncio.Runner`
-    (`None` is asyncio's default for the platform).
+    (`None` is asyncio's default for the platform; `platform` defaults to
+    `sys.platform`, read when called).
 
-    "auto" is uvloop where it is installed, else asyncio's selector loop on
+    "auto" is uvloop where it is installed, else the selector loop on
     Windows, else asyncio's default. Windows' default, the Proactor loop,
     tears a transport down with a `shutdown()` that fails once the peer has
     reset the socket, and asyncio logs the failure as a traceback — once per
     connection a browser opens ahead of a page load and drops; the selector
-    loop closes the socket and says nothing. "proactor" keeps Windows' default
-    for a server that needs more than the 512 sockets `select()` handles
-    there. "selector" and "uvloop" name their loop outright.
+    loop closes the socket and says nothing. On Windows the selector loop is
+    `WindowsSelectorEventLoop`, so Ctrl+C reaches it at once. "proactor"
+    keeps Windows' default for a server that needs more than the 512
+    sockets `select()` handles there. "selector" and "uvloop" name their
+    loop outright.
     """
+    if platform is None:
+        platform = sys.platform
+    selector = WindowsSelectorEventLoop if platform == "win32" else asyncio.SelectorEventLoop
     if event_loop == "auto":
         try:
             import uvloop
         except ImportError:
-            return asyncio.SelectorEventLoop if platform == "win32" else None
+            return selector if platform == "win32" else None
         return uvloop.new_event_loop
     if event_loop == "selector":
-        return asyncio.SelectorEventLoop
+        return selector
     if event_loop == "proactor":
         if platform != "win32":
             raise ValueError("event_loop = 'proactor' is Windows only")
