@@ -10,6 +10,7 @@ from aiohttp import ClientSession
 
 from mkio import ChangeEvent, MkioApp, Service, create_app
 from mkio._json import dumps, loads
+from mkio.app import loop_factory
 
 
 MINIMAL_CONFIG = {
@@ -1828,12 +1829,10 @@ async def test_execute_from_startup_hook():
 # ---------------------------------------------------------------------------
 
 def _no_uvloop(monkeypatch):
-    """Keep run() from installing the uvloop policy for the rest of the session."""
+    """Keep run() off uvloop, so the loop under test is asyncio's own."""
     import sys
     monkeypatch.setitem(sys.modules, "uvloop", None)
-    policy = asyncio.get_event_loop_policy()
     yield
-    asyncio.set_event_loop_policy(policy)
 
 
 @pytest.fixture
@@ -1883,3 +1882,83 @@ def test_run_without_loop_signal_handlers(plain_asyncio, monkeypatch):
     app.run()
     assert seen == ["shutdown"]
     assert app.db is None
+
+
+# ---------------------------------------------------------------------------
+# loop_factory(): which event loop run() builds
+# ---------------------------------------------------------------------------
+
+class TestLoopFactory:
+    """Windows' default Proactor loop logs a traceback for every connection a
+    browser opens ahead of a page load and resets, from the `shutdown()` its
+    transport teardown makes on the dead socket; asyncio's selector loop has
+    no such call. So "auto" is the selector loop there, uvloop where it is
+    installed, and asyncio's default (None to the runner) otherwise."""
+
+    def test_auto_is_uvloop_where_installed(self):
+        import sys
+        uvloop = pytest.importorskip("uvloop")
+        assert loop_factory("auto", "linux") is uvloop.new_event_loop
+        assert loop_factory("auto", sys.platform) is uvloop.new_event_loop
+
+    def test_auto_without_uvloop_is_the_selector_loop_on_windows_only(self, plain_asyncio):
+        assert loop_factory("auto", "win32") is asyncio.SelectorEventLoop
+        assert loop_factory("auto", "linux") is None
+        assert loop_factory("auto", "darwin") is None
+
+    def test_selector_everywhere(self):
+        for platform in ("win32", "linux", "darwin"):
+            assert loop_factory("selector", platform) is asyncio.SelectorEventLoop
+
+    def test_proactor_is_windows_only(self, monkeypatch):
+        with pytest.raises(ValueError, match="Windows only"):
+            loop_factory("proactor", "linux")
+        proactor = object()
+        monkeypatch.setattr(asyncio, "ProactorEventLoop", proactor, raising=False)
+        assert loop_factory("proactor", "win32") is proactor
+
+    def test_uvloop_named_outright(self, plain_asyncio):
+        with pytest.raises(ValueError, match="uvloop is not installed"):
+            loop_factory("uvloop", "linux")
+
+    def test_uvloop_when_installed(self):
+        uvloop = pytest.importorskip("uvloop")
+        assert loop_factory("uvloop", "win32") is uvloop.new_event_loop
+
+    def test_unknown_value_rejected(self):
+        with pytest.raises(ValueError, match="unknown event_loop"):
+            loop_factory("gevent", "linux")
+
+
+def _run_and_note_loop(app):
+    """run() the app, recording the class of the loop it ran on."""
+    seen = []
+
+    async def note_loop_and_stop():
+        seen.append(type(asyncio.get_running_loop()))
+        asyncio.get_running_loop().call_later(0.05, lambda: asyncio.ensure_future(app.stop()))
+
+    app.on_startup(note_loop_and_stop)
+    app.run()
+    assert app.db is None
+    return seen[0]
+
+
+def test_run_builds_the_configured_loop(plain_asyncio):
+    """`event_loop = "selector"` is what Windows gets by default; it runs the
+    server here too, and run() honours it."""
+    app = create_app({**MINIMAL_CONFIG, "event_loop": "selector"})
+    assert issubclass(_run_and_note_loop(app), asyncio.SelectorEventLoop)
+
+
+def test_run_on_uvloop_leaves_the_policy_alone():
+    """uvloop comes in as the runner's loop factory, not as a process-wide
+    policy: after run() a plain new_event_loop() is still asyncio's own."""
+    uvloop = pytest.importorskip("uvloop")
+    app = create_app(MINIMAL_CONFIG)
+    assert issubclass(_run_and_note_loop(app), uvloop.Loop)
+    loop = asyncio.new_event_loop()
+    try:
+        assert not isinstance(loop, uvloop.Loop)
+    finally:
+        loop.close()

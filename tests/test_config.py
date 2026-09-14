@@ -49,6 +49,22 @@ def test_defaults_applied():
     assert config["batch_max_wait_ms"] == 2.0
     assert config["db_path"] == "mkio.db"
     assert config["change_log_size"] == 10000
+    assert config["event_loop"] == "auto"
+
+
+def test_event_loop_validated(monkeypatch):
+    """`event_loop` names how run() builds its loop; a value outside the four,
+    or "proactor" off Windows (the loop exists only there), fails at load."""
+    import sys
+    for value in ("auto", "selector", "uvloop"):
+        assert load_config({"event_loop": value})["event_loop"] == value
+    with pytest.raises(ValueError, match="event_loop must be one of"):
+        load_config({"event_loop": "gevent"})
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(ValueError, match="Windows only"):
+        load_config({"event_loop": "proactor"})
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert load_config({"event_loop": "proactor"})["event_loop"] == "proactor"
 
 
 def test_single_table_transaction_normalization():

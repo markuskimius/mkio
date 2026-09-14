@@ -31,6 +31,42 @@ if TYPE_CHECKING:
     from mkio.writer import WriteBatcher
 
 
+def loop_factory(
+    event_loop: str = "auto", platform: str = sys.platform,
+) -> Callable[[], asyncio.AbstractEventLoop] | None:
+    """The event loop `run()` builds, as a factory for `asyncio.Runner`
+    (`None` is asyncio's default for the platform).
+
+    "auto" is uvloop where it is installed, else asyncio's selector loop on
+    Windows, else asyncio's default. Windows' default, the Proactor loop,
+    tears a transport down with a `shutdown()` that fails once the peer has
+    reset the socket, and asyncio logs the failure as a traceback — once per
+    connection a browser opens ahead of a page load and drops; the selector
+    loop closes the socket and says nothing. "proactor" keeps Windows' default
+    for a server that needs more than the 512 sockets `select()` handles
+    there. "selector" and "uvloop" name their loop outright.
+    """
+    if event_loop == "auto":
+        try:
+            import uvloop
+        except ImportError:
+            return asyncio.SelectorEventLoop if platform == "win32" else None
+        return uvloop.new_event_loop
+    if event_loop == "selector":
+        return asyncio.SelectorEventLoop
+    if event_loop == "proactor":
+        if platform != "win32":
+            raise ValueError("event_loop = 'proactor' is Windows only")
+        return asyncio.ProactorEventLoop
+    if event_loop == "uvloop":
+        try:
+            import uvloop
+        except ImportError:
+            raise ValueError("event_loop = 'uvloop' but uvloop is not installed (pip install 'mkio[fast]')") from None
+        return uvloop.new_event_loop
+    raise ValueError(f"unknown event_loop {event_loop!r}")
+
+
 class MkioApp:
     """Programmatic handle to an mkio server.
 
@@ -699,18 +735,14 @@ class MkioApp:
     def run(self) -> None:
         """Blocking convenience that starts the server and waits for shutdown.
 
-        Handles SIGINT/SIGTERM for graceful shutdown. Tries uvloop if available.
+        Handles SIGINT/SIGTERM for graceful shutdown. The event loop comes
+        from `loop_factory` and the `event_loop` config key: uvloop where it
+        is installed, asyncio's selector loop on Windows.
 
         On Windows the event loop has no signal handlers, so Ctrl+C reaches
         the server as a cancellation of this task instead; both paths stop the
         server and return normally.
         """
-        try:
-            import uvloop
-            asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-        except ImportError:
-            pass
-
         async def _run() -> None:
             loop = asyncio.get_running_loop()
             await self.start()
@@ -718,8 +750,8 @@ class MkioApp:
                 for sig in (signal.SIGINT, signal.SIGTERM):
                     loop.add_signal_handler(sig, lambda: asyncio.ensure_future(self.stop()))
             except NotImplementedError:
-                # ProactorEventLoop (Windows): asyncio.run() turns Ctrl+C into
-                # a cancellation of this task, handled below.
+                # Windows: asyncio's runner turns Ctrl+C into a cancellation
+                # of this task, handled below.
                 pass
             try:
                 await self.wait()
@@ -731,7 +763,9 @@ class MkioApp:
                     task.uncancel()
                 await self.stop()
 
-        asyncio.run(_run())
+        factory = loop_factory(self._config.get("event_loop", "auto"))
+        with asyncio.Runner(loop_factory=factory) as runner:
+            runner.run(_run())
 
 
 def create_app(

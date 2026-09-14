@@ -37,6 +37,8 @@ pip install mkio
 
 Runs on Linux, macOS and Windows with the standard CPython 3.11+ interpreter. It has no compiled dependencies of its own; the optional `fast` and `auth` extras ship wheels for all three (uvloop is Unix-only and skipped on Windows).
 
+On Windows the server runs on asyncio's selector event loop rather than the default Proactor loop, whose transport teardown logs a `ConnectionResetError` traceback for every connection a browser opens ahead of a page load and drops. The selector loop handles at most 512 sockets at once there; a server that needs more can set `event_loop = "proactor"` in its config. The key also takes `"selector"` and `"uvloop"` to name a loop outright, and defaults to `"auto"`: uvloop where it is installed, the selector loop on Windows, asyncio's default elsewhere.
+
 Create `server.toml`:
 
 ```toml
@@ -284,7 +286,7 @@ asyncio.run(main())
 | `async start()` | Non-blocking start — runs migration, preflight, binds the port. |
 | `async stop()` | Graceful shutdown — drains writes, closes WebSockets, checkpoints DB. Idempotent. |
 | `async wait()` | Blocks until `stop()` is called or a signal fires. |
-| `run()` | Blocking convenience: starts, waits, stops on SIGINT/SIGTERM (Ctrl+C on Windows, whose event loop has no signal handlers). Tries uvloop if available. |
+| `run()` | Blocking convenience: starts, waits, stops on SIGINT/SIGTERM (Ctrl+C on Windows, whose event loop has no signal handlers). The loop comes from the `event_loop` config key: uvloop where installed, asyncio's selector loop on Windows. |
 | `.config` | The resolved config dict (read-only property). |
 | `.db` | `Database` instance (after start, `None` otherwise). **Unstable.** |
 | `.writer` | `WriteBatcher` instance (after start, `None` otherwise). **Unstable.** |

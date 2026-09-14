@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import sys
 import logging
 import tomllib
 from pathlib import Path
@@ -33,7 +34,11 @@ _DEFAULTS = {
     "auto_migrate": False,
     "backup_on_startup": False,
     "backup_dir": "./backups",
+    "event_loop": "auto",
 }
+
+# What run() builds its event loop from; resolved by mkio.app.loop_factory.
+EVENT_LOOPS = ("auto", "selector", "proactor", "uvloop")
 
 _VALID_TOP_LEVEL_KEYS = frozenset(
     set(_DEFAULTS.keys())
@@ -98,6 +103,15 @@ def load_config(source: str | Path | dict[str, Any]) -> dict[str, Any]:
             )
     if am is True:
         config["auto_migrate"] = "safe"
+
+    # Validate event_loop
+    el = config.get("event_loop", "auto")
+    if el not in EVENT_LOOPS:
+        raise ValueError(
+            f"event_loop must be one of {', '.join(repr(e) for e in EVENT_LOOPS)}, got {el!r}"
+        )
+    if el == "proactor" and sys.platform != "win32":
+        raise ValueError("event_loop = 'proactor' is Windows only")
 
     config.setdefault("tables", {})
     config.setdefault("services", {})
