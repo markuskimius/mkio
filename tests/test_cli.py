@@ -597,6 +597,184 @@ def test_other_leading_flag_still_rejected():
     assert "expected a command, got '--verbose'" in result.stdout
 
 
+# ---- help ---------------------------------------------------------------------
+
+
+def _mkio(*argv):
+    import subprocess, sys
+    return subprocess.run(
+        [sys.executable, "-m", "mkio", *argv],
+        capture_output=True, text=True, timeout=30,
+    )
+
+
+def _help_text(capsys, cmd=None) -> str:
+    from mkio import __main__ as cli
+    cli._print_help() if cmd is None else cli._print_command_help(cmd)
+    return capsys.readouterr().out
+
+
+def _command_names():
+    from mkio.__main__ import _COMMANDS
+    return list(_COMMANDS)
+
+
+def test_help_is_not_an_error():
+    for argv in (["--help"], ["-h"], ["help"]):
+        result = _mkio(*argv)
+        assert result.returncode == 0, argv
+        assert result.stdout.startswith("Usage: mkio <command>")
+        assert "Error" not in result.stdout
+        assert result.stderr == ""
+
+
+def test_no_arguments_prints_help_and_fails():
+    result = _mkio()
+    assert result.returncode == 1
+    assert result.stdout.startswith("Usage: mkio <command>")
+
+
+def test_help_lists_every_command_in_its_group(capsys):
+    out = _help_text(capsys)
+    assert out.index("Server commands:") < out.index("mkio serve") < out.index("Client commands:")
+    assert out.index("Client commands:") < out.index("mkio services")
+    for cmd in _command_names():
+        assert f"  mkio {cmd}" in out
+    assert "--keep-redo" in out
+    assert "-h, --help" in out
+
+
+def test_command_help_flag_is_not_an_error():
+    for argv in (["stream", "--help"], ["stream", "-h"], ["help", "stream"],
+                 ["stream", "8080", "trades", "--help"]):
+        result = _mkio(*argv)
+        assert result.returncode == 0, argv
+        assert result.stdout.startswith("Usage: mkio stream <url> <service>")
+        assert "--maxcount <n>" in result.stdout
+        assert "Unknown option" not in result.stdout
+
+
+def test_check_help_does_not_connect():
+    # `check` takes no --flags of its own, so --help used to become the url.
+    result = _mkio("check", "--help")
+    assert result.returncode == 0
+    assert result.stdout.startswith("Usage: mkio check <url>")
+    assert "could not connect" not in result.stdout
+    assert result.stderr == ""
+
+
+def test_help_for_unknown_command():
+    result = _mkio("help", "sned")
+    assert result.returncode == 1
+    assert "Unknown command: 'sned'. Did you mean 'send'?" in result.stdout
+
+
+def test_every_command_has_help_and_a_handler(capsys):
+    from mkio import __main__ as cli
+    for cmd in _command_names():
+        assert callable(getattr(cli, f"_cmd_{cmd}")), cmd
+        out = _help_text(capsys, cmd)
+        assert out.startswith(f"Usage: mkio {cmd}")
+        for mode in cli._COMMANDS[cmd].modes:
+            assert mode.summary in out
+            for opt, text in mode.options:
+                assert opt in out and text in out
+
+
+def test_help_fits_the_terminal(capsys):
+    for cmd in (None, *_command_names()):
+        for line in _help_text(capsys, cmd).splitlines():
+            assert len(line) <= 80, (cmd, line)
+
+
+def test_synopsis_and_options_agree():
+    # A hand-written synopsis must name exactly the flags the mode accepts.
+    import re
+    from mkio import __main__ as cli
+    for cmd, spec in cli._COMMANDS.items():
+        for i in range(len(spec.modes)):
+            in_synopsis = set(re.findall(r"--[A-Za-z][\w-]*", cli._synopsis(cmd, i)))
+            assert in_synopsis == cli._flags(cmd, i), (cmd, i)
+
+
+def test_unknown_command_does_not_dump_the_usage():
+    result = _mkio("sned")
+    assert result.returncode == 1
+    assert "mkio --help" in result.stdout
+    assert "mkio serve" not in result.stdout
+
+
+def test_unknown_flag_names_the_flags_the_command_takes():
+    # dbupdate and init stripped their own flags before checking, and so
+    # claimed "this command takes no options".
+    for cmd, flag in (("dbupdate", "--keep-redo"), ("init", "--no-static")):
+        result = _mkio(cmd, "--bogus")
+        assert result.returncode == 1
+        assert "takes no options" not in result.stdout
+        assert flag in result.stdout
+        assert f"mkio {cmd} --help" in result.stdout
+
+
+def test_missing_arguments_show_the_command_help():
+    result = _mkio("send")
+    assert result.returncode == 1
+    assert result.stdout.startswith("Usage: mkio send <url> <service> <data>")
+    assert "Examples:" in result.stdout
+
+
+def test_every_command_answers_help_without_side_effects(tmp_path):
+    # Run where a stray server.toml, static/ or archive would show up.
+    import subprocess, sys
+    for cmd in _command_names():
+        result = subprocess.run(
+            [sys.executable, "-m", "mkio", cmd, "--help"],
+            capture_output=True, text=True, timeout=30, cwd=tmp_path, stdin=subprocess.DEVNULL,
+        )
+        assert result.returncode == 0, cmd
+        assert result.stdout.startswith(f"Usage: mkio {cmd}"), cmd
+        assert result.stderr == "", cmd
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_help_with_traceback_flag():
+    for argv in (["--traceback", "--help"], ["--help", "--traceback"], ["--traceback", "send", "-h"]):
+        result = _mkio(*argv)
+        assert result.returncode == 0, argv
+        assert result.stdout.startswith("Usage: mkio")
+
+
+def test_archive_help_describes_both_modes(capsys):
+    out = _help_text(capsys, "archive")
+    assert "[--tables a,b | --group <g> | --all]" in out
+    assert "mkio archive [server.toml] --older-than <N>d|<ref>" in out  # required: no brackets
+    assert "Archive rows to CSV, then delete them:" in out
+    assert "Archive old history versions only:" in out
+
+
+def test_error_usage_line_is_wrapped_and_points_at_help():
+    result = _mkio("stream", "url", "svc", "--bogus")
+    assert result.returncode == 1
+    assert "Did you mean '--before'?" in result.stdout
+    assert "Run 'mkio stream --help' for details." in result.stdout
+    for line in result.stdout.splitlines():
+        assert len(line) <= 80, line
+    # each archive mode reports its own usage
+    rows = _mkio("archive", "a.toml", "b.toml")
+    assert "[--tables a,b | --group <g> | --all]" in rows.stdout
+    history = _mkio("archive", "a.toml", "b.toml", "--older-than", "90d")
+    assert "--older-than <N>d|<ref>" in history.stdout and "--tables" not in history.stdout
+
+
+def test_too_few_arguments_show_help_for_every_client_command():
+    for argv in (["services"], ["monitor"], ["send", "url"], ["subpub", "url", "svc"],
+                 ["stream", "url"], ["query", "url"], ["reqrep", "url"], ["check"],
+                 ["schema", "url"], ["adduser", "alice"]):
+        result = _mkio(*argv)
+        assert result.returncode == 1, argv
+        assert result.stdout.startswith(f"Usage: mkio {argv[0]}"), argv
+        assert "Unknown" not in result.stdout and "Error" not in result.stdout
+
+
 def test_serve_extra_args(capsys):
     import subprocess, sys
     result = subprocess.run(

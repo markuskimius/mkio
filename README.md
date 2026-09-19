@@ -1654,6 +1654,15 @@ All CLI commands show clean error messages instead of Python tracebacks. Common 
 
 Use `--traceback` (or `MKIO_TRACEBACK=1`) to show the full Python traceback for debugging.
 
+### Help
+
+```bash
+mkio --help                         # Every command, grouped server / client (also -h, mkio help)
+mkio stream --help                  # One command: options, notes, examples (also mkio help stream)
+```
+
+An argument error prints the command's usage line and points at its `--help`; a command run with too few arguments prints that help and exits 1.
+
 ### Version
 
 ```bash

@@ -9,8 +9,9 @@ import json
 import os
 import re
 import sys
+import textwrap
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 from mkio._json import loads
 from mkio._ref import local_ts
@@ -26,7 +27,192 @@ _PROTOCOL_CLI_HINT = {
 }
 
 
-_VALID_COMMANDS = ("serve", "services", "monitor", "send", "subpub", "stream", "query", "reqrep", "check", "dbupdate", "archive", "restore", "init", "schema", "adduser", "hashpass")
+_USERNAME = ("--username <user>", "Log in as <user> (password: MKIO_PASSWORD or prompt)")
+_SUBID = ("--subid <id>", "Tag the subscription; echoed on every message for it")
+_FIELDS = ("--fields <f1,f2,...>", "Receive only these columns")
+_FILTER = ("--filter <expr>", "Receive only rows matching the expression")
+_DRY_RUN = ("--dry-run", "Show what would happen and change nothing")
+
+
+class _Mode(NamedTuple):
+    """One invocation form of a command: positionals, then (option, help) pairs."""
+    summary: str
+    args: tuple[str, ...] = ()
+    options: tuple[tuple[str, str], ...] = ()
+    # How the options read in the synopsis, when "[--each] [--on] [--its-own]"
+    # would mislead (alternatives, a required flag).
+    synopsis: tuple[str, ...] = ()
+
+
+class _Command(NamedTuple):
+    group: str
+    modes: tuple[_Mode, ...]
+    notes: tuple[str, ...] = ()
+    examples: tuple[str, ...] = ()
+
+
+# The one description of the command line: the top-level usage, each command's
+# --help, the "Usage:" line under an error and the accepted-flag sets all come
+# from here.
+_COMMANDS: dict[str, _Command] = {
+    "serve": _Command(
+        "Server",
+        (_Mode("Start a server", ("[server.toml]",)),),
+        notes=("The config path defaults to server.toml.",
+               "Refuses to start when the database schema differs from the config, unless",
+               "auto_migrate is set; run 'mkio dbupdate' to apply the changes."),
+        examples=("mkio serve", "mkio serve prod.toml"),
+    ),
+    "init": _Command(
+        "Server",
+        (_Mode("Scaffold a project (server.toml, static/)", ("[directory]",),
+               (("--no-static", "Write the config only, no static/index.html"),)),),
+        notes=("The directory defaults to the current one. An existing server.toml is never",
+               "overwritten."),
+        examples=("mkio init", "mkio init ./my-project --no-static"),
+    ),
+    "dbupdate": _Command(
+        "Server",
+        (_Mode("Apply pending schema migrations", ("[server.toml]",), (
+            ("--allow-risky", "Also apply potentially destructive changes"),
+            ("--allow-destructive", "Apply every change, destructive ones included"),
+            ("--drop-history", "Drop history tables whose base is no longer versioned"),
+            ("--keep-redo", "Keep undone versions (redo state), discarded by default"),
+        )),),
+        notes=("Run with the server stopped. Without flags only safe changes are applied.",),
+        examples=("mkio dbupdate", "mkio dbupdate server.toml --allow-risky"),
+    ),
+    "archive": _Command(
+        "Server",
+        (
+            _Mode("Archive rows to CSV, then delete them",
+                  ("<server.toml|url>",), (
+                ("--tables a,b", "Archive these tables"),
+                ("--group <g>", "Archive one archive group (default group: data)"),
+                ("--all", "Archive every archivable table"),
+                ("--cutoff <when>", "Rows older than Nd/Nh/Nm ago, a date, or a date-time"),
+                ("--cutoff-literal <text>", "Cutoff text compared as given (custom column formats)"),
+                ("--out <dir>", "Directory the archive is written under (default: .)"),
+                _DRY_RUN,
+                ("--yes", "Skip the confirmation (required off a terminal)"),
+                _USERNAME,
+            ), synopsis=("[--tables a,b | --group <g> | --all]", "[--cutoff <when>]",
+                         "[--cutoff-literal <text>]", "[--out <dir>]", "[--dry-run]", "[--yes]",
+                         "[--username <user>]")),
+            _Mode("Archive old history versions only",
+                  ("[server.toml]",), (
+                ("--older-than <N>d|<ref>", "Versions older than N days, or than a ref (required)"),
+                ("--table <name>", "Only this versioned table (default: all of them)"),
+                ("--out <dir>", "Directory the CSV is written to (default: .)"),
+                ("--delete", "Purge the archived versions once the CSV is written"),
+                ("--prune-source", "Also delete live rows archived in full (needs --yes)"),
+                _DRY_RUN,
+                ("--yes", "Confirm --prune-source"),
+            ), synopsis=("--older-than <N>d|<ref>", "[--table <name>]", "[--out <dir>]", "[--delete]",
+                         "[--prune-source]", "[--dry-run]", "[--yes]")),
+        ),
+        notes=("Row mode takes the tables that opt in with archive = {...} in the config.",
+               "A config path archives offline (server stopped); a url archives through the",
+               "running server."),
+        examples=("mkio archive server.toml --cutoff 30d --out ./archive --dry-run",
+                  "mkio archive localhost:8080 --cutoff 1d --out /srv/archive --yes",
+                  "mkio archive server.toml --older-than 90d --out ./archive --delete"),
+    ),
+    "restore": _Command(
+        "Server",
+        (_Mode("Put an archive's rows back (server stopped)", ("<server.toml>", "<archive-dir>"), (
+            ("--tables a,b", "Restore only these tables"),
+            _DRY_RUN,
+        )),),
+        examples=("mkio restore server.toml ./archive/20260911 --dry-run",),
+    ),
+    "adduser": _Command(
+        "Server",
+        (_Mode("Add a user to _mkio_users", ("<username>", "<role>", "[server.toml]")),),
+        notes=("The password comes from MKIO_PASSWORD or a prompt.",),
+        examples=("mkio adduser alice trader",),
+    ),
+    "hashpass": _Command(
+        "Server",
+        (_Mode("Generate a hashed password for seed files"),),
+        notes=("The password comes from MKIO_PASSWORD or a prompt.",),
+    ),
+    "services": _Command(
+        "Client",
+        (_Mode("List services, or show detail for one", ("<url>", "[service]")),),
+        examples=("mkio services 8080", "mkio services 8080 orders"),
+    ),
+    "send": _Command(
+        "Client",
+        (_Mode("Send transaction(s) to a transaction service", ("<url>", "<service>", "<data>"), (
+            ("--op <name>", "The op to run (needed when the service defines several)"),
+            _USERNAME,
+        )),),
+        notes=("<data> can be inline JSON, a .json file, or a .csv file.",),
+        examples=("mkio send 8080 orders '{\"symbol\": \"AAPL\", \"qty\": 10}'",
+                  "mkio send 8080 orders --op cancel orders.csv"),
+    ),
+    "subpub": _Command(
+        "Client",
+        (_Mode("Subscribe to topics of a subpub service", ("<url>", "<service>", "<topic>", "[<topic2> ...]"),
+               (_SUBID, _FIELDS, _USERNAME)),),
+        examples=("mkio subpub 8080 prices AAPL", "mkio subpub 8080 prices AAPL MSFT --fields bid,ask"),
+    ),
+    "stream": _Command(
+        "Client",
+        (_Mode("Subscribe to a stream service", ("<url>", "<service>"), (
+            _SUBID, _FIELDS, _FILTER,
+            ("--ref <ref>", "Start after this ref (default: now, new rows only)"),
+            ("--maxcount <n>", "One page of at most n rows, no live updates"),
+            ("--before", "Page backward: rows before --ref (or the newest rows)"),
+            _USERNAME,
+        )),),
+        examples=("mkio stream 8080 trades", "mkio stream 8080 trades --before --maxcount 20"),
+    ),
+    "query": _Command(
+        "Client",
+        (_Mode("Subscribe to a query service", ("<url>", "<service>"), (
+            _SUBID, _FIELDS, _FILTER,
+            ("--snapshotOnly", "Snapshot only, no live updates"),
+            ("--updateOnly", "Live updates only, no snapshot"),
+            _USERNAME,
+        )),),
+        examples=("mkio query 8080 open_orders --filter \"symbol == 'AAPL'\"",),
+    ),
+    "reqrep": _Command(
+        "Client",
+        (_Mode("Send a request, print the reply", ("<url>", "<service>", "[data]"),
+               (_USERNAME,)),),
+        notes=("<data> can be inline JSON or key=value pairs.",),
+        examples=("mkio reqrep 8080 lookup '{\"symbol\": \"AAPL\"}'",
+                  "mkio reqrep 8080 calculate qty=10 price=99.95"),
+    ),
+    "schema": _Command(
+        "Client",
+        (_Mode("Show a table's schema (columns, types, keys)", ("<url>", "<table>"), (_USERNAME,)),),
+        examples=("mkio schema 8080 orders",),
+    ),
+    "check": _Command(
+        "Client",
+        (_Mode("Check version compatibility with a server",
+               ("<url>", "[version=... protocol=... mkio=... expr=...]"), (_USERNAME,)),),
+        notes=("Exits 0 when compatible, 1 when not.",),
+        examples=("mkio check 8080", "mkio check 8080 version=2.0.0 protocol=1.0"),
+    ),
+    "monitor": _Command(
+        "Client",
+        (_Mode("Monitor messages (all services or one)", ("<url>", "[service]"), (
+            ("--filter <expr>", "Show only messages matching the expression"),
+            _USERNAME,
+        )),),
+        examples=("mkio monitor 8080", "mkio monitor 8080 orders",
+                  "mkio monitor 8080 --filter \"service == 'orders' && direction == 'out'\""),
+    ),
+}
+
+_VALID_COMMANDS = tuple(_COMMANDS)
+_HELP_FLAGS = ("-h", "--help")
+_HELP_WIDTH = 80
 
 
 def _enable_ansi_colors() -> None:
@@ -66,9 +252,22 @@ def main() -> None:
     if cmd in ("--version", "-V"):
         print(f"mkio {_mkio_version()}")
         sys.exit(0)
+    if cmd in _HELP_FLAGS or (cmd == "help" and len(sys.argv) == 2):
+        _print_help()
+        sys.exit(0)
+    if cmd == "help":
+        cmd = sys.argv[2]
+        if cmd in _COMMANDS:
+            _print_command_help(cmd)
+            sys.exit(0)
+        _unknown_command(cmd)
     if cmd.startswith("-"):
         print(f"Error: expected a command, got {cmd!r}")
-        _usage()
+        print("Run 'mkio --help' for the list of commands.")
+        sys.exit(1)
+    if cmd in _COMMANDS and any(a in _HELP_FLAGS for a in sys.argv[2:]):
+        _print_command_help(cmd)
+        sys.exit(0)
     if cmd == "serve":
         _cmd_serve()
     elif cmd == "services":
@@ -102,62 +301,126 @@ def main() -> None:
     elif cmd == "hashpass":
         _cmd_hashpass()
     else:
-        import difflib
-        close = difflib.get_close_matches(cmd, _VALID_COMMANDS, n=1, cutoff=0.5)
-        hint = f" Did you mean {close[0]!r}?" if close else ""
-        print(f"Unknown command: {cmd!r}.{hint}")
-        _usage()
+        _unknown_command(cmd)
+
+
+def _unknown_command(cmd: str) -> None:
+    import difflib
+    close = difflib.get_close_matches(cmd, _VALID_COMMANDS, n=1, cutoff=0.5)
+    hint = f" Did you mean {close[0]!r}?" if close else ""
+    print(f"Unknown command: {cmd!r}.{hint}")
+    print("Run 'mkio --help' for the list of commands.")
+    sys.exit(1)
+
+
+def _synopsis(cmd: str, mode: int = 0) -> str:
+    """One-line ``mkio <cmd> ...`` synopsis of a command mode."""
+    return " ".join(["mkio", cmd, *_synopsis_tokens(cmd, mode)])
+
+
+def _synopsis_tokens(cmd: str, mode: int) -> tuple[str, ...]:
+    m = _COMMANDS[cmd].modes[mode]
+    return (*m.args, *(m.synopsis or (f"[{opt}]" for opt, _ in m.options)))
+
+
+def _flags(cmd: str, mode: int = 0) -> set[str]:
+    """The ``--flags`` a command mode accepts."""
+    return {opt.split()[0] for opt, _ in _COMMANDS[cmd].modes[mode].options}
+
+
+def _wrap_synopsis(cmd: str, mode: int, indent: str) -> list[str]:
+    """The synopsis folded to the help width, never splitting a ``[--flag <value>]``."""
+    head = f"{indent}mkio {cmd}"
+    hang = " " * (len(head) + 1)
+    lines = [head]
+    for token in _synopsis_tokens(cmd, mode):
+        if len(lines[-1]) + 1 + len(token) > _HELP_WIDTH and lines[-1].strip():
+            lines.append(hang + token)
+        else:
+            lines[-1] += " " + token
+    return lines
+
+
+def _print_help() -> None:
+    summary_col = 35
+    print("Usage: mkio <command> [arguments]")
+    group = None
+    for cmd, spec in _COMMANDS.items():
+        if spec.group != group:
+            group = spec.group
+            print()
+            print(f"{group} commands:")
+        for mode, m in enumerate(spec.modes):
+            lines = _wrap_synopsis(cmd, mode, "  ")
+            if len(lines) == 1 and len(lines[0]) < summary_col - 1:
+                print(f"{lines[0]:<{summary_col}}{m.summary}")
+                continue
+            for line in lines:
+                print(line)
+            print(" " * summary_col + m.summary)
+    print()
+    print("Options:")
+    print("  -h, --help             Show help; 'mkio <command> --help' for one command")
+    print("  --traceback            Show full Python traceback on errors")
+    print("  --version, -V          Print the mkio version and exit")
+    print()
+    print("<url> shorthand: 8080 is http://localhost:8080, myhost is http://myhost:80.")
+
+
+def _print_command_help(cmd: str) -> None:
+    spec = _COMMANDS[cmd]
+    several = len(spec.modes) > 1
+    for mode in range(len(spec.modes)):
+        print("\n".join(_wrap_synopsis(cmd, mode, "Usage: " if mode == 0 else "       ")))
+    for m in spec.modes:
+        print()
+        # With several modes each summary heads its own option list.
+        print(f"{m.summary}:" if several else m.summary)
+        if m.options:
+            if not several:
+                print()
+                print("Options:")
+            width = max(len(opt) for opt, _ in m.options)
+            for opt, text in m.options:
+                print(f"  {opt:<{width}}  {text}")
+    if spec.notes:
+        print()
+        for note in spec.notes:
+            print(note)
+    if spec.examples:
+        print()
+        print("Examples:")
+        for example in spec.examples:
+            print(f"  {example}")
 
 
 def _usage() -> None:
-    print("Usage:")
-    print("  mkio serve [server.toml]           Start a server (default: server.toml)")
-    print("  mkio services <url> [service]    List services, or show detail for one")
-    print("  mkio monitor <url> [service] [--filter <expr>]")
-    print("                                   Monitor messages (all services or one)")
-    print("  mkio send <url> <service> [--op <name>] <data>")
-    print("                                   Send transaction(s) from JSON/CSV/inline")
-    print("  mkio subpub <url> <service> <topic> [--subid <id>] [--fields <f1,f2,...>]")
-    print("                                   Subscribe to a subpub service")
-    print("  mkio stream <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--ref <ref>] [--maxcount <n>] [--before]")
-    print("                                   Subscribe to a stream service")
-    print("  mkio query <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--snapshotOnly] [--updateOnly]")
-    print("                                   Subscribe to a query service")
-    print("  mkio reqrep <url> <service> [data]")
-    print("                                   Send a request-reply query (JSON or key=value)")
-    print("  mkio schema <url> <table>        Show table schema (columns, types, keys)")
-    print("  mkio check <url> [version=... protocol=... mkio=... expr=...]")
-    print("                                   Check version compatibility with server")
-    print("  mkio dbupdate [server.toml] [--allow-risky] [--allow-destructive] [--drop-history]")
-    print("                                   Apply pending schema migrations")
-    print("  mkio archive <server.toml|url> [--tables a,b | --group <g> | --all] [--cutoff <when>]")
-    print("               [--cutoff-literal <text>] [--out <dir>] [--dry-run] [--yes]")
-    print("                                   Archive rows to CSV and delete them (tables opt in with")
-    print("                                   archive = {...}); a url archives through the running server")
-    print("  mkio archive [server.toml] [--table <name>] --older-than <N>d|<ref>")
-    print("               [--out <dir>] [--delete] [--prune-source] [--dry-run] [--yes]")
-    print("                                   Archive old history versions only, optionally purging them")
-    print("  mkio restore <server.toml> <archive-dir> [--tables a,b] [--dry-run]")
-    print("                                   Put an archive's rows back (server stopped)")
-    print("  mkio init [directory] [--no-static]")
-    print("  mkio adduser <username> <role> [server.toml]")
-    print("                                   Add a user to _mkio_users (prompts for password)")
-    print("  mkio hashpass                    Generate a hashed password for seed files")
-    print()
-    print("  All WS commands accept --username <user> (password via MKIO_PASSWORD or prompt)")
-    print()
-    print("  --traceback            Show full Python traceback on errors")
-    print("  --version, -V          Print the mkio version and exit")
+    _print_help()
+    sys.exit(1)
+
+
+def _print_usage(usage: str) -> None:
+    """The ``Usage:`` line under an argument error, pointing at the full help."""
+    cmd = usage.split()[1]
+    modes = range(len(_COMMANDS[cmd].modes))
+    mode = next(m for m in modes if _synopsis(cmd, m) == usage)
+    print("\n".join(_wrap_synopsis(cmd, mode, "Usage: ")))
+    print(f"Run 'mkio {cmd} --help' for details.")
+
+
+def _missing_args(cmd: str) -> None:
+    """Too few arguments to do anything: show the command's help, exit 1."""
+    _print_command_help(cmd)
     sys.exit(1)
 
 
 def _cmd_serve() -> None:
-    usage = "mkio serve [config.toml]"
+    usage = _synopsis("serve")
     args = sys.argv[2:]
     _check_unknown_flags(args, set(), usage)
     if len(args) > 1:
         print(f"Error: 'serve' takes at most 1 argument (config path), got {len(args)}")
-        print(f"Usage: {usage}")
+        _print_usage(usage)
         sys.exit(1)
     config_path = args[0] if args else "server.toml"
     from pathlib import Path
@@ -178,17 +441,14 @@ def _cmd_serve() -> None:
 
 
 def _cmd_services() -> None:
-    usage = "mkio services <url> [service]"
+    usage = _synopsis("services")
     args = sys.argv[2:]
     _check_unknown_flags(args, set(), usage)
     if len(args) < 1:
-        print(f"Usage: {usage}")
-        print("  e.g. mkio services http://localhost:8080")
-        print("  e.g. mkio services http://localhost:8080 orders")
-        sys.exit(1)
+        _missing_args("services")
     if len(args) > 2:
         print(f"Error: 'services' takes 1–2 arguments (url [service]), got {len(args)}")
-        print(f"Usage: {usage}")
+        _print_usage(usage)
         sys.exit(1)
     url = _normalize_url(args[0].rstrip("/"))
     service_name = args[1] if len(args) >= 2 else None
@@ -421,16 +681,11 @@ def _print_listener_detail(detail: dict[str, Any]) -> None:
 
 
 def _cmd_monitor() -> None:
-    usage = "mkio monitor <url> [service] [--filter <expr>] [--username <user>]"
+    usage = _synopsis("monitor")
     args = sys.argv[2:]
     if len(args) < 1:
-        print(f"Usage: {usage}")
-        print("  e.g. mkio monitor ws://localhost:8080")
-        print("  e.g. mkio monitor ws://localhost:8080 orders")
-        print("  e.g. mkio monitor ws://localhost:8080 --filter \"direction == 'in'\"")
-        print("  e.g. mkio monitor 8080 --filter \"service == 'orders' && direction == 'out'\"")
-        sys.exit(1)
-    _check_unknown_flags(args, {"--filter", "--username"}, usage)
+        _missing_args("monitor")
+    _check_unknown_flags(args, _flags("monitor"), usage)
     filter_expr = _extract_flag(args, "--filter")
     username, password = _extract_auth(args)
     _check_extra_positional(args[2:] if len(args) > 2 else [], usage)
@@ -540,18 +795,16 @@ def _print_monitor_message(data: dict[str, Any]) -> None:
 # ---- send command -----------------------------------------------------------
 
 def _cmd_send() -> None:
-    usage = "mkio send <url> <service> [--op <name>] [--username <user>] <data>"
+    usage = _synopsis("send")
     args = sys.argv[2:]
     if len(args) < 3:
-        print(f"Usage: {usage}")
-        print("  <data> can be inline JSON, a .json file, or a .csv file")
-        sys.exit(1)
+        _missing_args("send")
 
     url = args[0].rstrip("/")
     service = args[1]
     rest = args[2:]
 
-    _check_unknown_flags(rest, {"--op", "--username"}, usage)
+    _check_unknown_flags(rest, _flags("send"), usage)
     username, password = _extract_auth(rest)
 
     op_name = None
@@ -565,12 +818,12 @@ def _cmd_send() -> None:
 
     if not rest:
         print("Error: no data argument provided")
-        print(f"Usage: {usage}")
+        _print_usage(usage)
         sys.exit(1)
 
     if len(rest) > 1:
         print(f"Error: expected 1 data argument, got {len(rest)}: {rest}")
-        print(f"Usage: {usage}")
+        _print_usage(usage)
         sys.exit(1)
 
     data_arg = rest[0]
@@ -730,10 +983,9 @@ async def _send_messages(
 
 def _cmd_subpub() -> None:
     args = sys.argv[2:]
-    usage = "mkio subpub <url> <service> <topic> [<topic2> ...] [--subid <id>] [--fields <f1,f2,...>] [--username <user>]"
+    usage = _synopsis("subpub")
     if len(args) < 3:
-        print(f"Usage: {usage}")
-        sys.exit(1)
+        _missing_args("subpub")
 
     url = args[0].rstrip("/")
     service = args[1]
@@ -744,11 +996,10 @@ def _cmd_subpub() -> None:
         topics.append(args[i])
         i += 1
     if not topics:
-        print(f"Usage: {usage}")
-        sys.exit(1)
+        _missing_args("subpub")
 
     rest = list(args[i:])
-    _check_unknown_flags(rest, {"--fields", "--subid", "--username"}, usage)
+    _check_unknown_flags(rest, _flags("subpub"), usage)
     username, password = _extract_auth(rest)
     fields = _extract_fields(rest)
     subid = _extract_flag(rest, "--subid")
@@ -766,15 +1017,14 @@ def _cmd_subpub() -> None:
 
 def _cmd_stream() -> None:
     args = sys.argv[2:]
-    usage = "mkio stream <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--ref <ref>] [--maxcount <n>] [--before] [--username <user>]"
+    usage = _synopsis("stream")
     if len(args) < 2:
-        print(f"Usage: {usage}")
-        sys.exit(1)
+        _missing_args("stream")
 
     url = args[0].rstrip("/")
     service = args[1]
     rest = args[2:]
-    _check_unknown_flags(rest, {"--filter", "--fields", "--ref", "--subid", "--maxcount", "--before", "--username"}, usage)
+    _check_unknown_flags(rest, _flags("stream"), usage)
     username, password = _extract_auth(rest)
     filter_expr = _extract_flag(rest, "--filter")
     fields = _extract_fields(rest)
@@ -800,15 +1050,14 @@ def _cmd_stream() -> None:
 
 def _cmd_query() -> None:
     args = sys.argv[2:]
-    usage = "mkio query <url> <service> [--subid <id>] [--fields <f1,f2,...>] [--filter <expr>] [--snapshotOnly] [--updateOnly] [--username <user>]"
+    usage = _synopsis("query")
     if len(args) < 2:
-        print(f"Usage: {usage}")
-        sys.exit(1)
+        _missing_args("query")
 
     url = args[0].rstrip("/")
     service = args[1]
     rest = args[2:]
-    _check_unknown_flags(rest, {"--filter", "--fields", "--subid", "--snapshotOnly", "--updateOnly", "--username"}, usage)
+    _check_unknown_flags(rest, _flags("query"), usage)
     username, password = _extract_auth(rest)
     filter_expr = _extract_flag(rest, "--filter")
     fields = _extract_fields(rest)
@@ -973,10 +1222,11 @@ def _check_unknown_flags(args: list[str], known: set[str], usage: str) -> None:
                 hint = f" Did you mean {close[0]!r}?" if close else ""
                 valid = ", ".join(sorted(known))
                 print(f"Unknown option: {arg}.{hint}")
-                print(f"Valid options: {valid}")
+                print(textwrap.fill(f"Valid options: {valid}", _HELP_WIDTH, subsequent_indent=" " * 15,
+                                    break_on_hyphens=False))
             else:
                 print(f"Unknown option: {arg} (this command takes no options)")
-            print(f"Usage: {usage}")
+            _print_usage(usage)
             sys.exit(1)
 
 
@@ -985,7 +1235,7 @@ def _check_extra_positional(args: list[str], usage: str) -> None:
     extra = [a for a in args if not a.startswith("--")]
     if extra:
         print(f"Error: unexpected argument(s): {' '.join(extra)}")
-        print(f"Usage: {usage}")
+        _print_usage(usage)
         sys.exit(1)
 
 
@@ -1081,14 +1331,10 @@ def _normalize_ws_url(url: str) -> str:
 
 
 def _cmd_reqrep() -> None:
-    usage = "mkio reqrep <url> <service> [--username <user>] [data]"
+    usage = _synopsis("reqrep")
     args = sys.argv[2:]
     if len(args) < 2:
-        print(f"Usage: {usage}")
-        print("  <data> can be inline JSON or key=value pairs")
-        print("  e.g. mkio reqrep localhost:8080 lookup '{\"symbol\": \"AAPL\"}'")
-        print("  e.g. mkio reqrep localhost:8080 calculate qty=10 price=99.95")
-        sys.exit(1)
+        _missing_args("reqrep")
 
     url = args[0]
     service = args[1]
@@ -1107,7 +1353,7 @@ def _cmd_reqrep() -> None:
             for kv in rest:
                 if "=" not in kv:
                     print(f"Error: expected key=value, got {kv!r}")
-                    print(f"Usage: {usage}")
+                    _print_usage(usage)
                     sys.exit(1)
                 k, v = kv.split("=", 1)
                 data[k] = _auto_convert(v)
@@ -1146,19 +1392,17 @@ async def _reqrep_request(
 
 
 def _cmd_dbupdate() -> None:
-    usage = ("mkio dbupdate [server.toml] [--allow-risky] [--allow-destructive] "
-             "[--drop-history] [--keep-redo]")
+    usage = _synopsis("dbupdate")
     args = sys.argv[2:]
     allow_risky = "--allow-risky" in args
     allow_destructive = "--allow-destructive" in args
     drop_history = "--drop-history" in args
     keep_redo = "--keep-redo" in args
-    args = [a for a in args if a not in
-            ("--allow-risky", "--allow-destructive", "--drop-history", "--keep-redo")]
-    _check_unknown_flags(args, set(), usage)
+    _check_unknown_flags(args, _flags("dbupdate"), usage)
+    args = [a for a in args if a not in _flags("dbupdate")]
     if len(args) > 1:
         print(f"Error: 'dbupdate' takes at most 1 argument (config path), got {len(args)}")
-        print(f"Usage: {usage}")
+        _print_usage(usage)
         sys.exit(1)
 
     config_path = args[0] if args else "server.toml"
@@ -1432,10 +1676,7 @@ def _print_archive_summary(summary: dict[str, Any], *, cutoff_desc: str, dry_run
 
 
 def _cmd_archive_rows() -> None:
-    usage = (
-        "mkio archive <server.toml|url> [--tables a,b | --group <g> | --all] "
-        "[--cutoff <when>] [--cutoff-literal <text>] [--out <dir>] [--dry-run] [--yes]"
-    )
+    usage = _synopsis("archive")
     args = sys.argv[2:]
     dry_run = "--dry-run" in args
     assume_yes = "--yes" in args
@@ -1447,13 +1688,10 @@ def _cmd_archive_rows() -> None:
     cutoff_literal = _extract_flag(args, "--cutoff-literal")
     out_dir = _extract_flag(args, "--out") or "."
     username, password = _extract_auth(args)
-    _check_unknown_flags(
-        args, {"--tables", "--group", "--all", "--cutoff", "--cutoff-literal",
-               "--out", "--dry-run", "--yes", "--username"}, usage,
-    )
+    _check_unknown_flags(args, _flags("archive"), usage)
     if len(args) > 1:
         print(f"Error: 'archive' takes one argument (config path or server url), got {len(args)}")
-        print(f"Usage: {usage}")
+        _print_usage(usage)
         sys.exit(1)
     if everything and (tables_arg or group):
         print("Error: --all cannot be combined with --tables or --group")
@@ -1563,15 +1801,15 @@ async def _archive_via_server(
 
 
 def _cmd_restore() -> None:
-    usage = "mkio restore <server.toml> <archive-dir> [--tables a,b] [--dry-run]"
+    usage = _synopsis("restore")
     args = sys.argv[2:]
     dry_run = "--dry-run" in args
     args = [a for a in args if a != "--dry-run"]
     tables_arg = _extract_flag(args, "--tables")
-    _check_unknown_flags(args, {"--tables", "--dry-run"}, usage)
+    _check_unknown_flags(args, _flags("restore"), usage)
     if len(args) != 2:
         print(f"Error: 'restore' takes 2 arguments (config path, archive directory), got {len(args)}")
-        print(f"Usage: {usage}")
+        _print_usage(usage)
         sys.exit(1)
     config_path, archive_dir = args
     from pathlib import Path
@@ -1610,10 +1848,7 @@ def _cmd_restore() -> None:
 
 
 def _cmd_archive_history() -> None:
-    usage = (
-        "mkio archive [server.toml] [--table <name>] --older-than <N>d|<ref> "
-        "[--out <dir>] [--delete] [--prune-source] [--dry-run] [--yes]"
-    )
+    usage = _synopsis("archive", 1)
     args = sys.argv[2:]
     delete = "--delete" in args
     prune_source = "--prune-source" in args
@@ -1624,19 +1859,14 @@ def _cmd_archive_history() -> None:
     table_arg = _extract_flag(args, "--table")
     older_than = _extract_flag(args, "--older-than")
     out_dir = _extract_flag(args, "--out") or "."
-    _check_unknown_flags(
-        args,
-        {"--table", "--older-than", "--out", "--delete", "--prune-source",
-         "--dry-run", "--yes"},
-        usage,
-    )
+    _check_unknown_flags(args, _flags("archive", 1), usage)
     if len(args) > 1:
         print(f"Error: 'archive' takes at most 1 argument (config path), got {len(args)}")
-        print(f"Usage: {usage}")
+        _print_usage(usage)
         sys.exit(1)
     if not older_than:
         print("Error: --older-than is required (e.g. --older-than 90d)")
-        print(f"Usage: {usage}")
+        _print_usage(usage)
         sys.exit(1)
     if prune_source and not delete:
         delete = True
@@ -1755,15 +1985,10 @@ def _print_orphan_note(orphans: list[str]) -> None:
 
 
 def _cmd_check() -> None:
-    usage = "mkio check <url> [--username <user>] [version=... protocol=... mkio=... expr=...]"
+    usage = _synopsis("check")
     args = sys.argv[2:]
     if len(args) < 1:
-        print(f"Usage: {usage}")
-        print("  Check version compatibility with a running mkio server")
-        print("  e.g. mkio check 8080")
-        print("  e.g. mkio check 8080 version=2.0.0 protocol=1.0")
-        print("  e.g. mkio check 8080 mkio=0.1.47")
-        sys.exit(1)
+        _missing_args("check")
 
     url = args[0]
     rest = list(args[1:])
@@ -1772,7 +1997,7 @@ def _cmd_check() -> None:
     for kv in rest:
         if "=" not in kv:
             print(f"Error: expected key=value, got {kv!r}")
-            print(f"Usage: {usage}")
+            _print_usage(usage)
             sys.exit(1)
         k, v = kv.split("=", 1)
         if k not in ("version", "protocol", "mkio", "expr"):
@@ -1812,17 +2037,15 @@ async def _check_request(
 
 
 def _cmd_schema() -> None:
-    usage = "mkio schema <url> <table> [--username <user>]"
+    usage = _synopsis("schema")
     args = sys.argv[2:]
-    _check_unknown_flags(args, {"--username"}, usage)
+    _check_unknown_flags(args, _flags("schema"), usage)
     username, password = _extract_auth(args)
     if len(args) < 2:
-        print(f"Usage: {usage}")
-        print("  e.g. mkio schema 8080 orders")
-        sys.exit(1)
+        _missing_args("schema")
     if len(args) > 2:
         print(f"Error: 'schema' takes exactly 2 arguments (url table), got {len(args)}")
-        print(f"Usage: {usage}")
+        _print_usage(usage)
         sys.exit(1)
 
     url = args[0]
@@ -1874,14 +2097,14 @@ async def _schema_request(
 
 
 def _cmd_init() -> None:
-    usage = "mkio init [directory] [--no-static]"
+    usage = _synopsis("init")
     args = sys.argv[2:]
+    _check_unknown_flags(args, _flags("init"), usage)
     no_static = "--no-static" in args
     args = [a for a in args if a != "--no-static"]
-    _check_unknown_flags(args, set(), usage)
     if len(args) > 1:
         print(f"Error: 'init' takes at most 1 argument (directory), got {len(args)}")
-        print(f"Usage: {usage}")
+        _print_usage(usage)
         sys.exit(1)
 
     from pathlib import Path
@@ -1912,16 +2135,14 @@ def _cmd_init() -> None:
 
 
 def _cmd_adduser() -> None:
-    usage = "mkio adduser <username> <role> [server.toml]"
+    usage = _synopsis("adduser")
     args = sys.argv[2:]
     _check_unknown_flags(args, set(), usage)
     if len(args) < 2:
-        print(f"Usage: {usage}")
-        print("  Adds a user to the _mkio_users table (prompts for password)")
-        sys.exit(1)
+        _missing_args("adduser")
     if len(args) > 3:
         print(f"Error: 'adduser' takes 2-3 arguments, got {len(args)}")
-        print(f"Usage: {usage}")
+        _print_usage(usage)
         sys.exit(1)
 
     username = args[0]
@@ -1990,12 +2211,12 @@ def _cmd_adduser() -> None:
 
 
 def _cmd_hashpass() -> None:
-    usage = "mkio hashpass"
+    usage = _synopsis("hashpass")
     args = sys.argv[2:]
     _check_unknown_flags(args, set(), usage)
     if args:
         print("Error: 'hashpass' takes no arguments")
-        print(f"Usage: {usage}")
+        _print_usage(usage)
         sys.exit(1)
 
     password = os.environ.get("MKIO_PASSWORD")
