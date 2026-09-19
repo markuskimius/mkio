@@ -12,6 +12,7 @@ from typing import Any, Callable
 from aiohttp.web import WebSocketResponse
 
 from mkio.expr import compile_filter
+from mkio._ref import next_ref
 from mkio.change_bus import ChangeEvent
 from mkio.services.base import Service
 from mkio.ws_protocol import make_nack, make_snapshot, make_update
@@ -22,7 +23,11 @@ _GETMORE_TIMEOUT = 60.0
 logger = logging.getLogger("mkio.query")
 
 
-@dataclass
+# A change held for a subscriber whose snapshot is still going out.
+Buffered = tuple[str, "str | None", dict[str, Any], "str | None"]  # op, row id, row, cause
+
+
+@dataclass(eq=False)
 class QuerySubscriber:
     ws: WebSocketResponse
     filter_fn: Callable[[dict[str, Any]], bool] | None = None
@@ -32,7 +37,9 @@ class QuerySubscriber:
     sent_rows: set[str] | None = None
     maxcount: int = 0
     pending_rows: list[dict[str, Any]] = field(default_factory=list)
-    buffered_updates: list[bytes] = field(default_factory=list)
+    buffered_updates: list[Buffered] = field(default_factory=list)
+    # Row ids the snapshot carried: a buffered insert of one is an update.
+    snapshot_ids: set[str] = field(default_factory=set)
     max_buffer: int = 0
     overflowed: bool = False
     want_updates: bool = True
@@ -84,7 +91,12 @@ class QueryService(Service):
         self._max_buffer = self.config.get("max_buffer", _DEFAULT_MAX_BUFFER)
 
         self._subscribers: list[QuerySubscriber] = []
-        self._pending: dict[str, QuerySubscriber] = {}
+        # Subscribers whose snapshot is being read or paged out. Changes are
+        # buffered for them from before the read, so none falls between the
+        # snapshot and the live feed. A list, found by (ws, subid): every
+        # page of a UI names its tables alike, so a subid alone is not one
+        # subscription.
+        self._pending: list[QuerySubscriber] = []
         self._pending_counter: int = 0
         self._bus_queue: asyncio.Queue[ChangeEvent] | None = None
         self._listener_task: asyncio.Task[None] | None = None
@@ -201,94 +213,93 @@ class QueryService(Service):
             sent_rows=sent_rows,
             maxcount=maxcount,
             want_updates=want_updates,
+            max_buffer=self._max_buffer,
         )
 
-        if want_snapshot:
+        if not want_snapshot:
+            if want_updates:
+                self._subscribers.append(sub)
+                return 1
+            return 0
+
+        # Pending from before the read: a change committed while the
+        # snapshot is read or sent is buffered, not lost.
+        self._pending.append(sub)
+        try:
             rows = await self.db.read(self._sql)
-            if self._cache is not None:
-                self._cache = self._index(rows)  # a free resync
-            out_rows = []
-            for row in rows:
-                out_row = sub.formatter(row) if sub.formatter else row
-                if sub.filter_fn and not sub.filter_fn(out_row):
-                    continue
+        except BaseException:
+            self._drop_pending(sub)
+            raise
+        if self._cache is not None:
+            self._cache = self._index(rows)  # a free resync
+        out_rows = []
+        for row in rows:
+            out_row = sub.formatter(row) if sub.formatter else row
+            if sub.filter_fn and not sub.filter_fn(out_row):
+                continue
+            rid = self._row_id(row)
+            if rid is not None:
+                sub.snapshot_ids.add(rid)
                 if sent_rows is not None:
-                    rid = self._row_id(row)
-                    if rid is not None:
-                        sent_rows.add(rid)
-                out_rows.append(self._project(self._tag_row(row, out_row), fields))
+                    sent_rows.add(rid)
+            out_rows.append(self._project(self._tag_row(row, out_row), fields))
 
-            if paginating:
-                page = out_rows[:maxcount]
-                remaining = out_rows[maxcount:]
-                hasmore = len(remaining) > 0
+        page = out_rows[:maxcount] if paginating else out_rows
+        remaining = out_rows[maxcount:] if paginating else []
+        hasmore = len(remaining) > 0
+        if hasmore:
+            sub.max_buffer = max(self._max_buffer, len(out_rows) + maxcount)
+            sub.pending_rows = remaining
+            sub.last_activity = time.monotonic()
 
-                resp = make_snapshot(None, self.name, page, subid=sub.subid, hasmore=hasmore)
-                await ws.send_bytes(resp)
-                await self.notify_monitors("out", resp)
+        resp = make_snapshot(None, self.name, page, subid=sub.subid, hasmore=hasmore)
+        await ws.send_bytes(resp)
+        await self.notify_monitors("out", resp)
 
-                if hasmore:
-                    effective_max_buffer = max(
-                        self._max_buffer,
-                        len(out_rows) + maxcount,
-                    )
-                    sub.max_buffer = effective_max_buffer
-                    sub.pending_rows = remaining
-                    self._pending[sub.subid] = sub
-                    sub.last_activity = time.monotonic()
-                    return 1
-
-                if want_updates:
-                    self._subscribers.append(sub)
-                    return 1
-                return 0
-            else:
-                resp = make_snapshot(None, self.name, out_rows, subid=sub.subid, hasmore=False)
-                await ws.send_bytes(resp)
-                await self.notify_monitors("out", resp)
-
-        if want_updates:
-            self._subscribers.append(sub)
+        if hasmore:
             return 1
-        return 0
+        await self._finalize_pending(sub)
+        return 1 if want_updates else 0
+
+    def _find_pending(self, ws: WebSocketResponse, subid: str) -> QuerySubscriber | None:
+        for sub in self._pending:
+            if sub.ws is ws and sub.subid == subid:
+                return sub
+        return None
+
+    def _drop_pending(self, sub: QuerySubscriber) -> None:
+        self._pending = [s for s in self._pending if s is not sub]
+
+    async def _nack_reset(self, sub: QuerySubscriber, message: str) -> None:
+        """Tell a subscriber the server lost its place; it subscribes again."""
+        resp = make_nack(self.name, message, subid=sub.subid, code="reset")
+        try:
+            await sub.ws.send_bytes(resp)
+        except (ConnectionError, RuntimeError):
+            return
+        await self.notify_monitors("out", resp)
 
     async def on_getmore(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
         subid = msg.get("subid")
+        sub = self._find_pending(ws, subid) if subid else None
 
-        if not subid or subid not in self._pending:
-            nack_msg = "unknown subid" if subid else "missing subid"
-            resp = make_nack(self.name, nack_msg, subid=subid)
-            await ws.send_bytes(resp)
-            await self.notify_monitors("out", resp)
-            return
-
-        sub = self._pending[subid]
-
-        if sub.ws is not ws:
-            resp = make_nack(self.name, "unknown subid", subid=subid)
-            await ws.send_bytes(resp)
-            await self.notify_monitors("out", resp)
-            return
-
-        if sub.overflowed:
-            del self._pending[subid]
+        if sub is None:
+            # No subid is a client bug; an unknown one is a page sequence
+            # that timed out here, which subscribing again puts right.
             resp = make_nack(
-                self.name,
-                "subscription reset: update buffer overflow",
-                subid=subid,
+                self.name, "unknown subid" if subid else "missing subid",
+                subid=subid, code="reset" if subid else None,
             )
             await ws.send_bytes(resp)
             await self.notify_monitors("out", resp)
             return
 
-        sub.last_activity = time.monotonic()
-
-        if not sub.pending_rows:
-            resp = make_snapshot(None, self.name, [], subid=subid, hasmore=False)
-            await ws.send_bytes(resp)
-            await self.notify_monitors("out", resp)
-            await self._finalize_pending(sub)
+        if sub.overflowed:
+            self._drop_pending(sub)
+            await self._nack_reset(sub, "subscription reset: update buffer overflow")
             return
+
+        sub.last_activity = time.monotonic()
 
         page = sub.pending_rows[:sub.maxcount]
         sub.pending_rows = sub.pending_rows[sub.maxcount:]
@@ -302,14 +313,33 @@ class QueryService(Service):
             await self._finalize_pending(sub)
 
     async def _finalize_pending(self, sub: QuerySubscriber) -> None:
-        """Move a paginating subscriber from _pending to _subscribers (or clean up)."""
-        self._pending.pop(sub.subid, None)
+        """The snapshot is out: deliver what was buffered and go live."""
+        if not any(s is sub for s in self._pending):
+            return  # unsubscribed or timed out meanwhile
+        self._drop_pending(sub)
+        if not sub.want_updates:
+            return
+        if sub.overflowed:
+            await self._nack_reset(sub, "subscription reset: update buffer overflow")
+            return
 
-        if sub.want_updates:
-            for msg_bytes in sub.buffered_updates:
-                await sub.ws.send_bytes(msg_bytes)
-            sub.buffered_updates = []
-            self._subscribers.append(sub)
+        # The snapshot may already reflect a buffered change — the read can
+        # land after the commit — and sending it again is harmless, except
+        # that a row the client holds must not arrive as an insert.
+        known = sub.snapshot_ids
+        for op, rid, row, cause in sub.buffered_updates:
+            if rid is not None:
+                if op == "insert" and rid in known:
+                    op = "update"
+                elif op == "delete":
+                    known.discard(rid)
+                else:
+                    known.add(rid)
+            await sub.ws.send_bytes(make_update(self.name, ref=None, op=op, row=row,
+                                                subid=sub.subid, cause=cause))
+        sub.buffered_updates = []
+        sub.snapshot_ids = set()
+        self._subscribers.append(sub)
 
     async def on_message(self, ws: WebSocketResponse, msg: dict[str, Any]) -> None:
         msg_type = msg.get("type", "")
@@ -365,21 +395,17 @@ class QueryService(Service):
         return {k: v for k, v in row.items() if k in fields or k.startswith("_mkio_")}
 
     async def on_unsubscribe(self, ws: WebSocketResponse, msg: dict[str, Any]) -> int:
-        before = len(self._subscribers)
-        pending_removed = 0
+        before = len(self._subscribers) + len(self._pending)
         subid = msg.get("subid")
         if subid is not None:
-            self._subscribers = [s for s in self._subscribers if not (s.ws is ws and s.subid == subid)]
-            if subid in self._pending and self._pending[subid].ws is ws:
-                del self._pending[subid]
-                pending_removed = 1
+            def keep(s: QuerySubscriber) -> bool:
+                return not (s.ws is ws and s.subid == subid)
         else:
-            self._subscribers = [s for s in self._subscribers if s.ws is not ws]
-            to_remove = [k for k, v in self._pending.items() if v.ws is ws]
-            for k in to_remove:
-                del self._pending[k]
-            pending_removed = len(to_remove)
-        return (before - len(self._subscribers)) + pending_removed
+            def keep(s: QuerySubscriber) -> bool:
+                return s.ws is not ws
+        self._subscribers = [s for s in self._subscribers if keep(s)]
+        self._pending = [s for s in self._pending if keep(s)]
+        return before - len(self._subscribers) - len(self._pending)
 
     async def _listen_changes(self) -> None:
         """Consume change events, fan out to live subscribers and buffer for paginating ones.
@@ -396,14 +422,46 @@ class QueryService(Service):
                     burst.append(self._bus_queue.get_nowait())
                 except asyncio.QueueEmpty:
                     break
+            # One bad event must not end the feed for every subscriber, now
+            # and to come: whatever it raises is logged and the loop goes on.
+            if self.bus.take_overflow(self._bus_queue):
+                try:
+                    await self._resync(burst[-1])
+                except Exception:
+                    logger.exception("query service %r: resync failed", self.name)
+                continue
             secondary: ChangeEvent | None = None
             for event in burst:
-                if event.table == self._table or self._cache is None:
-                    await self._on_event(event)
-                elif not self._unchanged(event):
-                    secondary = event  # the last one stands for the burst
+                try:
+                    if event.table == self._table or self._cache is None:
+                        await self._on_event(event)
+                    elif not self._unchanged(event):
+                        secondary = event  # the last one stands for the burst
+                except Exception:
+                    logger.exception("query service %r: change to %r not delivered", self.name, event.table)
             if secondary is not None:
-                await self._on_secondary(secondary)
+                try:
+                    await self._on_secondary(secondary)
+                except Exception:
+                    logger.exception("query service %r: re-query failed", self.name)
+
+    async def _resync(self, last: ChangeEvent) -> None:
+        """The change queue overflowed, so events were missed. With the
+        result set cached, a re-run of the SQL publishes whatever differs;
+        without one there is nothing to diff against, and each subscriber is
+        reset to subscribe again for a fresh snapshot."""
+        for seen in self._seen.values():
+            seen.clear()
+        if self._cache is not None:
+            await self._requery_diff(last.ref or next_ref(), None)
+            return
+        subscribers, self._subscribers = self._subscribers, []
+        for sub in self._pending:
+            sub.overflowed = True
+            sub.pending_rows = []
+            sub.buffered_updates = []
+        for sub in subscribers:
+            await self._nack_reset(sub, "subscription reset: change queue overflow")
 
     def _unchanged(self, event: ChangeEvent) -> bool:
         """Whether a secondary-table event left its watched columns as the
@@ -466,11 +524,14 @@ class QueryService(Service):
 
     async def _on_secondary(self, event: ChangeEvent) -> None:
         """A change to a joined table: re-run the SQL and send what differs."""
+        await self._requery_diff(event.ref, event.cause)
+
+    async def _requery_diff(self, ref: str, cause: str | None) -> None:
         assert self._cache is not None
         before = self._cache
         self._cache = self._index(await self.db.read(self._sql))
         for pid in before.keys() | self._cache.keys():
-            await self._diff_out(before.get(pid, {}), self._cache.get(pid, {}), event.ref, event.cause)
+            await self._diff_out(before.get(pid, {}), self._cache.get(pid, {}), ref, cause)
 
     async def _diff_out(
         self, old: dict[str, dict[str, Any]], new: dict[str, dict[str, Any]],
@@ -503,8 +564,8 @@ class QueryService(Service):
         is_delete = op == "delete"
 
         # Buffer for paginating subscribers
-        for sub in self._pending.values():
-            if sub.overflowed:
+        for sub in list(self._pending):
+            if sub.overflowed or not sub.want_updates:
                 continue
             out_row = sub.formatter(row) if sub.formatter and not is_delete else row
             if is_delete:
@@ -516,17 +577,13 @@ class QueryService(Service):
                 if sub.sent_rows is not None and rid is not None and rid in sub.sent_rows:
                     sub.sent_rows.discard(rid)
                     tagged = self._project(self._tag_row(row, out_row), sub.fields)
-                    msg_bytes = make_update(self.name, ref=None, op="delete", row=tagged,
-                                              subid=sub.subid, cause=cause)
-                    sub.buffered_updates.append(msg_bytes)
+                    sub.buffered_updates.append(("delete", rid, tagged, cause))
                 continue
             else:
                 if sub.sent_rows is not None and rid is not None:
                     sub.sent_rows.add(rid)
             tagged = self._project(self._tag_row(row, out_row), sub.fields)
-            msg_bytes = make_update(self.name, ref=None, op=op, row=tagged,
-                                    subid=sub.subid, cause=cause)
-            sub.buffered_updates.append(msg_bytes)
+            sub.buffered_updates.append((op, rid, tagged, cause))
             total = len(sub.pending_rows) + len(sub.buffered_updates)
             if total > sub.max_buffer:
                 sub.overflowed = True
@@ -534,7 +591,7 @@ class QueryService(Service):
                 sub.buffered_updates = []
 
         # Fan out to live subscribers
-        for sub in self._subscribers:
+        for sub in list(self._subscribers):
             out_row = sub.formatter(row) if sub.formatter and not is_delete else row
             if is_delete:
                 if sub.sent_rows is not None and rid is not None and rid not in sub.sent_rows:
@@ -568,17 +625,20 @@ class QueryService(Service):
                     notified_monitor = True
             except (ConnectionError, RuntimeError):
                 dead.append(sub)
-        for sub in dead:
-            self._subscribers.remove(sub)
+        if dead:
+            # By identity, and against the list as it stands now: a
+            # disconnect may have replaced it while a send was awaited.
+            self._subscribers = [s for s in self._subscribers if not any(s is d for d in dead)]
 
     async def _check_timeouts(self) -> None:
         """Periodically remove paginating subscribers that have gone idle."""
         while True:
             await asyncio.sleep(10)
-            now = time.monotonic()
-            expired = [
-                subid for subid, sub in self._pending.items()
-                if now - sub.last_activity > _GETMORE_TIMEOUT
-            ]
-            for subid in expired:
-                del self._pending[subid]
+            self._expire_pending()
+
+    def _expire_pending(self) -> None:
+        now = time.monotonic()
+        self._pending = [
+            sub for sub in self._pending
+            if now - sub.last_activity <= _GETMORE_TIMEOUT
+        ]

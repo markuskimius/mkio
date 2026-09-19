@@ -331,10 +331,19 @@ class MkioClient:
                 future.set_result(data)
             return
 
-        # Nack: deliver to subscription queue and remove to prevent reconnect retry
+        # Nack: deliver to subscription queue and remove to prevent reconnect
+        # retry — unless the server only lost its place (code "reset": a
+        # buffer overflowed, a page sequence timed out), which subscribing
+        # again puts right. A few tries, so a server that keeps resetting
+        # still surfaces as a nack.
         nack_key = data.get("subid") or service
         if msg_type == "nack" and nack_key and nack_key in self._subscriptions:
-            sub = self._subscriptions.pop(nack_key)
+            sub = self._subscriptions[nack_key]
+            if data.get("code") == "reset" and sub.resets < _MAX_RESETS:
+                sub.resets += 1
+                asyncio.create_task(self._send_subscribe(sub))
+                return
+            del self._subscriptions[nack_key]
             try:
                 sub.queue.put_nowait(data)
             except asyncio.QueueFull:
@@ -348,6 +357,8 @@ class MkioClient:
             # Track ref for recovery on reconnect
             if ref:
                 sub.ref = ref
+            if msg_type == "snapshot" and not data.get("hasmore"):
+                sub.resets = 0
             try:
                 sub.queue.put_nowait(data)
             except asyncio.QueueFull:
@@ -387,6 +398,9 @@ class MkioClient:
                 continue
 
 
+_MAX_RESETS = 3
+
+
 class _Subscription:
     def __init__(
         self,
@@ -415,3 +429,4 @@ class _Subscription:
         self.fields = fields
         self.maxcount = maxcount
         self.before = before
+        self.resets = 0

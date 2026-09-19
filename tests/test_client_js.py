@@ -620,3 +620,58 @@ def test_js_client_documents_the_cause_argument():
     src = JS_CLIENT_PATH.read_text()
     assert "(op, row, info) => void" in src
     assert 'cause: data.cause || null' in src
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_js_client_reset_nack_subscribes_again():
+    """A nack coded "reset" means the server lost its place — a buffer
+    overflowed, a page sequence timed out. The client used to delete the
+    subscription on any nack, leaving a table that looked alive and never
+    moved; now it subscribes again, a few times at most."""
+    script = r"""
+global.WebSocket = class {
+  constructor() { this.readyState = 1; this.sent = []; FakeWS.last = this; }
+  send(data) { this.sent.push(JSON.parse(data)); }
+  close() {}
+};
+global.WebSocket.OPEN = 1;
+const FakeWS = global.WebSocket;
+
+const { MkioClient } = require(PATH);
+const c = new MkioClient("ws://x/ws", { reconnect: false });
+c.connect();
+const ws = FakeWS.last;
+ws.onopen();
+
+const nacks = [], snaps = [];
+c.subscribe("orders", "query", { subid: "t1", maxcount: 2,
+  onSnapshot: (rows) => snaps.push(rows.length), onNack: (m) => nacks.push(m) });
+const recv = (o) => ws.onmessage({ data: JSON.stringify(o) });
+const subscribes = () => ws.sent.filter((m) => m.type === "subscribe").length;
+const reset = { type: "nack", service: "orders", subid: "t1", code: "reset", message: "subscription reset" };
+
+// A page in hand, then a reset: the half-built snapshot is dropped and the
+// subscribe goes out again; the whole snapshot that follows is delivered.
+recv({ type: "snapshot", service: "orders", subid: "t1", rows: [{ id: 1 }, { id: 2 }], hasmore: true });
+recv(reset);
+setTimeout(() => {
+  const afterOne = subscribes();
+  recv({ type: "snapshot", service: "orders", subid: "t1", rows: [{ id: 1 }], hasmore: false });
+  // The reset took, so the count starts over: three more go through...
+  let i = 0;
+  const again = () => {
+    if (i++ < 4) { recv(reset); setTimeout(again, 800); return; }
+    console.log(JSON.stringify({ afterOne, snaps, total: subscribes(), nacks, kept: c._subscriptions.has("t1") }));
+    process.exit(0);
+  };
+  again();
+}, 400);
+""".replace("PATH", json.dumps(str(JS_CLIENT_PATH)))
+
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+
+    assert out["afterOne"] == 2
+    assert out["snaps"] == [1]  # the stale first page never reached onSnapshot
+    assert out["total"] == 5  # ...and the fourth in a row is given up on
+    assert out["nacks"] == ["subscription reset"] and out["kept"] is False

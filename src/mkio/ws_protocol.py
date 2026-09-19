@@ -74,8 +74,13 @@ def make_nack(
     ref: str | None = None,
     txnid: str | None = None,
     subid: str | None = None,
+    code: str | None = None,
 ) -> bytes:
+    """``code`` tells a client what to do about it: ``"reset"`` means the
+    subscription is sound but the server lost its place — subscribe again."""
     envelope: dict[str, Any] = {"type": "nack", "service": service, "message": message}
+    if code is not None:
+        envelope["code"] = code
     if ref is not None:
         envelope["ref"] = ref
     if txnid is not None:

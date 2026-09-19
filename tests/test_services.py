@@ -39,6 +39,11 @@ TEST_TABLES = {
 }
 
 
+def _pending_subids(svc) -> set:
+    """The subids of a query service's syncing/paginating subscribers."""
+    return {sub.subid for sub in svc._pending}
+
+
 class MockWebSocket:
     """Mock WebSocket for testing services."""
 
@@ -3060,7 +3065,7 @@ async def test_query_pagination_getmore_empty(query_svc_many):
     })
     msgs = ws.get_messages()
     assert msgs[0]["hasmore"] is False
-    assert "q1" not in query_svc_many._pending
+    assert "q1" not in _pending_subids(query_svc_many)
     assert len(query_svc_many._subscribers) == 1
 
 
@@ -3126,7 +3131,7 @@ async def test_query_pagination_no_updates(query_svc_many):
 
     # After pagination completes, subscriber should not be in _subscribers
     assert len(query_svc_many._subscribers) == 0
-    assert "q1" not in query_svc_many._pending
+    assert "q1" not in _pending_subids(query_svc_many)
 
 
 async def test_query_pagination_unknown_subid(query_svc_many):
@@ -3189,7 +3194,7 @@ async def test_query_pagination_buffer_overflow(query_svc_many, bus):
     msgs = ws.get_messages()
     assert msgs[0]["type"] == "nack"
     assert "buffer overflow" in msgs[0]["message"]
-    assert "q1" not in query_svc_many._pending
+    assert "q1" not in _pending_subids(query_svc_many)
 
 
 async def test_query_pagination_unsubscribe_pending(query_svc_many):
@@ -3198,13 +3203,13 @@ async def test_query_pagination_unsubscribe_pending(query_svc_many):
     await query_svc_many.on_subscribe(ws, {
         "type": "subscribe", "maxcount": 2, "subid": "q1",
     })
-    assert "q1" in query_svc_many._pending
+    assert "q1" in _pending_subids(query_svc_many)
 
     removed = await query_svc_many.on_unsubscribe(ws, {
         "type": "unsubscribe", "subid": "q1",
     })
     assert removed == 1
-    assert "q1" not in query_svc_many._pending
+    assert "q1" not in _pending_subids(query_svc_many)
 
 
 async def test_query_pagination_disconnect_cleanup(query_svc_many):
@@ -3213,11 +3218,11 @@ async def test_query_pagination_disconnect_cleanup(query_svc_many):
     await query_svc_many.on_subscribe(ws, {
         "type": "subscribe", "maxcount": 2, "subid": "q1",
     })
-    assert "q1" in query_svc_many._pending
+    assert "q1" in _pending_subids(query_svc_many)
 
     removed = await query_svc_many.on_unsubscribe(ws, {"type": "unsubscribe"})
     assert removed == 1
-    assert "q1" not in query_svc_many._pending
+    assert "q1" not in _pending_subids(query_svc_many)
 
 
 async def test_query_no_maxcount_has_hasmore_false(query_svc):
@@ -3363,7 +3368,7 @@ async def test_query_pagination_live_updates_after_finalization(query_svc_many, 
     ws.clear()
 
     # Verify subscriber moved to _subscribers
-    assert "q1" not in query_svc_many._pending
+    assert "q1" not in _pending_subids(query_svc_many)
     assert any(s.subid == "q1" for s in query_svc_many._subscribers)
 
     # Now send a live update
@@ -3395,8 +3400,8 @@ async def test_query_pagination_multiple_concurrent(query_svc_many, bus):
         "type": "subscribe", "maxcount": 3, "subid": "b1",
     })
 
-    assert "a1" in query_svc_many._pending
-    assert "b1" in query_svc_many._pending
+    assert "a1" in _pending_subids(query_svc_many)
+    assert "b1" in _pending_subids(query_svc_many)
 
     # ws1 first page: 2 rows
     msgs1 = ws1.get_messages()
@@ -3435,7 +3440,7 @@ async def test_query_pagination_multiple_concurrent(query_svc_many, bus):
     assert msgs2[1]["row"]["symbol"] == "BOTH"
 
     # ws1 still paginating — still shouldn't have update
-    assert "a1" in query_svc_many._pending
+    assert "a1" in _pending_subids(query_svc_many)
 
 
 async def test_query_pagination_buffered_update_order(query_svc_many, bus):
@@ -3514,7 +3519,7 @@ async def test_query_pagination_getmore_after_finalization(query_svc_many):
     # Finish pagination
     await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
     ws.clear()
-    assert "q1" not in query_svc_many._pending
+    assert "q1" not in _pending_subids(query_svc_many)
 
     # Send another getmore — should nack
     await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
@@ -3567,21 +3572,15 @@ async def test_query_pagination_timeout_cleanup(query_svc_many):
         await query_svc_many.on_subscribe(ws, {
             "type": "subscribe", "maxcount": 2, "subid": "q1",
         })
-        assert "q1" in query_svc_many._pending
+        assert "q1" in _pending_subids(query_svc_many)
 
         # Wait for timeout check to fire (checks every 10s, but we patched timeout to 0.1s)
         # We need to also reduce the check interval — or just call the check directly
         await asyncio.sleep(0.15)
-        # Manually trigger the check since the task sleeps 10s
-        now = time.monotonic()
-        expired = [
-            subid for subid, sub in query_svc_many._pending.items()
-            if now - sub.last_activity > qmod._GETMORE_TIMEOUT
-        ]
-        for subid in expired:
-            del query_svc_many._pending[subid]
+        # Trigger the check directly since the task sleeps 10s
+        query_svc_many._expire_pending()
 
-        assert "q1" not in query_svc_many._pending
+        assert "q1" not in _pending_subids(query_svc_many)
     finally:
         qmod._GETMORE_TIMEOUT = original_timeout
 
@@ -3892,3 +3891,453 @@ async def test_stream_projection_keeps_the_cause_off_the_row(stream_svc, bus):
     assert msg["cause"] == "redo"
     assert "order_id" not in msg["row"]
     assert "cause" not in msg["row"]
+
+
+# ---------------------------------------------------------------------------
+# Delivery that survives bad peers, bad events and full queues
+# ---------------------------------------------------------------------------
+
+def _order_event(bus, op, oid, qty=1, status="pending"):
+    row = {"id": oid, "symbol": "X", "qty": qty, "status": status, "_mkio_ref": f"r{oid}{qty}"}
+    return bus.make_event("orders", op, row, f"r{oid}{qty}")
+
+
+class GatedWebSocket(MockWebSocket):
+    """A socket whose sends wait on a gate — a peer whose TCP window is full."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+        self.waiting = asyncio.Event()
+
+    async def send_bytes(self, data: bytes) -> None:
+        self.waiting.set()
+        await self.gate.wait()
+        await super().send_bytes(data)
+
+
+async def test_query_listener_survives_disconnect_during_a_send(query_svc, bus):
+    """A subscriber that drops while the listener waits on its send was removed
+    from a list the disconnect had already replaced, and the ValueError ended
+    live updates for every subscriber, present and future."""
+    healthy, stuck = MockWebSocket(), MockWebSocket()
+    await query_svc.on_subscribe(stuck, {"type": "subscribe"})
+    await query_svc.on_subscribe(healthy, {"type": "subscribe"})
+    gated = GatedWebSocket()
+    gated.sent = stuck.sent
+    for sub in query_svc._subscribers:
+        if sub.ws is stuck:
+            sub.ws = gated
+
+    bus.publish([_order_event(bus, "insert", "50")])
+    await asyncio.wait_for(gated.waiting.wait(), 1)
+    await query_svc.on_unsubscribe(gated, {"type": "unsubscribe"})  # the disconnect
+    gated.closed = True
+    gated.gate.set()
+    await asyncio.sleep(0.05)
+
+    assert not query_svc._listener_task.done()
+    bus.publish([_order_event(bus, "insert", "51")])
+    await asyncio.sleep(0.05)
+    ids = [m["row"]["id"] for m in healthy.get_messages() if m["type"] == "update"]
+    assert ids == ["50", "51"]
+
+
+async def _assert_listener_outlives_a_raise(svc, bus, caplog, table):
+    """Nothing guarded the listeners: one exception ended a service's live
+    updates for good, silently. Now it is logged and the loop goes on."""
+    real, calls = svc._on_event, []
+
+    async def flaky(event):
+        calls.append(event)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        await real(event)
+
+    svc._on_event = flaky
+    for i in (1, 2):
+        row = {"id": f"9{i}", "symbol": "X", "qty": 1, "event": "e", "order_id": "1"}
+        bus.publish([bus.make_event(table, "insert", row, f"ref9{i}")])
+        await asyncio.sleep(0.05)
+
+    assert len(calls) == 2
+    assert not svc._listener_task.done()
+    assert "boom" in caplog.text
+
+
+async def test_query_listener_outlives_an_event_that_raises(query_svc, bus, caplog):
+    await _assert_listener_outlives_a_raise(query_svc, bus, caplog, "orders")
+
+
+async def test_stream_listener_outlives_an_event_that_raises(stream_svc, bus, caplog):
+    await _assert_listener_outlives_a_raise(stream_svc, bus, caplog, "audit_log")
+
+
+async def test_subpub_listener_outlives_an_event_that_raises(subpub_svc, bus, caplog):
+    await _assert_listener_outlives_a_raise(subpub_svc, bus, caplog, "orders")
+
+
+async def test_query_change_during_the_snapshot_read_is_delivered(query_svc, bus, db):
+    """The subscriber is pending from before the read, so a change fanned out
+    while the read or the snapshot send is awaited is buffered, not lost."""
+    real_read = db.read
+
+    async def slow_read(sql, params=()):
+        rows = await real_read(sql, params)
+        if sql == query_svc._sql:
+            bus.publish([_order_event(bus, "insert", "60")])
+            await asyncio.sleep(0.05)  # the listener fans it out meanwhile
+        return rows
+
+    db.read = slow_read
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
+    db.read = real_read
+
+    msgs = ws.get_messages()
+    assert [m["type"] for m in msgs] == ["snapshot", "update"]
+    assert msgs[1]["op"] == "insert" and msgs[1]["row"]["id"] == "60"
+    assert query_svc._pending == [] and len(query_svc._subscribers) == 1
+
+
+async def test_query_buffered_insert_of_a_snapshot_row_arrives_as_update(query_svc, bus, db):
+    """The read can land after the commit whose event is still queued: the
+    row is in the snapshot, and its buffered insert must not add it twice."""
+    real_read = db.read
+
+    async def slow_read(sql, params=()):
+        rows = await real_read(sql, params)
+        if sql == query_svc._sql:
+            bus.publish([_order_event(bus, "insert", "1", qty=100)])  # id 1 is in the snapshot
+            await asyncio.sleep(0.05)
+        return rows
+
+    db.read = slow_read
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
+    db.read = real_read
+
+    update = ws.get_messages()[1]
+    assert update["op"] == "update" and update["row"]["id"] == "1"
+
+
+async def test_query_pagination_same_subid_on_two_connections(query_svc_many):
+    """Every page of a UI names its tables alike, so two connections paging
+    at once share a subid; each must get its own pages."""
+    a, b = MockWebSocket(), MockWebSocket()
+    sub = {"type": "subscribe", "maxcount": 2, "subid": "mkui-table-3"}
+    await query_svc_many.on_subscribe(a, sub)
+    await query_svc_many.on_subscribe(b, sub)
+
+    for ws in (a, b, a, b):
+        await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "mkui-table-3"})
+
+    for ws in (a, b):
+        msgs = ws.get_messages()
+        assert [m["type"] for m in msgs] == ["snapshot"] * 3
+        assert sorted(r["id"] for m in msgs for r in m["rows"]) == ["1", "2", "3", "4", "5"]
+    assert len(query_svc_many._subscribers) == 2
+
+
+async def test_query_getmore_unknown_subid_is_a_reset(query_svc_many):
+    ws = MockWebSocket()
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "gone"})
+    await query_svc_many.on_getmore(ws, {"type": "getmore"})
+    gone, missing = ws.get_messages()
+    assert gone["type"] == "nack" and gone["code"] == "reset"
+    assert missing["type"] == "nack" and "code" not in missing
+
+
+def _overflow(bus, svc):
+    """Fill the service's change queue until the bus marks it."""
+    table = svc.config["primary_table"]
+    n = 0
+    while svc._bus_queue not in bus._overflowed:
+        n += 1
+        bus.publish([bus.make_event(table, "update", {"id": "zz", "symbol": "X", "qty": n}, f"of{n}")])
+
+
+async def test_bus_marks_a_full_queue_once(bus):
+    q = bus.subscribe(["orders"], maxsize=2)
+    for i in range(5):
+        bus.publish([bus.make_event("orders", "insert", {"id": str(i)}, f"r{i}")])
+    assert q.qsize() == 2
+    assert bus.take_overflow(q) is True
+    assert bus.take_overflow(q) is False
+
+
+async def test_query_overflow_resets_subscribers(query_svc, bus):
+    """Without a cached result set there is nothing to diff against: each
+    subscriber is reset, and subscribes again for a fresh snapshot."""
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe", "subid": "s1"})
+    ws.clear()
+    _overflow(bus, query_svc)
+    await asyncio.sleep(0.1)
+
+    last = ws.get_messages()[-1]
+    assert last["type"] == "nack" and last["code"] == "reset" and last["subid"] == "s1"
+    assert query_svc._subscribers == []
+    assert not query_svc._listener_task.done()
+
+
+async def test_stream_overflow_reloads_the_buffer_and_resets(stream_svc, bus, db):
+    ws = MockWebSocket()
+    await stream_svc.on_subscribe(ws, {"type": "subscribe", "subid": "s1"})
+    # A row the queue never carried: only the database knows it.
+    await db.write_conn.execute(
+        "INSERT INTO audit_log (event, order_id, _mkio_ref) VALUES ('missed', '9', 'zzz')")
+    await db.write_conn.commit()
+    ws.clear()
+    table = stream_svc.config["primary_table"]
+    while stream_svc._bus_queue not in bus._overflowed:
+        bus.publish([bus.make_event(table, "update", {"id": 1}, "u")])
+    await asyncio.sleep(0.1)
+
+    last = ws.get_messages()[-1]
+    assert last["type"] == "nack" and last["code"] == "reset"
+    assert "missed" in [row["event"] for _, row in stream_svc._buffer]
+
+
+async def test_subpub_overflow_requeries(subpub_svc, bus, db):
+    ws = MockWebSocket()
+    await subpub_svc.on_subscribe(ws, {"type": "subscribe", "topic": "1"})
+    await db.write_conn.execute("UPDATE orders SET qty = 4242 WHERE id = '1'")
+    await db.write_conn.commit()
+    ws.clear()
+    _overflow(bus, subpub_svc)
+    await asyncio.sleep(0.1)
+
+    updates = [m for m in ws.get_messages() if m["type"] == "update"]
+    assert updates and updates[-1]["row"]["qty"] == 4242
+
+
+async def test_query_overflow_with_a_joined_sql_publishes_what_differs(db, bus, writer):
+    """A query over joined tables keeps its result set, so after an overflow
+    it re-runs the SQL and sends the differences: nobody is reset, and the
+    `watch_columns` memo is dropped with the missed events."""
+    await db.write_conn.execute(
+        "CREATE TABLE IF NOT EXISTS symbols ("
+        "symbol TEXT PRIMARY KEY, name TEXT, last INTEGER DEFAULT 0, _mkio_ref TEXT DEFAULT '')"
+    )
+    await db.write_conn.execute("INSERT INTO symbols (symbol, name) VALUES ('AAPL', 'Apple')")
+    await db.write_conn.execute(
+        "INSERT INTO orders (id, symbol, qty, status) VALUES ('1', 'AAPL', 100, 'new')")
+    await db.write_conn.commit()
+    svc = await _query(
+        db, bus, writer, primary_table="orders", watch_tables=["orders", "symbols"],
+        watch_columns={"symbols": ["name"]}, key=["id"],
+        sql="SELECT o.*, s.name AS issuer FROM orders o LEFT JOIN symbols s ON s.symbol = o.symbol",
+    )
+    ws = MockWebSocket()
+    await svc.on_subscribe(ws, {"type": "subscribe"})
+    ws.clear()
+    svc._seen["symbols"]["AAPL"] = ("Apple",)
+
+    # Writes the queue never carried: only the database knows them.
+    await db.write_conn.execute("UPDATE orders SET qty = 777 WHERE id = '1'")
+    await db.write_conn.execute(
+        "INSERT INTO orders (id, symbol, qty, status) VALUES ('2', 'AAPL', 5, 'new')")
+    await db.write_conn.commit()
+    while svc._bus_queue not in bus._overflowed:
+        bus.publish([bus.make_event("symbols", "update", {"symbol": "AAPL", "name": "Apple", "last": 1}, REF)])
+    await asyncio.sleep(0.15)
+
+    got = {(m["op"], m["row"]["id"], m["row"]["qty"]) for m in ws.get_messages()}
+    assert got == {("update", "1", 777), ("insert", "2", 5)}
+    assert all(m["type"] == "update" for m in ws.get_messages())
+    assert len(svc._subscribers) == 1
+    assert svc._seen["symbols"] == {}
+    await svc.stop()
+
+
+async def test_query_overflow_marks_a_paging_subscriber_for_reset(query_svc_many, bus):
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {"type": "subscribe", "maxcount": 2, "subid": "q1"})
+    _overflow(bus, query_svc_many)
+    await asyncio.sleep(0.1)
+    ws.clear()
+
+    await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    (nack,) = ws.get_messages()
+    assert nack["type"] == "nack" and nack["code"] == "reset" and nack["subid"] == "q1"
+    assert query_svc_many._pending == [] and query_svc_many._subscribers == []
+
+
+async def test_query_update_buffer_overflow_during_an_unpaged_snapshot_is_a_reset(query_svc, bus, db):
+    """An unpaged subscriber has no `getmore` to be nacked on: the reset
+    follows its snapshot."""
+    query_svc._max_buffer = 3
+    real_read = db.read
+
+    async def slow_read(sql, params=()):
+        rows = await real_read(sql, params)
+        if sql == query_svc._sql:
+            bus.publish([_order_event(bus, "insert", str(70 + i)) for i in range(6)])
+            await asyncio.sleep(0.05)
+        return rows
+
+    db.read = slow_read
+    ws = MockWebSocket()
+    count = await query_svc.on_subscribe(ws, {"type": "subscribe", "subid": "s1"})
+    db.read = real_read
+
+    kinds = [m["type"] for m in ws.get_messages()]
+    assert kinds == ["snapshot", "nack"]
+    assert ws.get_messages()[1]["code"] == "reset"
+    assert query_svc._subscribers == [] and query_svc._pending == []
+    assert count == 1
+
+
+async def test_query_snapshot_only_subscriber_is_not_buffered_for(query_svc_many, bus):
+    ws = MockWebSocket()
+    await query_svc_many.on_subscribe(ws, {"type": "subscribe", "maxcount": 2, "subid": "q1", "updates": False})
+    bus.publish([_order_event(bus, "insert", "80")])
+    await asyncio.sleep(0.05)
+    (sub,) = query_svc_many._pending
+    assert sub.buffered_updates == []
+
+    for _ in range(2):
+        await query_svc_many.on_getmore(ws, {"type": "getmore", "subid": "q1"})
+    assert [m["type"] for m in ws.get_messages()] == ["snapshot"] * 3
+    assert query_svc_many._pending == [] and query_svc_many._subscribers == []
+
+
+async def test_query_unsubscribe_leaves_the_same_subid_on_another_connection(query_svc_many):
+    a, b = MockWebSocket(), MockWebSocket()
+    sub = {"type": "subscribe", "maxcount": 2, "subid": "mkui-table-3"}
+    await query_svc_many.on_subscribe(a, sub)
+    await query_svc_many.on_subscribe(b, sub)
+
+    removed = await query_svc_many.on_unsubscribe(a, {"type": "unsubscribe", "subid": "mkui-table-3"})
+    assert removed == 1
+    assert [s.ws for s in query_svc_many._pending] == [b]
+
+    a.clear()
+    await query_svc_many.on_getmore(a, {"type": "getmore", "subid": "mkui-table-3"})
+    assert a.get_messages()[0]["type"] == "nack"  # a's is gone; b's pages on
+    await query_svc_many.on_getmore(b, {"type": "getmore", "subid": "mkui-table-3"})
+    assert b.get_messages()[-1]["type"] == "snapshot"
+
+
+async def test_query_buffered_changes_keep_their_order_and_kind(query_svc, bus, db):
+    """insert → update → delete → insert of one new row, all during the read:
+    delivered in that order, the second insert still an insert."""
+    real_read = db.read
+
+    async def slow_read(sql, params=()):
+        rows = await real_read(sql, params)
+        if sql == query_svc._sql:
+            for op, qty in (("insert", 1), ("update", 2), ("delete", 2), ("insert", 3)):
+                bus.publish([_order_event(bus, op, "90", qty=qty)])
+            await asyncio.sleep(0.05)
+        return rows
+
+    db.read = slow_read
+    ws = MockWebSocket()
+    await query_svc.on_subscribe(ws, {"type": "subscribe"})
+    db.read = real_read
+
+    ops = [(m["op"], m["row"].get("qty")) for m in ws.get_messages()[1:]]
+    assert ops == [("insert", 1), ("update", 2), ("delete", 2), ("insert", 3)]
+
+
+async def _assert_survives_disconnect_during_a_send(svc, bus, subscribe, event, table):
+    """The race that ended query's listener, for the other two services."""
+    healthy, stuck = MockWebSocket(), MockWebSocket()
+    await svc.on_subscribe(stuck, subscribe)
+    await svc.on_subscribe(healthy, subscribe)
+    gated = GatedWebSocket()
+    for sub in svc._subscribers:
+        if sub.ws is stuck:
+            sub.ws = gated
+    healthy.clear()
+
+    bus.publish([bus.make_event(table, "insert", event(1), "rA")])
+    await asyncio.wait_for(gated.waiting.wait(), 1)
+    await svc.on_unsubscribe(gated, {"type": "unsubscribe"})
+    gated.closed = True
+    gated.gate.set()
+    await asyncio.sleep(0.05)
+    bus.publish([bus.make_event(table, "insert", event(2), "rB")])
+    await asyncio.sleep(0.05)
+
+    assert not svc._listener_task.done()
+    assert len([m for m in healthy.get_messages() if m["type"] == "update"]) == 2
+    assert [s.ws for s in svc._subscribers] == [healthy]
+
+
+async def test_stream_listener_survives_disconnect_during_a_send(stream_svc, bus):
+    await _assert_survives_disconnect_during_a_send(
+        stream_svc, bus, {"type": "subscribe"},
+        lambda i: {"id": 100 + i, "event": f"late_{i}", "order_id": "1"}, "audit_log")
+
+
+async def test_subpub_listener_survives_disconnect_during_a_send(subpub_svc, bus):
+    await _assert_survives_disconnect_during_a_send(
+        subpub_svc, bus, {"type": "subscribe", "topic": "1"},
+        lambda i: {"id": "1", "symbol": "AAPL", "qty": 500 + i, "status": "pending"}, "orders")
+
+
+async def test_stream_resync_does_not_buffer_a_reloaded_row_twice(stream_svc, bus, db):
+    """The reload reads rows whose insert events may still be queued behind
+    the overflow; appended again they would reach a resuming client twice."""
+    await db.write_conn.execute(
+        "INSERT INTO audit_log (event, order_id, _mkio_ref) VALUES ('racy', '9', 'zzz-racy')")
+    await db.write_conn.commit()
+    real_load = stream_svc._load_buffer
+
+    async def load_then_more():
+        await real_load()
+        # Its event arrives after the reload that already read the row.
+        bus.publish([bus.make_event("audit_log", "insert", {"id": 99, "event": "racy", "order_id": "9"}, "zzz-racy")])
+
+    stream_svc._load_buffer = load_then_more
+    while stream_svc._bus_queue not in bus._overflowed:
+        bus.publish([bus.make_event("audit_log", "update", {"id": 1}, "u")])
+    await asyncio.sleep(0.15)
+
+    assert [row["event"] for _, row in stream_svc._buffer].count("racy") == 1
+    assert stream_svc._resynced == set()  # let go once the queue ran dry
+
+    bus.publish([bus.make_event("audit_log", "insert", {"id": 100, "event": "fresh", "order_id": "9"}, "zzz-zfresh")])
+    await asyncio.sleep(0.05)
+    assert [row["event"] for _, row in stream_svc._buffer][-1] == "fresh"
+
+
+async def test_stream_and_subpub_subscribers_are_live_before_anything_else_is_awaited(stream_svc, subpub_svc):
+    """Registered right after the snapshot send: a monitor notification that
+    yields must not open a window for a change to slip through."""
+    for svc, msg in ((stream_svc, {"type": "subscribe"}), (subpub_svc, {"type": "subscribe", "topic": "1"})):
+        seen: list[int] = []
+
+        async def notifier(name, direction, data, svc=svc, seen=seen):
+            seen.append(len(svc._subscribers))
+
+        svc._monitor_notifier = notifier
+        await svc.on_subscribe(MockWebSocket(), msg)
+        assert seen == [1], svc.name
+
+
+async def test_bus_unsubscribe_forgets_the_overflow_mark(bus):
+    q = bus.subscribe(["orders"], maxsize=1)
+    for i in range(3):
+        bus.publish([bus.make_event("orders", "insert", {"id": str(i)}, f"r{i}")])
+    bus.unsubscribe(["orders"], q)
+    assert bus.take_overflow(q) is False
+
+
+async def test_bus_overflow_is_per_queue(bus, caplog):
+    small, big = bus.subscribe(["orders"], maxsize=1), bus.subscribe(["orders"], maxsize=100)
+    for i in range(5):
+        bus.publish([bus.make_event("orders", "insert", {"id": str(i)}, f"r{i}")])
+    assert bus.take_overflow(small) is True and bus.take_overflow(big) is False
+    assert big.qsize() == 5
+    assert caplog.text.count("change queue full") == 1  # once per overflow, not per event
+
+
+def test_make_nack_code_is_optional():
+    from mkio.ws_protocol import make_nack
+    assert "code" not in loads(make_nack("svc", "no"))
+    reset = loads(make_nack("svc", "lost my place", subid="s1", code="reset"))
+    assert reset == {"type": "nack", "service": "svc", "message": "lost my place", "subid": "s1", "code": "reset"}

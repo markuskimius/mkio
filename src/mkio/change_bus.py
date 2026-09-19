@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
 
 from mkio._json import dumps
+
+logger = logging.getLogger("mkio.bus")
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +38,8 @@ class ChangeBus:
     def __init__(self) -> None:
         # table_name -> set of asyncio.Queue
         self._subscribers: dict[str, set[asyncio.Queue[ChangeEvent]]] = defaultdict(set)
+        # Queues that missed an event since their owner last asked.
+        self._overflowed: set[asyncio.Queue[ChangeEvent]] = set()
 
     def subscribe(self, tables: list[str], maxsize: int = 4096) -> asyncio.Queue[ChangeEvent]:
         """Create a bounded queue subscribed to changes on the given tables."""
@@ -47,19 +52,31 @@ class ChangeBus:
         """Remove a queue from the given tables."""
         for table in tables:
             self._subscribers[table].discard(q)
+        self._overflowed.discard(q)
 
     def has_subscribers(self, table: str) -> bool:
         """True if anything is listening for changes on ``table``."""
         return bool(self._subscribers.get(table))
 
     def publish(self, events: list[ChangeEvent]) -> None:
-        """Fan out events to subscribers. Drops on full queue (backpressure)."""
+        """Fan out events to subscribers. A full queue misses the event and
+        is marked, so its owner can resync instead of serving a stream with a
+        hole in it (see :meth:`take_overflow`)."""
         for event in events:
             for q in self._subscribers.get(event.table, ()):
                 try:
                     q.put_nowait(event)
                 except asyncio.QueueFull:
-                    pass  # Backpressure: slow consumer misses this event
+                    if q not in self._overflowed:
+                        logger.warning("change queue full on %r: events missed, resync due", event.table)
+                        self._overflowed.add(q)
+
+    def take_overflow(self, q: asyncio.Queue[ChangeEvent]) -> bool:
+        """Whether ``q`` missed an event since the last call; clears the mark."""
+        if q in self._overflowed:
+            self._overflowed.discard(q)
+            return True
+        return False
 
     @staticmethod
     def make_event(

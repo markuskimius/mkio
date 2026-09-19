@@ -661,7 +661,7 @@ async def test_info_reports_versioned_tables_and_the_convention(app):
     assert row["history_suffix"] == HISTORY_SUFFIX
     # History tables themselves stay out of the listing.
     assert row["tables"] == ["orders", "plain"]
-    assert row["protocol"] == "1.2"
+    assert row["protocol"] == "1.3"
 
 
 async def test_schema_query_points_at_the_history_table(app):

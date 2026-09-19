@@ -35,6 +35,8 @@ _DEFAULTS = {
     "backup_on_startup": False,
     "backup_dir": "./backups",
     "event_loop": "auto",
+    "ws_heartbeat_s": 30,
+    "ws_send_buffer_mb": 16,
 }
 
 # What run() builds its event loop from; resolved by mkio.app.loop_factory.
@@ -112,6 +114,14 @@ def load_config(source: str | Path | dict[str, Any]) -> dict[str, Any]:
         )
     if el == "proactor" and sys.platform != "win32":
         raise ValueError("event_loop = 'proactor' is Windows only")
+
+    # Validate the websocket knobs: 0 turns the heartbeat off
+    for key in ("ws_heartbeat_s", "ws_send_buffer_mb"):
+        value = config.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ValueError(f"{key} must be a number >= 0, got {value!r}")
+    if not config["ws_send_buffer_mb"]:
+        raise ValueError("ws_send_buffer_mb must be greater than 0")
 
     config.setdefault("tables", {})
     config.setdefault("services", {})

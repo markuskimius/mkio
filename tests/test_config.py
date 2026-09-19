@@ -52,6 +52,17 @@ def test_defaults_applied():
     assert config["event_loop"] == "auto"
 
 
+def test_websocket_knobs_validated():
+    config = load_config({})
+    assert config["ws_heartbeat_s"] == 30 and config["ws_send_buffer_mb"] == 16
+    assert load_config({"ws_heartbeat_s": 0})["ws_heartbeat_s"] == 0  # off
+    assert load_config({"ws_send_buffer_mb": 0.5})["ws_send_buffer_mb"] == 0.5
+    for bad in ({"ws_heartbeat_s": -1}, {"ws_heartbeat_s": "30"}, {"ws_heartbeat_s": True},
+                {"ws_send_buffer_mb": 0}, {"ws_send_buffer_mb": -4}):
+        with pytest.raises(ValueError, match="ws_"):
+            load_config(bad)
+
+
 def test_event_loop_validated(monkeypatch):
     """`event_loop` names how run() builds its loop; a value outside the four,
     or "proactor" off Windows (the loop exists only there), fails at load."""

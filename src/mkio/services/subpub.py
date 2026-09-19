@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -13,8 +14,10 @@ from mkio.change_bus import ChangeEvent
 from mkio.services.base import Service
 from mkio.ws_protocol import make_error, make_snapshot, make_update
 
+logger = logging.getLogger("mkio.subpub")
 
-@dataclass
+
+@dataclass(eq=False)
 class Subscriber:
     ws: WebSocketResponse
     topic: Any
@@ -119,8 +122,10 @@ class SubPubService(Service):
 
         resp = make_snapshot(None, self.name, rows, subid=subid)
         await ws.send_bytes(resp)
-        await self.notify_monitors("out", resp)
+        # Live before anything else is awaited: a change in between would
+        # be in neither the snapshot nor these subscribers' feed.
         self._subscribers.extend(subs)
+        await self.notify_monitors("out", resp)
         return len(subs)
 
     def _build_row(self, sub: Subscriber, row: dict[str, Any], *, exists: bool) -> dict[str, Any]:
@@ -160,19 +165,25 @@ class SubPubService(Service):
         assert self._bus_queue is not None
         while True:
             event: ChangeEvent = await self._bus_queue.get()
-
-            if event.table == self._table:
-                if not self._needs_requery:
-                    topic_val = str(event.row.get(self._topic_field))
-                    notify = self._update_cache(event, topic_val)
-                    if notify is not None:
-                        await self._notify_topic(
-                            topic_val, exists=notify, cause=event.cause
-                        )
+            # One bad event must not end the feed for every subscriber, now
+            # and to come: whatever it raises is logged and the loop goes on.
+            try:
+                if self.bus.take_overflow(self._bus_queue):
+                    # Events were missed: the database says what moved.
+                    await self._requery_and_notify(None)
                 else:
-                    await self._requery_and_notify(event.cause)
-            else:
-                await self._requery_and_notify(event.cause)
+                    await self._on_event(event)
+            except Exception:
+                logger.exception("subpub service %r: change not delivered", self.name)
+
+    async def _on_event(self, event: ChangeEvent) -> None:
+        if event.table == self._table and not self._needs_requery:
+            topic_val = str(event.row.get(self._topic_field))
+            notify = self._update_cache(event, topic_val)
+            if notify is not None:
+                await self._notify_topic(topic_val, exists=notify, cause=event.cause)
+        else:
+            await self._requery_and_notify(event.cause)
 
     async def _requery_and_notify(self, cause: str | None) -> None:
         """Refresh the whole cache and notify topics whose row actually moved."""
@@ -215,7 +226,7 @@ class SubPubService(Service):
         """
         dead: list[Subscriber] = []
         notified_monitor = False
-        for sub in self._subscribers:
+        for sub in list(self._subscribers):
             if sub.topic != topic_val:
                 continue
             if exists:
@@ -231,8 +242,10 @@ class SubPubService(Service):
                     notified_monitor = True
             except (ConnectionError, RuntimeError):
                 dead.append(sub)
-        for sub in dead:
-            self._subscribers.remove(sub)
+        if dead:
+            # By identity, and against the list as it stands now: a
+            # disconnect may have replaced it while a send was awaited.
+            self._subscribers = [s for s in self._subscribers if not any(s is d for d in dead)]
 
     async def _requery_all(self) -> None:
         """Re-query entire dataset (for secondary table changes)."""

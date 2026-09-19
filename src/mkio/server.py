@@ -28,6 +28,7 @@ from mkio.services.subpub import SubPubService
 from mkio.services.transaction import TransactionService
 from mkio.writer import WriteBatcher
 from mkio.migration import _parse_config_columns
+from mkio.ws_outbox import OutboxWebSocket
 from mkio.ws_protocol import make_error, make_nack, parse_message
 
 log = logging.getLogger("mkio.server")
@@ -842,7 +843,13 @@ async def _check_service_access(
 
 
 async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
-    ws = web.WebSocketResponse()
+    cfg = request.app["config"]
+    ws = OutboxWebSocket(
+        # A peer that stops answering pings (a laptop asleep, a dead route)
+        # is closed instead of holding its subscriptions forever.
+        heartbeat=cfg.get("ws_heartbeat_s", 30) or None,
+        send_buffer=int(cfg.get("ws_send_buffer_mb", 16) * 1024 * 1024),
+    )
     await ws.prepare(request)
     request.app["websockets"].add(ws)
 
@@ -1035,6 +1042,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
         for svc_name in monitoring:
             monitors[svc_name].discard(ws)
         request.app["websockets"].discard(ws)
+        await ws.stop_outbox()
         # Disconnect hooks
         if mkio_app is not None:
             for hook in mkio_app._disconnect_hooks:

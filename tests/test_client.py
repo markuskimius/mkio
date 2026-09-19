@@ -173,10 +173,13 @@ async def test_client_subscribe_tracks_ref(fake_server):
 class NackServer:
     """Server that nacks all subscribe requests."""
 
-    def __init__(self) -> None:
+    def __init__(self, code: str | None = None, resets: int = 0) -> None:
         self.app = web.Application()
         self.app.router.add_get("/ws", self.ws_handler)
         self.subscribe_count = 0
+        self.subscribes: list[dict] = []
+        self.code = code      # sent on every nack
+        self.resets = resets  # nack this many subscribes, then serve a snapshot
 
     async def ws_handler(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()
@@ -190,11 +193,21 @@ class NackServer:
 
                 if msg_type == "subscribe":
                     self.subscribe_count += 1
+                    self.subscribes.append(data)
+                    if self.resets and self.subscribe_count > self.resets:
+                        snap = {"type": "snapshot", "service": service,
+                                "rows": [{"id": "1"}], "hasmore": False}
+                        if data.get("subid"):
+                            snap["subid"] = data["subid"]
+                        await ws.send_bytes(dumps(snap))
+                        continue
                     resp = {
                         "type": "nack",
                         "service": service,
                         "message": "Protocol mismatch",
                     }
+                    if self.code:
+                        resp["code"] = self.code
                     subid = data.get("subid")
                     if subid:
                         resp["subid"] = subid
@@ -208,6 +221,47 @@ async def nack_server(aiohttp_server):
     server_obj = NackServer()
     server = await aiohttp_server(server_obj.app)
     yield server, server_obj
+
+
+async def test_reset_nack_subscribes_again(aiohttp_server):
+    """A nack coded "reset" means the server lost its place, not that the
+    subscription is wrong: the client sends it again and carries on."""
+    server_obj = NackServer(code="reset", resets=2)
+    server = await aiohttp_server(server_obj.app)
+
+    async with MkioClient(f"ws://localhost:{server.port}/ws", reconnect=False) as client:
+        async for msg in client.subscribe("test_service", "query"):
+            assert msg["type"] == "snapshot"
+            break
+        assert server_obj.subscribe_count == 3
+        assert client._subscriptions["test_service"].resets == 0
+
+
+async def test_reset_nack_resubscribes_a_stream_from_its_ref(aiohttp_server):
+    """A reset stream picks up where it was: the subscribe goes out again
+    carrying the ref, filter and subid it had."""
+    server_obj = NackServer(code="reset", resets=1)
+    server = await aiohttp_server(server_obj.app)
+
+    async with MkioClient(f"ws://localhost:{server.port}/ws", reconnect=False) as client:
+        async for msg in client.subscribe("feed", "stream", ref="ref-5", subid="s1", filter="x > 1"):
+            assert msg["type"] == "snapshot"
+            break
+    first, again = server_obj.subscribes
+    assert again == first
+    assert again["ref"] == "ref-5" and again["subid"] == "s1" and again["filter"] == "x > 1"
+
+
+async def test_reset_nack_gives_up_after_a_few(aiohttp_server):
+    server_obj = NackServer(code="reset")
+    server = await aiohttp_server(server_obj.app)
+
+    async with MkioClient(f"ws://localhost:{server.port}/ws", reconnect=False) as client:
+        async for msg in client.subscribe("test_service", "query"):
+            assert msg["type"] == "nack" and msg["code"] == "reset"
+            break
+        assert server_obj.subscribe_count == 4  # the first, then three more
+        assert "test_service" not in client._subscriptions
 
 
 async def test_nack_removes_subscription(nack_server):

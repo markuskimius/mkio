@@ -156,6 +156,11 @@ function _nullProtoClone(v) {
 // MkioClient
 // ---------------------------------------------------------------------------
 
+// A subscription the server resets (nack code "reset") is sent again, this
+// many times in a row at most, RESET_DELAY_MS further apart each time.
+const MAX_RESETS = 3;
+const RESET_DELAY_MS = 250;
+
 class MkioClient {
   /**
    * @param {string} url - WebSocket URL (e.g., "ws://localhost:8080/ws")
@@ -534,11 +539,15 @@ class MkioClient {
       return;
     }
 
-    // Nack: deliver to callback and remove to prevent reconnect retry
+    // Nack: deliver to callback and remove to prevent reconnect retry —
+    // unless the server only lost its place (code "reset": a buffer
+    // overflowed, a page sequence timed out), which subscribing again puts
+    // right. A few tries, so a server that keeps resetting still surfaces.
     if (type === "nack") {
       const nackKey = data.subid || service;
       for (const [key, sub] of this._subscriptions) {
         if ((sub.subid || sub.service) === nackKey) {
+          if (data.code === "reset" && this._resetSubscription(key, sub)) continue;
           this._subscriptions.delete(key);
           if (sub.onNack) sub.onNack(data.message, data);
         }
@@ -565,6 +574,7 @@ class MkioClient {
       }
       if (data.ref) sub.ref = data.ref;
       if (type === "snapshot") {
+        if (!data.hasmore) sub._resets = 0;  // a whole snapshot: the reset took
         if (sub.onPage && sub.maxcount) {
           sub.onPage(data.rows, { hasmore: !!data.hasmore, ref: data.ref || null });
         } else if (sub.maxcount && data.hasmore) {
@@ -602,6 +612,18 @@ class MkioClient {
         });
       }
     }
+  }
+
+  _resetSubscription(key, sub) {
+    sub._resets = (sub._resets || 0) + 1;
+    if (sub._resets > MAX_RESETS) return false;
+    sub._snapshotRows = [];
+    setTimeout(() => {
+      // Still ours, and still connected: a reconnect resubscribes by itself.
+      if (this._subscriptions.get(key) !== sub) return;
+      if (this._ws && this._ws.readyState === WebSocket.OPEN) this._sendSubscribe(sub);
+    }, RESET_DELAY_MS * sub._resets);
+    return true;
   }
 
   _sendSubscribe(sub) {

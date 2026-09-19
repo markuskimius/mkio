@@ -94,6 +94,7 @@ For programmatic control (custom routes, non-blocking lifecycle), see [Programma
 - **Write batching** — hundreds of writes committed in a single SQLite transaction for high throughput
 - **Reconnection recovery** — stream services use ref-based cursor reconnection persisted across server restarts via `_mkio_ref` column; subpub and query always replay a full snapshot
 - **Field projection** — subscribers can request specific fields per subscription, reducing payload size. Framework fields (`_mkio_ref`, `_mkio_row`, `_mkio_topic`, `_mkio_exists`) are always preserved through projection
+- **Delivery that survives slow peers** — every connection has its own send queue, so a peer that stops reading never holds up the others; dead peers are pinged out, a change can't fall between a snapshot and the live feed, a listener outlives a bad event, and a full queue resyncs from the database instead of dropping changes ([details](#slow-peers-lost-places-and-resets))
 - **Client libraries** — Python and JavaScript clients with auto-reconnect and ref tracking
 - **Graceful shutdown** — drains pending writes, closes the reader, checkpoints WAL, clean close
 - **Service monitoring** — tap into any service's inbound/outbound message flow via CLI or WebSocket
@@ -967,7 +968,7 @@ Reply:
     "name": "order-book-dev",
     "version": "2.1.0",
     "mkio": "0.5.0",
-    "protocol": "1.2",
+    "protocol": "1.3",
     "expr": "1",
     "services": {"orders": "transaction", "last_trade": "subpub", "all_orders": "query"},
     "tables": ["orders", "audit_log"],
@@ -1020,7 +1021,7 @@ Reply:
 {
   "type": "reply", "service": "_mkio", "reqid": "v1",
   "row": {
-    "name": "order-book-dev", "version": "2.3.0", "mkio": "1.0.0", "protocol": "1.2", "expr": "1",
+    "name": "order-book-dev", "version": "2.3.0", "mkio": "1.0.0", "protocol": "1.3", "expr": "1",
     "compatible": true,
     "compatibility": {"version": true, "protocol": true, "mkio": true, "expr": true},
     ...
@@ -1135,6 +1136,22 @@ Connect to `/ws` (general) or `/ws/{service_name}` (per-service).
 
 {"service": "search", "type": "request", "reqid": "r2", "data": {"symbol": "AAPL"}}
 // → {"type": "reply", "service": "search", "reqid": "r2", "rows": [{"symbol": "AAPL", ...}]}
+```
+
+### Slow peers, lost places and resets
+
+A subscription is a snapshot followed by every change after it, and since 1.3.0 the server keeps that true when a peer or a queue cannot keep up:
+
+- **No peer holds up another.** A send queues the frame on its connection and returns; one task per connection writes the queue to the socket, in order, across every service on it. A peer that stops reading — a laptop asleep with a page open — backs up only its own queue. A backlog past `ws_send_buffer_mb` (default `16`) closes that connection with code 1013, and the client reconnects for a fresh snapshot rather than being fed a stream with holes in it. A frame over a sixteenth of the buffer — a snapshot — is sized by the data rather than the peer's pace, and does not count towards it.
+- **Dead peers are dropped.** The server pings every `ws_heartbeat_s` seconds (default `30`, `0` turns it off) and closes a connection that does not answer, so a half-open socket does not hold its subscriptions forever. Browsers answer pings by themselves; a Python client answers while it is reading.
+- **Nothing falls between the snapshot and the feed.** A query subscriber is registered before its snapshot is read, and changes committed while the snapshot is read, sent or paged are buffered and delivered after it. A buffered insert of a row the snapshot already carried arrives as an update.
+- **A listener outlives a bad event.** Whatever a change raises inside a service is logged and the feed goes on.
+- **A full queue resyncs.** If a service's change queue overflows, the missed events are made good from the database: SubPub and a Query over joined tables re-run their SQL and publish what differs; a plain Query and a Stream reset their subscribers.
+
+A **reset** is a nack with `"code": "reset"`: the subscription is sound, but the server lost its place — a buffer overflowed, a `getmore` named a page sequence that had timed out. Both client libraries answer it by subscribing again (a stream from the last ref it holds), three times in a row at most before the nack is surfaced like any other. Any other nack still means the request itself was refused, and is not retried.
+
+```json
+{"type": "nack", "service": "all_orders", "subid": "q1", "code": "reset", "message": "subscription reset: update buffer overflow"}
 ```
 
 ## Client Libraries

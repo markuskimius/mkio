@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -13,10 +14,12 @@ from mkio.expr import compile_filter
 from mkio._ref import compare_refs
 from mkio.change_bus import ChangeEvent
 from mkio.services.base import Service
-from mkio.ws_protocol import make_snapshot, make_update
+from mkio.ws_protocol import make_nack, make_snapshot, make_update
+
+logger = logging.getLogger("mkio.stream")
 
 
-@dataclass
+@dataclass(eq=False)
 class StreamSubscriber:
     ws: WebSocketResponse
     filter_fn: Callable[[dict[str, Any]], bool] | None = None
@@ -51,6 +54,9 @@ class StreamService(Service):
         # run).  Filtered out on subscribe; the buffer is rebuilt without them
         # once the set grows, so a burst of deletes costs one pass.
         self._deleted: set[str] = set()
+        # Refs a resync loaded from the database, whose change events may
+        # still be queued behind it; emptied once the queue is.
+        self._resynced: set[str] = set()
         self._subscribers: list[StreamSubscriber] = []
         self._bus_queue: asyncio.Queue[ChangeEvent] | None = None
         self._listener_task: asyncio.Task[None] | None = None
@@ -67,7 +73,14 @@ class StreamService(Service):
         return [(v, r) for v, r in self._buffer if v not in self._deleted]
 
     async def start(self) -> None:
-        # Pre-fill buffer with recent rows, using stored _mkio_ref for
+        await self._load_buffer()
+
+        watch = self.config.get("watch_tables", [self._table])
+        self._bus_queue = self.bus.subscribe(watch)
+        self._listener_task = asyncio.create_task(self._listen_changes())
+
+    async def _load_buffer(self) -> None:
+        # Fill the buffer with recent rows, using stored _mkio_ref for
         # consistent refs across restarts
         if "JOIN" not in self._sql.upper():
             sql = f"{self._sql} ORDER BY rowid DESC LIMIT ?"
@@ -77,14 +90,12 @@ class StreamService(Service):
         if "JOIN" not in self._sql.upper():
             rows.reverse()
         from mkio._ref import next_ref
+        self._buffer.clear()
+        self._deleted.clear()
         for row in rows:
             ref = row.get("_mkio_ref", "")
             ver = ref if ref else next_ref()
             self._buffer.append((ver, row))
-
-        watch = self.config.get("watch_tables", [self._table])
-        self._bus_queue = self.bus.subscribe(watch)
-        self._listener_task = asyncio.create_task(self._listen_changes())
 
     async def stop(self) -> None:
         if self._listener_task:
@@ -170,8 +181,10 @@ class StreamService(Service):
         latest_ref = buffered[-1][0] if buffered else ""
         resp = make_snapshot(latest_ref, self.name, [r for _, r in rows_to_send], subid=subid, hasmore=False)
         await ws.send_bytes(resp)
-        await self.notify_monitors("out", resp)
+        # Live before anything else is awaited: a row appended in between
+        # would be in neither the snapshot nor this subscriber's feed.
         self._subscribers.append(sub)
+        await self.notify_monitors("out", resp)
         return 1
 
     @staticmethod
@@ -194,43 +207,74 @@ class StreamService(Service):
         assert self._bus_queue is not None
         while True:
             event: ChangeEvent = await self._bus_queue.get()
+            # One bad event must not end the feed for every subscriber, now
+            # and to come: whatever it raises is logged and the loop goes on.
+            try:
+                if self.bus.take_overflow(self._bus_queue):
+                    await self._resync()
+                else:
+                    await self._on_event(event)
+            except Exception:
+                logger.exception("stream service %r: change not delivered", self.name)
+            if self._resynced and self._bus_queue.empty():
+                self._resynced.clear()
 
-            if event.op == "delete":
-                ref = (event.row or {}).get("_mkio_ref")
-                if ref:
-                    self._deleted.add(ref)
-                    if len(self._deleted) * 10 > self._buffer_size:
-                        self._compact()
+    async def _resync(self) -> None:
+        """The change queue overflowed, so rows were missed: reload the
+        buffer and reset each subscriber, which subscribes again from the
+        last ref it holds and is sent what it lacks."""
+        while not self._bus_queue.empty():
+            self._bus_queue.get_nowait()
+        await self._load_buffer()
+        self._resynced = {ver for ver, _ in self._buffer}
+        subscribers, self._subscribers = self._subscribers, []
+        for sub in subscribers:
+            resp = make_nack(self.name, "subscription reset: change queue overflow",
+                             subid=sub.subid, code="reset")
+            try:
+                await sub.ws.send_bytes(resp)
+            except (ConnectionError, RuntimeError):
                 continue
-            # Only inserts append to an append-only table
-            if event.op != "insert":
+
+    async def _on_event(self, event: ChangeEvent) -> None:
+        if event.op == "delete":
+            ref = (event.row or {}).get("_mkio_ref")
+            if ref:
+                self._deleted.add(ref)
+                if len(self._deleted) * 10 > self._buffer_size:
+                    self._compact()
+            return
+        # Only inserts append to an append-only table
+        if event.op != "insert" or event.ref in self._resynced:
+            return
+
+        row = event.row
+        # Re-query if using JOINs
+        if "JOIN" in self._sql.upper():
+            rows = await self.db.read(self._sql + " ORDER BY rowid DESC LIMIT 1")
+            if rows:
+                row = rows[0]
+
+        self._buffer.append((event.ref, row))
+
+        # Fan out
+        dead: list[StreamSubscriber] = []
+        notified_monitor = False
+        for sub in list(self._subscribers):
+            out_row = sub.formatter(row) if sub.formatter else row
+            if sub.filter_fn and not sub.filter_fn(out_row):
                 continue
-
-            row = event.row
-            # Re-query if using JOINs
-            if "JOIN" in self._sql.upper():
-                rows = await self.db.read(self._sql + " ORDER BY rowid DESC LIMIT 1")
-                if rows:
-                    row = rows[0]
-
-            self._buffer.append((event.ref, row))
-
-            # Fan out
-            dead: list[StreamSubscriber] = []
-            notified_monitor = False
-            for sub in self._subscribers:
-                out_row = sub.formatter(row) if sub.formatter else row
-                if sub.filter_fn and not sub.filter_fn(out_row):
-                    continue
-                try:
-                    msg_bytes = make_update(self.name, ref=event.ref, op=event.op,
-                                            row=self._project(out_row, sub.fields),
-                                            subid=sub.subid, cause=event.cause)
-                    await sub.ws.send_bytes(msg_bytes)
-                    if not notified_monitor:
-                        await self.notify_monitors("out", msg_bytes)
-                        notified_monitor = True
-                except (ConnectionError, RuntimeError):
-                    dead.append(sub)
-            for sub in dead:
-                self._subscribers.remove(sub)
+            try:
+                msg_bytes = make_update(self.name, ref=event.ref, op=event.op,
+                                        row=self._project(out_row, sub.fields),
+                                        subid=sub.subid, cause=event.cause)
+                await sub.ws.send_bytes(msg_bytes)
+                if not notified_monitor:
+                    await self.notify_monitors("out", msg_bytes)
+                    notified_monitor = True
+            except (ConnectionError, RuntimeError):
+                dead.append(sub)
+        if dead:
+            # By identity, and against the list as it stands now: a
+            # disconnect may have replaced it while a send was awaited.
+            self._subscribers = [s for s in self._subscribers if not any(s is d for d in dead)]

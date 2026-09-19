@@ -87,7 +87,11 @@ TEST_CONFIG = {
 
 def _build_app() -> web.Application:
     """Build an aiohttp app with the test config."""
-    cfg = load_config(TEST_CONFIG)
+    return _build_app_from(TEST_CONFIG)
+
+
+def _build_app_from(config: dict[str, Any]) -> web.Application:
+    cfg = load_config(config)
     app = web.Application()
     app["config"] = cfg
     app.on_startup.append(_on_startup)
@@ -830,3 +834,107 @@ async def test_query_pagination_auto_subid_integration(client):
 
     await ws.close()
     await ws2.close()
+
+
+# ---- A peer that stops reading ---------------------------------------------
+
+async def _client_for(aiohttp_client, **overrides):
+    import copy
+    cfg = copy.deepcopy(TEST_CONFIG)
+    cfg.update(overrides)
+    app = _build_app_from(cfg)
+    return app, await aiohttp_client(app)
+
+
+async def _subscribe(ws, **extra) -> dict:
+    await ws.send_bytes(dumps({"service": "all_orders", "type": "subscribe", "protocol": "query", **extra}))
+    return loads((await ws.receive()).data)
+
+
+async def test_stalled_peer_does_not_hold_up_the_others(aiohttp_client):
+    """The listener sent to each subscriber in turn and waited on the socket,
+    so one peer that stopped reading froze the service for all of them once
+    its buffers filled — and its disconnect then ended the listener."""
+    app, client = await _client_for(aiohttp_client)
+    healthy, stalled, tx = [await client.ws_connect("/ws") for _ in range(3)]
+    await _subscribe(healthy)
+    await _subscribe(stalled)
+    stalled._conn.transport.pause_reading()
+
+    got: list[str] = []
+
+    async def read() -> None:
+        async for m in healthy:
+            got.append(loads(m.data)["row"]["id"])
+
+    reader = asyncio.create_task(read())
+    pad = "X" * 20000
+    n = 250  # ~5 MB to the stalled peer: far past what its socket buffers hold
+    for i in range(n):
+        await tx.send_bytes(dumps({"service": "add_order", "ref": f"r{i}",
+                                   "data": {"id": f"o{i}", "symbol": pad, "qty": i}}))
+        await tx.receive()
+    await asyncio.sleep(0.3)
+    assert len(got) == n
+
+    stalled._conn.transport.abort()
+    await asyncio.sleep(0.2)
+    svc = app["services"]["all_orders"]
+    assert not svc._listener_task.done()
+    await tx.send_bytes(dumps({"service": "add_order", "ref": "last",
+                               "data": {"id": "last", "symbol": "A", "qty": 1}}))
+    await tx.receive()
+    await asyncio.sleep(0.2)
+    assert got[-1] == "last"
+    reader.cancel()
+
+
+async def test_peer_too_far_behind_is_closed(aiohttp_client):
+    """A backlog past ws_send_buffer_mb closes that connection — the client
+    reconnects for a fresh snapshot — and leaves the others alone."""
+    app, client = await _client_for(aiohttp_client, ws_send_buffer_mb=1)
+    healthy, stalled, tx = [await client.ws_connect("/ws") for _ in range(3)]
+    await _subscribe(healthy)
+    await _subscribe(stalled)
+    stalled._conn.transport.pause_reading()
+
+    count = [0]
+
+    async def read() -> None:
+        async for _ in healthy:
+            count[0] += 1
+
+    reader = asyncio.create_task(read())
+    pad = "X" * 20000
+    n = 300  # ~6 MB: past the socket buffers and the 1 MB outbox too
+    for i in range(n):
+        await tx.send_bytes(dumps({"service": "add_order", "ref": f"r{i}",
+                                   "data": {"id": f"o{i}", "symbol": pad, "qty": i}}))
+        await tx.receive()
+    await asyncio.sleep(0.3)
+
+    assert count[0] == n
+    svc = app["services"]["all_orders"]
+    assert len(svc._subscribers) == 1  # the stalled one was dropped
+    reader.cancel()
+
+
+async def test_heartbeat_follows_the_config(aiohttp_client):
+    from mkio.ws_outbox import OutboxWebSocket
+    made: list[OutboxWebSocket] = []
+    real_prepare = OutboxWebSocket.prepare
+
+    async def spy(self, request):
+        made.append(self)
+        return await real_prepare(self, request)
+
+    OutboxWebSocket.prepare = spy
+    try:
+        for seconds, expected in ((30, 30), (0, None)):
+            _, client = await _client_for(aiohttp_client, ws_heartbeat_s=seconds)
+            ws = await client.ws_connect("/ws")
+            await _subscribe(ws)
+            assert made[-1]._heartbeat == expected
+            await ws.close()
+    finally:
+        OutboxWebSocket.prepare = real_prepare
