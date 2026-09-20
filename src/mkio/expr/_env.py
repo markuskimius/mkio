@@ -14,7 +14,7 @@ from typing import Any, Callable
 from ._errors import ExprError
 from ._lexer import KEYWORDS
 
-LANGUAGE_VERSION = "1"
+LANGUAGE_VERSION = "2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +43,15 @@ class TypeDef:
 LIBRARIES: dict[str, dict[str, FunctionDef]] = {}
 TYPES: dict[str, TypeDef] = {}
 
+# Libraries registered with ``default=False``: an Env sees one only by naming
+# it (``libraries=`` or ``extra=``). For functions one host evaluates and
+# another must not be offered — a server-side library that expressions
+# validated here but run in the browser could never call.
+OPT_IN_LIBRARIES: set[str] = set()
+
+# NOT is the word operator's: ``not (x)`` never reaches a function.
+_RESERVED_FUNCTIONS = frozenset({"NOT"})
+
 _STDLIB_ORDER = ("core", "math", "string", "format", "time", "collection")
 
 
@@ -63,7 +72,7 @@ def register_function(
     ``fn(ctx, *args, **kwargs)`` where each arg is an :class:`Arg` thunk.
     """
     upper = name.upper()
-    if upper in KEYWORDS:
+    if upper in KEYWORDS or upper in _RESERVED_FUNCTIONS:
         raise ExprError(f"Cannot register function with reserved name: {name}")
     if not upper.replace("_", "").isalnum() or upper[0].isdigit():
         raise ExprError(f"Invalid function name: {name!r}")
@@ -75,12 +84,18 @@ def register_function(
     return fdef
 
 
-def register_library(name: str, functions: dict[str, Any]) -> None:
+def register_library(name: str, functions: dict[str, Any], *, default: bool = True) -> None:
     """Register a bundle of functions.
 
     Each value is either a callable or ``(callable, {metadata})`` where the
     metadata keys are the keyword arguments of :func:`register_function`.
+    ``default=False`` keeps the library out of environments that do not name
+    it: ``Env(extra=[name])`` adds it to the defaults.
     """
+    if default:
+        OPT_IN_LIBRARIES.discard(name)
+    else:
+        OPT_IN_LIBRARIES.add(name)
     for fname, spec in functions.items():
         if isinstance(spec, tuple):
             fn, meta = spec
@@ -91,6 +106,7 @@ def register_library(name: str, functions: dict[str, Any]) -> None:
 
 def unregister_library(name: str) -> None:
     LIBRARIES.pop(name, None)
+    OPT_IN_LIBRARIES.discard(name)
 
 
 def register_type(
@@ -123,22 +139,32 @@ def find_type(value: Any) -> TypeDef | None:
 class Env:
     """An evaluation environment: visible libraries + lookup mode.
 
-    ``libraries=None`` means every library registered at the time a function
-    is looked up (i.e. compile time), which is what most hosts want.
-    ``strict=True`` makes an unknown root name an error; ``False`` yields NULL.
-    Missing map keys and out-of-range indexes yield NULL in both modes.
+    ``libraries=None`` means every default library registered at the time a
+    function is looked up (i.e. compile time), which is what most hosts want;
+    ``extra`` adds opt-in libraries (``register_library(..., default=False)``)
+    to whichever set that is. ``strict=True`` makes an unknown root name an
+    error; ``False`` yields NULL. Missing map keys and out-of-range indexes
+    yield NULL in both modes.
     """
 
-    __slots__ = ("libraries", "strict")
+    __slots__ = ("libraries", "extra", "strict")
 
-    def __init__(self, libraries: list[str] | tuple[str, ...] | None = None, *, strict: bool = True) -> None:
+    def __init__(self, libraries: list[str] | tuple[str, ...] | None = None, *,
+                 extra: list[str] | tuple[str, ...] = (), strict: bool = True) -> None:
         self.libraries = tuple(libraries) if libraries is not None else None
+        self.extra = tuple(extra)
         self.strict = strict
+
+    def _visible(self) -> list[str]:
+        if self.libraries is not None:
+            libs = list(self.libraries)
+        else:
+            libs = [lib for lib in LIBRARIES if lib not in OPT_IN_LIBRARIES]
+        return libs + [lib for lib in self.extra if lib not in libs]
 
     def function(self, name: str) -> FunctionDef | None:
         upper = name.upper()
-        libs = self.libraries if self.libraries is not None else LIBRARIES.keys()
-        for lib in libs:
+        for lib in self._visible():
             fns = LIBRARIES.get(lib)
             if fns and upper in fns:
                 return fns[upper]
@@ -146,8 +172,7 @@ class Env:
 
     def functions(self) -> dict[str, FunctionDef]:
         out: dict[str, FunctionDef] = {}
-        libs = self.libraries if self.libraries is not None else list(LIBRARIES.keys())
-        for lib in libs:
+        for lib in self._visible():
             out.update(LIBRARIES.get(lib, {}))
         return out
 

@@ -26,7 +26,23 @@ def round_decimal(x: float | int, digits: int = 0) -> float | int:
     return normalize(float(r))
 
 
+def _mapped(xs, fn, name):
+    """``xs`` as a list, through ``fn`` when one is given: the aggregates'
+    ``SUM(trades, t -> t.qty)`` form. A NULL array is empty."""
+    if xs is None:
+        xs = []
+    if not isinstance(xs, (list, tuple)):
+        raise ExprError(f"{name} requires an array, got {kind(xs)}")
+    if fn is None:
+        return list(xs)
+    if not callable(fn):
+        raise ExprError(f"{name} requires a lambda, got {kind(fn)}")
+    return [fn(x) for x in xs]
+
+
 def _minmax(pick, name, *args):
+    if len(args) == 2 and callable(args[1]):
+        args = (_mapped(args[0], args[1], name),)
     vals = list(args[0]) if len(args) == 1 and isinstance(args[0], (list, tuple)) else list(args)
     vals = [v for v in vals if v is not None]
     if not vals:
@@ -38,7 +54,9 @@ def _minmax(pick, name, *args):
     return best
 
 
-def _sum(xs):
+def _sum(xs, fn=None):
+    if fn is not None:
+        xs = _mapped(xs, fn, "SUM")
     if not isinstance(xs, (list, tuple)):
         raise ExprError(f"SUM requires an array, got {kind(xs)}")
     total: Any = 0
@@ -49,7 +67,9 @@ def _sum(xs):
     return normalize(total)
 
 
-def _avg(xs):
+def _avg(xs, fn=None):
+    if fn is not None:
+        xs = _mapped(xs, fn, "AVG")
     if not isinstance(xs, (list, tuple)):
         raise ExprError(f"AVG requires an array, got {kind(xs)}")
     vals = [require_number(v, "AVG element") for v in xs if v is not None]
@@ -84,10 +104,10 @@ register_library("math", {
     "CEIL":  (lambda x: math.ceil(require_number(x, "CEIL")), {"numeric": True, "params": ("x",), "doc": "Smallest integer ≥ x."}),
     "ABS":   (lambda x: abs(require_number(x, "ABS")), {"numeric": True, "params": ("x",), "doc": "Absolute value."}),
     "SIGN":  (lambda x: (require_number(x, "SIGN") > 0) - (x < 0), {"numeric": True, "params": ("x",), "doc": "-1, 0, or 1."}),
-    "MIN":   (lambda *a: _minmax(lambda c: c < 0, "MIN", *a), {"doc": "Smallest of the arguments, or of a single array; NULLs ignored."}),
-    "MAX":   (lambda *a: _minmax(lambda c: c > 0, "MAX", *a), {"doc": "Largest of the arguments, or of a single array; NULLs ignored."}),
-    "SUM":   (_sum, {"numeric": True, "params": ("xs",), "doc": "Sum of an array of numbers; NULLs ignored."}),
-    "AVG":   (_avg, {"numeric": True, "params": ("xs",), "doc": "Mean of an array of numbers; NULL when empty."}),
+    "MIN":   (lambda *a: _minmax(lambda c: c < 0, "MIN", *a), {"doc": "Smallest of the arguments, of a single array, or of `fn(x)` over an array (`MIN(xs, fn)`); NULLs ignored."}),
+    "MAX":   (lambda *a: _minmax(lambda c: c > 0, "MAX", *a), {"doc": "Largest of the arguments, of a single array, or of `fn(x)` over an array (`MAX(xs, fn)`); NULLs ignored."}),
+    "SUM":   (_sum, {"numeric": True, "params": ("xs", "fn"), "doc": "Sum of an array of numbers, or of `fn(x)` over it; NULLs ignored."}),
+    "AVG":   (_avg, {"numeric": True, "params": ("xs", "fn"), "doc": "Mean of an array of numbers, or of `fn(x)` over it; NULL when empty."}),
     "CLAMP": (_clamp, {"numeric": True, "params": ("x", "lo", "hi"), "doc": "x limited to [lo, hi]."}),
     "POW":   (_pow, {"numeric": True, "params": ("x", "y"), "doc": "x to the power y."}),
     "SQRT":  (_sqrt, {"numeric": True, "params": ("x",), "doc": "Square root."}),

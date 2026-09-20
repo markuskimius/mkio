@@ -1,8 +1,13 @@
 """Tokenizer.
 
-Token types: NUMBER, STRING, IDENT, KEYWORD (TRUE/FALSE/NULL), OP, LPAREN,
-RPAREN, LBRACKET, RBRACKET, LBRACE, RBRACE, COMMA, COLON, DOT, ARROW (->),
-PIPE (|>), EOF. Every token records its source offset.
+Token types: NUMBER, DURATION (a number with a unit: 500ms 2s 1.5m 1h 1d),
+STRING, IDENT, KEYWORD (TRUE/FALSE/NULL), OP, LPAREN, RPAREN, LBRACKET,
+RBRACKET, LBRACE, RBRACE, COMMA, COLON, DOT, ARROW (->), PIPE (|>), EOF.
+Every token records its source offset.
+
+The word operators (and, or, not, in) are not token types: they are IDENTs
+the parser reads as operators only where an operator can stand, so a field
+of the same name keeps working.
 """
 
 from __future__ import annotations
@@ -12,6 +17,9 @@ from dataclasses import dataclass
 from ._errors import ExprError
 
 KEYWORDS = frozenset({"TRUE", "FALSE", "NULL"})
+
+# Seconds per unit of a duration literal. "ms" divides (see duration_seconds).
+DURATION_UNITS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
 # Longest match first.
 _OPS2 = ("|>", "->", "??", "**", "//", "&&", "||", "==", "!=", "<=", ">=")
@@ -31,9 +39,38 @@ class Token:
     pos: int
 
 
-def tokenize(expr: str) -> list[Token]:
+def duration_seconds(text: str) -> int | float:
+    """Seconds for a DURATION token's text. Milliseconds divide by 1000 rather
+    than multiply by 0.001, so 100ms is the double nearest 0.1 in both
+    implementations."""
+    unit = "ms" if text.endswith("ms") else text[-1]
+    digits = text[: -len(unit)]
+    n: int | float = float(digits) if any(c in digits for c in ".eE") else int(digits)
+    v = n / 1000 if unit == "ms" else n * DURATION_UNITS[unit]
+    return int(v) if isinstance(v, float) and v.is_integer() and abs(v) < 2**53 else v
+
+
+def tokenize(expr: str, start: int = 0, *, lenient: bool = False) -> list[Token]:
+    """Tokens of ``expr`` from offset ``start``.
+
+    ``lenient`` serves :func:`parse_prefix`, whose expression is followed by
+    text in some other grammar: instead of raising, the stream ends in an
+    ERROR token (value = the message) that only matters if the parser gets
+    that far.
+    """
+    try:
+        return _tokenize(expr, start)
+    except ExprError as e:
+        if not lenient:
+            raise
+        tokens = _tokenize(expr[: e.pos], start) if e.pos is not None and e.pos > start else []
+        tokens[-1:] = [Token("ERROR", e.message, e.pos if e.pos is not None else start)]
+        return tokens
+
+
+def _tokenize(expr: str, begin: int = 0) -> list[Token]:
     tokens: list[Token] = []
-    i = 0
+    i = begin
     n = len(expr)
     while i < n:
         c = expr[i]
@@ -113,7 +150,14 @@ def tokenize(expr: str) -> list[Token]:
             if text.startswith("_") or text.endswith("_") or "__" in text:
                 raise ExprError(f"Bad number literal: {text}", start)
             if i < n and (expr[i].isalpha() or expr[i] == "_"):
-                raise ExprError(f"Bad number literal: {expr[start:i + 1]}", start)
+                j = i
+                while j < n and (expr[j].isalnum() or expr[j] == "_"):
+                    j += 1
+                if expr[i:j] not in DURATION_UNITS:
+                    raise ExprError(f"Bad number literal: {expr[start:i + 1]}", start)
+                tokens.append(Token("DURATION", text.replace("_", "") + expr[i:j], start))
+                i = j
+                continue
             tokens.append(Token("NUMBER", text.replace("_", ""), start))
             continue
 

@@ -16,7 +16,7 @@ from ._env import Env, FunctionDef
 from ._errors import ExprError
 from ._values import (
     add, compare, equals, is_blocked_key, is_number, kind, normalize,
-    require_number, truthy,
+    require_number, to_string, truthy,
 )
 
 
@@ -179,6 +179,20 @@ def _compile_binary(node: Binary, env: Env) -> Callable[[Scope], Any]:
             l = left(scope)
             return right(scope) if l is None else l
         return coalesce
+    if op == "in":
+        def in_(scope: Scope) -> Any:
+            x, hay = left(scope), right(scope)
+            if hay is None:
+                return False
+            if isinstance(hay, str):
+                return to_string(x) in hay
+            if isinstance(hay, (list, tuple)):
+                return any(equals(v, x) for v in hay)
+            if isinstance(hay, dict):
+                return (x if isinstance(x, str) else to_string(x)) in hay
+            raise ExprError(
+                f"Operator in requires a string, array, or map on the right, got {kind(hay)}", pos)
+        return in_
     if op == "==":
         return lambda scope: equals(left(scope), right(scope))
     if op == "!=":

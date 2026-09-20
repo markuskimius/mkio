@@ -34,6 +34,12 @@ const expectError = (fn, sub) => { try { fn(); return `no error (want ${sub})`; 
 
 check("registerFunction", () => { X.registerFunction("MASK_PAN", (s) => "****" + s.slice(-4), { library: "scratch" }); const r = X.evaluate("mask_pan(pan)", { pan: "1234567890" }) === "****7890"; X.unregisterLibrary("scratch"); return r; });
 check("reserved name", () => expectError(() => X.registerFunction("null", () => 1), "reserved"));
+check("NOT is reserved", () => expectError(() => X.registerFunction("not", (x) => !x), "reserved"));
+check("duration tokens", () => X.tokenize("after 1_500ms + 2s").map((t) => `${t.type}:${t.value}`).join(" ") === "IDENT:after DURATION:1500ms OP:+ DURATION:2s EOF:");
+check("word operators build the symbol nodes", () => {
+  const shape = (n) => JSON.stringify(n, (k, v) => (k === "pos" ? undefined : v));
+  return shape(X.parse("a and b or not c")) === shape(X.parse("a && b || !c")) && shape(X.parse("not a in b")) === shape(X.parse("a not in b")) && shape(X.parse("a and not b == c")) === shape(X.parse("a && !(b == c)"));
+});
 check("collision", () => { const r = expectError(() => X.registerFunction("UPPER", (s) => s, { library: "scratch" }), "already registered"); X.unregisterLibrary("scratch"); return r; });
 check("library metadata", () => {
   X.registerLibrary("scratch", { TWICE: [(x) => x * 2, { numeric: true, params: ["x"], doc: "Double it" }], HELLO: () => "hi" });

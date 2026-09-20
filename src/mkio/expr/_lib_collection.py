@@ -49,6 +49,14 @@ def _all(xs, f=None):
     return all(truthy(f(x)) for x in xs)
 
 
+def _count(xs, f=None):
+    xs = _arr(xs, "COUNT")
+    if f is None:
+        return sum(1 for x in xs if x is not None)
+    f = _fn(f, "COUNT")
+    return sum(1 for x in xs if truthy(f(x)))
+
+
 def _find(xs, f):
     f = _fn(f, "FIND")
     for x in _arr(xs, "FIND"):
@@ -152,6 +160,7 @@ register_library("collection", {
     "FILTER":  (_filter, {"params": ("xs", "fn"), "doc": "Elements for which `fn` is truthy."}),
     "ANY":     (_any, {"params": ("xs", "fn"), "doc": "TRUE if `fn` (or the element) is truthy for any element."}),
     "ALL":     (_all, {"params": ("xs", "fn"), "doc": "TRUE if `fn` (or the element) is truthy for every element (TRUE for empty)."}),
+    "COUNT":   (_count, {"params": ("xs", "fn"), "doc": "How many elements `fn` is truthy for; without `fn`, how many are not NULL."}),
     "FIND":    (_find, {"params": ("xs", "fn"), "doc": "First element for which `fn` is truthy, else NULL."}),
     "FIRST":   (_first, {"params": ("xs",), "doc": "First element, or NULL."}),
     "LAST":    (_last, {"params": ("xs",), "doc": "Last element, or NULL."}),

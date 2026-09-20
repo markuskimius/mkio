@@ -278,3 +278,177 @@ def test_now_is_current():
     import time
     assert abs(expr.evaluate("NOW()") - time.time()) < 5
     assert expr.evaluate("DATE(NOW(), tz: 'local')") == time.strftime("%Y-%m-%d")
+
+
+# -- Language 2: tokens, prefix parsing, field paths, opt-in libraries --------
+
+def test_duration_tokens_keep_their_text():
+    toks = [(t.type, t.value) for t in expr.tokenize("after 1_500ms + 2s")]
+    assert toks == [("IDENT", "after"), ("DURATION", "1500ms"), ("OP", "+"), ("DURATION", "2s"), ("EOF", "")]
+
+
+def _shape(node):
+    """An AST without its source offsets."""
+    if isinstance(node, tuple):
+        return tuple(_shape(n) for n in node)
+    if not hasattr(node, "__dataclass_fields__"):
+        return node
+    return (type(node).__name__, *(
+        _shape(getattr(node, f)) for f in node.__dataclass_fields__ if f != "pos"))
+
+
+def test_word_operators_build_the_symbol_nodes():
+    assert _shape(parse("a and b or not c")) == _shape(parse("a && b || !c"))
+    assert _shape(parse("a and not b == c")) == _shape(parse("a && !(b == c)"))
+    assert _shape(parse("not a in b")) == _shape(parse("a not in b")) == _shape(parse("!(a in b)"))
+    assert _shape(parse("a in b")) == ("Binary", "in", ("Name", "a"), ("Name", "b"))
+
+
+def test_not_is_reserved_as_a_function_name():
+    with pytest.raises(ExprError, match="reserved"):
+        register_function("not", lambda x: not x)
+    with pytest.raises(ExprError, match="reserved"):
+        register_library("scratch", {"NOT": lambda x: not x})
+    unregister_library("scratch")
+
+
+def test_parse_prefix_ends_where_the_expression_does():
+    line = "fill qty: MIN(100, order.leaves_qty), price: order.price after 2s ± 200ms"
+    node, end = expr.parse_prefix(line, 10)
+    assert line[10:end] == "MIN(100, order.leaves_qty)" and node == parse("          MIN(100, order.leaves_qty)")
+    start = line.index("order.price")
+    node, end = expr.parse_prefix(line, start)
+    assert line[end:] == "after 2s ± 200ms"
+    node, end = expr.parse_prefix(line, line.index("2s"))
+    assert node.value == 2 and line[end:] == "± 200ms", "a character the language has no use for ends it"
+    assert expr.parse_prefix("x", 0) == (parse("x"), 1), "the end of the text is an end like any other"
+    assert expr.parse_prefix("(a, b) -> a + b rest", 0)[1] == 16
+    assert expr.parse_prefix("f(x)) tail", 0)[1] == 4, "a bracket it did not open"
+
+
+def test_parse_prefix_positions_are_offsets_into_the_text():
+    line = "when fill and trade.last_price > limit"
+    node, end = expr.parse_prefix(line, 14)
+    assert (node.pos, node.left.target.pos, node.right.pos, end) == (31, 14, 33, len(line))
+    assert expr.compile_node(node, Env())(expr.Scope({"trade": {"last_price": 3}, "limit": 2})) is True
+    with pytest.raises(ExprError) as info:
+        expr.parse_prefix("when fill and qty >", 14)
+    assert info.value.pos == 19
+    with pytest.raises(ExprError, match="Expected '\\)'") as info:
+        expr.parse_prefix("x: (1 + 2 else", 3)
+    assert info.value.pos == 10
+
+
+def test_parse_prefix_never_reads_past_the_expression():
+    line = "expect ack within 2s else fail 'it's broken"
+    node, end = expr.parse_prefix(line, line.index("2s"))
+    assert line[end:].startswith("else fail")
+    with pytest.raises(ExprError, match="Unterminated string") as info:
+        expr.parse_prefix("after 'oops", 6)
+    assert info.value.pos == 6, "a lexical error inside the expression is still one"
+    with pytest.raises(ExprError, match="Bad number literal"):
+        expr.parse_prefix("after 5min", 6)
+
+
+def test_parse_prefix_stop_phrases():
+    line = "wait fill where qty > 100 or side in ['Buy'] or timeout 2s"
+    start = line.index("qty")
+    node, end = expr.parse_prefix(line, start, stop=["or timeout"])
+    assert line[end:] == "or timeout 2s" and node == parse(" " * start + "qty > 100 or side in ['Buy']")
+    node, end = expr.parse_prefix(line, start, stop=["OR  Timeout"])
+    assert line[end:] == "or timeout 2s", "phrases match case-insensitively, by word"
+    node, end = expr.parse_prefix("a and b and then c", 0, stop=["and then"])
+    assert end == 8
+    node, end = expr.parse_prefix("a not in b", 0, stop=["not"])
+    assert end == 2
+    assert expr.parse_prefix("a or b", 0, stop=["or else"])[1] == 6, "a phrase must match whole"
+
+
+def test_field_paths():
+    paths = lambda s: [str(p) for p in expr.field_paths(parse(s))]
+    assert paths("order.leaves_qty > 0 and n") == ["order.leaves_qty", "n"]
+    assert paths("event.tag['150'] == event.tag.150") == ["event.tag.150", "event.tag.*"], \
+        "a numeric key is an element, written .150 or [150]"
+    assert paths("trades[0].px + trades[i].px") == ["trades.*.px", "i", "trades.*.px"]
+    assert paths("MAP(trades, t -> t.px * k)") == ["trades", "trades.*.px", "k"]
+    assert paths("COUNT(history, h -> h.status == s)") == ["history", "history.*.status", "s"]
+    assert paths("REDUCE(items, (acc, i) -> acc + i.qty, 0)") == ["items", "items.*.qty"]
+    assert paths("SUM(FILTER(items, i -> i.ok), j -> j.qty)") == ["items", "items.*.ok"], \
+        "what a computed array holds is not described"
+    assert paths("LET(o, order, o.symbol)") == ["order", "order.symbol"]
+    assert paths("LET(x, a + 1, x.y)") == ["a"]
+    assert paths("order |> (o -> o.qty)") == ["order", "order.qty"]
+    assert paths("(x -> x.a)") == []
+    assert paths("{a: m.b}.a") == ["m.b"]
+    assert paths("'literal' + 1") == []
+
+
+def test_field_path_positions():
+    (fp,) = expr.field_paths(parse("  order.leaves_qty"))
+    assert fp.path == ("order", "leaves_qty") and fp.positions == (2, 8) and fp.pos == 8
+    inner = expr.field_paths(parse("MAP(trades, t -> t.px)"))[1]
+    assert inner.positions[-1] == 19, "a lambda's read is reported where it is written"
+
+
+def test_check_fields():
+    schema = {
+        "order": {"leaves_qty": None, "symbol": None},
+        "trades": {"*": {"last_price": None}},
+        "event": {"kind": None, "tag": {"*": None}},
+        "n": None,
+    }
+    check = lambda s: [(e.message, e.pos) for e in expr.check_fields(parse(s), schema)]
+    assert check("order.leaves_qty > n and event.tag.150 == 'F' and trades[0].last_price > 1") == []
+    assert check("MIN(100, order.leave_qty)") == [
+        ("Unknown field: 'order.leave_qty'. order has: leaves_qty, symbol", 15)]
+    assert check("COUNT(trades, t -> t.last_px > 1) > 0") == [
+        ("Unknown field: 'trades.*.last_px'. trades.* has: last_price", 21)]
+    assert check("nope + order.symbol") == [
+        ("Unknown field: 'nope'. Available fields: event, n, order, trades", 0)]
+    assert check("order.symbol.first + n.anything") == [], "below an undescribed value nothing is checked"
+    assert check("order[key]") == [("Unknown field: 'key'. Available fields: event, n, order, trades", 6)], \
+        "a computed key into known fields cannot be checked; what computes it can"
+    assert len(check("order.a + order.b")) == 2, "every problem is reported, not the first"
+
+
+def test_opt_in_library_stays_out_of_the_default_env():
+    register_library("scratch", {"RANDOM": lambda: 4}, default=False)
+    try:
+        assert "scratch" in expr.OPT_IN_LIBRARIES
+        with pytest.raises(ExprError, match="Unknown function: RANDOM"):
+            expr.compile("RANDOM()")
+        assert "RANDOM" not in Env().functions()
+        assert expr.compile("RANDOM() + LEN('ab')", Env(extra=["scratch"]))() == 6
+        assert expr.compile("RANDOM()", Env(libraries=["scratch"]))() == 4
+        assert "UPPER" in Env(extra=["scratch"]).functions()
+        assert Env(libraries=["core"], extra=["scratch"]).function("upper") is None
+    finally:
+        unregister_library("scratch")
+    assert "scratch" not in expr.OPT_IN_LIBRARIES
+    register_library("scratch", {"HELLO": lambda: "hi"})
+    try:
+        assert expr.compile("HELLO()")() == "hi", "re-registered as a default library"
+    finally:
+        unregister_library("scratch")
+
+
+def test_lenient_tokenizer_ends_in_an_error_token():
+    toks = expr.tokenize("a + 1 ± b", lenient=True)
+    assert [(t.type, t.pos) for t in toks] == [("IDENT", 0), ("OP", 2), ("NUMBER", 4), ("ERROR", 6)]
+    assert "Unexpected character" in toks[-1].value
+    assert [t.type for t in expr.tokenize("x 'open", lenient=True)] == ["IDENT", "ERROR"]
+    assert [t.type for t in expr.tokenize("±", lenient=True)] == ["ERROR"]
+    assert [(t.type, t.pos) for t in expr.tokenize("skip a", 5)] == [("IDENT", 5), ("EOF", 6)]
+    with pytest.raises(ExprError, match="Unexpected character"):
+        expr.tokenize("a ± b")
+
+
+def test_language_2_reaches_filters_and_formatters():
+    keep = compile_filter("symbol in ['AAPL', 'MSFT'] and not note and age < 1.5m")
+    assert keep({"symbol": "AAPL", "note": "", "age": 60}) is True
+    assert keep({"symbol": "AAPL", "note": "held", "age": 60}) is False
+    assert keep({"symbol": "IBM", "note": "", "age": 60}) is False
+    fmt = compile_formatter({"fills": "COUNT(items, i -> i.qty > 0)", "notional": "SUM(items, i -> i.qty * i.px)"})
+    assert fmt({"items": [{"qty": 2, "px": 3}, {"qty": 0, "px": 9}]}) == {"fills": 1, "notional": 6}
+    assert field_refs(parse("a in b and not c")) == {"a", "b", "c"}
+    assert numeric_fields(parse("a in b")) == set()

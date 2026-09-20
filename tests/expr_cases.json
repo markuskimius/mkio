@@ -1,5 +1,5 @@
 {
- "language": "1",
+ "language": "2",
  "cases": [
   {
    "id": "c001",
@@ -13886,6 +13886,3259 @@
    },
    "strict": false,
    "expect": "!"
+  },
+  {
+   "id": "w_and",
+   "expr": "qty > 50 and status == 'pending'",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "w_and_false",
+   "expr": "qty > 500 and status == 'pending'",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": false
+  },
+  {
+   "id": "w_or",
+   "expr": "qty > 500 or side == 'Buy'",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "w_upper",
+   "expr": "qty > 50 AND side == 'Sell' OR NOT note",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "w_mixed_symbols",
+   "expr": "qty > 50 && side == 'Buy' and !note",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "w_and_binds_tighter",
+   "expr": "TRUE or FALSE and FALSE",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "w_and_short_circuit",
+   "expr": "FALSE and 1 / 0",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": false
+  },
+  {
+   "id": "w_or_short_circuit",
+   "expr": "TRUE or 1 / 0",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "w_and_is_boolean",
+   "expr": "qty and price",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "w_not",
+   "expr": "not note",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "w_not_comparison",
+   "expr": "not qty > 500",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "w_not_vs_bang",
+   "expr": "!qty > 500",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "Cannot compare"
+  },
+  {
+   "id": "w_not_not",
+   "expr": "not not qty",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "w_not_paren",
+   "expr": "not (qty > 500) and side == 'Buy'",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "w_not_and",
+   "expr": "not note and not tags",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": false
+  },
+  {
+   "id": "w_not_in_lambda",
+   "expr": "FILTER(items, i -> not i.qty > 1)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": [
+    {
+     "qty": 1,
+     "price": 4
+    }
+   ]
+  },
+  {
+   "id": "w_not_after_op",
+   "expr": "side == not note",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "Unexpected token"
+  },
+  {
+   "id": "w_and_dangling",
+   "expr": "qty and",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "Unexpected end of expression"
+  },
+  {
+   "id": "w_field_not",
+   "expr": "not - 1",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x",
+    "not": 5,
+    "and": 1,
+    "or": 2
+   },
+   "expect": 4
+  },
+  {
+   "id": "w_field_not_index",
+   "expr": "[10, 20][not - 4]",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x",
+    "not": 5,
+    "and": 1,
+    "or": 2
+   },
+   "expect": 20
+  },
+  {
+   "id": "w_field_not_eq",
+   "expr": "not == 5",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x",
+    "not": 5,
+    "and": 1,
+    "or": 2
+   },
+   "expect": true
+  },
+  {
+   "id": "w_field_and_or",
+   "expr": "and + or",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x",
+    "not": 5,
+    "and": 1,
+    "or": 2
+   },
+   "expect": 3
+  },
+  {
+   "id": "w_field_and_operand",
+   "expr": "and and or",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x",
+    "not": 5,
+    "and": 1,
+    "or": 2
+   },
+   "expect": true
+  },
+  {
+   "id": "w_backtick_never_operator",
+   "expr": "qty `and` price",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "Unexpected token"
+  },
+  {
+   "id": "w_not_function_reserved",
+   "expr": "NOT(note)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "i_array",
+   "expr": "side in ['Buy', 'Sell']",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "i_array_miss",
+   "expr": "side in ['Sell']",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": false
+  },
+  {
+   "id": "i_not_in",
+   "expr": "side not in ['Sell']",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "i_not_in_hit",
+   "expr": "side NOT IN ['Buy']",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": false
+  },
+  {
+   "id": "i_string",
+   "expr": "'AP' in symbol",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "i_string_coerces",
+   "expr": "0 in 'a10'",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "i_map_key",
+   "expr": "'region' in meta",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "i_map_key_number",
+   "expr": "7 in {'7': 1}",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "i_map_value_is_not_key",
+   "expr": "'US' in meta",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": false
+  },
+  {
+   "id": "i_null_right",
+   "expr": "side in note",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": false
+  },
+  {
+   "id": "i_null_left",
+   "expr": "note in [NULL]",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "i_strict_equality",
+   "expr": "'100' in [qty]",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": false
+  },
+  {
+   "id": "i_number_right",
+   "expr": "side in qty",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "Operator in requires a string, array, or map on the right, got number"
+  },
+  {
+   "id": "i_with_and",
+   "expr": "side in ['Buy'] and qty not in [1, 2]",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "i_arithmetic_binds_tighter",
+   "expr": "qty + 1 in [101]",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "i_coalesce_binds_tighter",
+   "expr": "note ?? 'a' in tags",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "i_no_chain",
+   "expr": "side in tags in tags",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "Comparisons don't chain"
+  },
+  {
+   "id": "i_no_chain_compare",
+   "expr": "1 < qty in [100]",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "Comparisons don't chain"
+  },
+  {
+   "id": "i_no_chain_not_in",
+   "expr": "side not in tags == TRUE",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "Comparisons don't chain"
+  },
+  {
+   "id": "i_field_named_in",
+   "expr": "in in ['x', 'y']",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "i_field_named_in_backtick",
+   "expr": "`in` not in ['x']",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": false
+  },
+  {
+   "id": "i_not_of_in",
+   "expr": "not side in ['Sell']",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "i_in_lambda",
+   "expr": "FILTER(tags, t -> t in ['b', 'c'])",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": [
+    "b"
+   ]
+  },
+  {
+   "id": "d_ms",
+   "expr": "500ms",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 0.5
+  },
+  {
+   "id": "d_ms_tenth",
+   "expr": "100ms",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 0.1
+  },
+  {
+   "id": "d_ms_one",
+   "expr": "1ms",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 0.001
+  },
+  {
+   "id": "d_s",
+   "expr": "2s",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 2
+  },
+  {
+   "id": "d_m",
+   "expr": "1.5m",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 90
+  },
+  {
+   "id": "d_h",
+   "expr": "2h",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 7200
+  },
+  {
+   "id": "d_d",
+   "expr": "1d",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 86400
+  },
+  {
+   "id": "d_fraction_s",
+   "expr": "0.25s",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 0.25
+  },
+  {
+   "id": "d_leading_dot",
+   "expr": ".5s",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 0.5
+  },
+  {
+   "id": "d_exponent",
+   "expr": "1e3ms",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 1
+  },
+  {
+   "id": "d_underscore",
+   "expr": "1_500ms",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 1.5
+  },
+  {
+   "id": "d_is_a_number",
+   "expr": "TYPE(2s)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": "number"
+  },
+  {
+   "id": "d_arithmetic",
+   "expr": "2s + 500ms",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 2.5
+  },
+  {
+   "id": "d_scale",
+   "expr": "250ms * meta.n",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 0.75
+  },
+  {
+   "id": "d_compare",
+   "expr": "90s == 1.5m and 1h > 59m",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": true
+  },
+  {
+   "id": "d_negative",
+   "expr": "-5s",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": -5
+  },
+  {
+   "id": "d_in_call",
+   "expr": "MAX(1s, 1500ms)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 1.5
+  },
+  {
+   "id": "d_format",
+   "expr": "DURATION(1h + 5m)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": "1h 5m 0s"
+  },
+  {
+   "id": "d_bad_unit",
+   "expr": "5min",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "Bad number literal: 5m"
+  },
+  {
+   "id": "d_bad_unit_case",
+   "expr": "5S",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "Bad number literal: 5S"
+  },
+  {
+   "id": "d_unit_then_name",
+   "expr": "5ms2",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "Bad number literal: 5m"
+  },
+  {
+   "id": "d_spaced_is_not_a_duration",
+   "expr": "5 ms",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "Unexpected token"
+  },
+  {
+   "id": "a_count_fn",
+   "expr": "COUNT(items, i -> i.qty > 1)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 1
+  },
+  {
+   "id": "a_count_plain",
+   "expr": "COUNT([1, NULL, 0, 'a'])",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 3
+  },
+  {
+   "id": "a_count_empty",
+   "expr": "COUNT([])",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 0
+  },
+  {
+   "id": "a_count_null",
+   "expr": "COUNT(note, x -> x)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 0
+  },
+  {
+   "id": "a_count_not_array",
+   "expr": "COUNT(qty)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "COUNT requires an array, got number"
+  },
+  {
+   "id": "a_count_not_lambda",
+   "expr": "COUNT(items, 1)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "COUNT requires a lambda, got number"
+  },
+  {
+   "id": "a_sum_fn",
+   "expr": "SUM(items, i -> i.qty * i.price)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 10
+  },
+  {
+   "id": "a_sum_fn_nulls",
+   "expr": "SUM(items, i -> IF(i.qty > 1, i.qty, NULL))",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 2
+  },
+  {
+   "id": "a_sum_fn_null_array",
+   "expr": "SUM(note, i -> i)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 0
+  },
+  {
+   "id": "a_sum_plain_unchanged",
+   "expr": "SUM([1, 2, NULL])",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 3
+  },
+  {
+   "id": "a_sum_plain_null_is_error",
+   "expr": "SUM(note)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "SUM requires an array, got null"
+  },
+  {
+   "id": "a_avg_fn",
+   "expr": "AVG(items, i -> i.price)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 3.5
+  },
+  {
+   "id": "a_avg_fn_empty",
+   "expr": "AVG([], i -> i)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": null
+  },
+  {
+   "id": "a_max_fn",
+   "expr": "MAX(items, i -> i.price)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 4
+  },
+  {
+   "id": "a_min_fn",
+   "expr": "MIN(items, i -> i.price)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 3
+  },
+  {
+   "id": "a_max_fn_strings",
+   "expr": "MAX(tags, t -> UPPER(t))",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": "B"
+  },
+  {
+   "id": "a_max_fn_empty",
+   "expr": "MAX([], i -> i)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": null
+  },
+  {
+   "id": "a_max_fn_not_array",
+   "expr": "MAX(qty, i -> i)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "MAX requires an array, got number"
+  },
+  {
+   "id": "a_min_varargs_unchanged",
+   "expr": "MIN(3, qty, NULL)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 3
+  },
+  {
+   "id": "a_max_array_unchanged",
+   "expr": "MAX([1, 5, 2])",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 5
+  },
+  {
+   "id": "a_sum_fn_named",
+   "expr": "SUM(items, fn: i -> i.qty)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 3
+  },
+  {
+   "id": "a_sum_fn_not_number",
+   "expr": "SUM(tags, t -> t)",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "error": "SUM element"
+  },
+  {
+   "id": "t_language_2",
+   "template": "${qty > 50 and side in ['Buy']} after ${2s + 500ms}",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": "true after 2.5"
+  },
+  {
+   "id": "t_language_2_pure",
+   "template": "${COUNT(items, i -> i.qty > 1)}",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "expect": 1
+  },
+  {
+   "id": "w_lenient_unknown_is_null",
+   "expr": "not missing and missing not in tags",
+   "scope": {
+    "qty": 100,
+    "price": 12.5,
+    "status": "pending",
+    "side": "Buy",
+    "symbol": "AAPL",
+    "note": null,
+    "tags": [
+     "a",
+     "b"
+    ],
+    "meta": {
+     "region": "US",
+     "n": 3
+    },
+    "items": [
+     {
+      "qty": 2,
+      "price": 3
+     },
+     {
+      "qty": 1,
+      "price": 4
+     }
+    ],
+    "_mkio_ref": "20260828 12:34:56.123456789000",
+    "order id": 7,
+    "in": "x"
+   },
+   "strict": false,
+   "expect": true
   }
  ]
 }

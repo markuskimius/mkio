@@ -7,7 +7,7 @@
  * assigns globalThis.mkioExpr for classic scripts (mkio.js's string filters).
  */
 
-export const LANGUAGE_VERSION = "1";
+export const LANGUAGE_VERSION = "2";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -27,6 +27,14 @@ export class ExprError extends Error {
 // ---------------------------------------------------------------------------
 
 export const KEYWORDS = new Set(["TRUE", "FALSE", "NULL"]);
+// Seconds per unit of a duration literal (500ms 2s 1.5m 1h 1d). "ms" divides,
+// so 100ms is the double nearest 0.1 here and in Python.
+export const DURATION_UNITS = { ms: 0.001, s: 1, m: 60, h: 3600, d: 86400 };
+export function durationSeconds(text) {
+  const unit = text.endsWith("ms") ? "ms" : text[text.length - 1];
+  const n = Number(text.slice(0, -unit.length));
+  return unit === "ms" ? n / 1000 : n * DURATION_UNITS[unit];
+}
 const OPS2 = ["|>", "->", "??", "**", "//", "&&", "||", "==", "!=", "<=", ">="];
 const OPS1 = "<>+-*/%!";
 const ESCAPES = { n: "\n", t: "\t", r: "\r", "\\": "\\", "'": "'", '"': '"' };
@@ -111,7 +119,14 @@ export function tokenize(expr) {
       }
       const text = expr.slice(start, i);
       if (text.startsWith("_") || text.endsWith("_") || text.includes("__")) throw new ExprError(`Bad number literal: ${text}`, start);
-      if (i < n && isAlpha(expr[i])) throw new ExprError(`Bad number literal: ${expr.slice(start, i + 1)}`, start);
+      if (i < n && isAlpha(expr[i])) {
+        let j = i;
+        while (j < n && isAlnum(expr[j])) j++;
+        if (!Object.hasOwn(DURATION_UNITS, expr.slice(i, j))) throw new ExprError(`Bad number literal: ${expr.slice(start, i + 1)}`, start);
+        tokens.push({ type: "DURATION", value: text.replace(/_/g, "") + expr.slice(i, j), pos: start });
+        i = j;
+        continue;
+      }
       tokens.push({ type: "NUMBER", value: text.replace(/_/g, ""), pos: start });
       continue;
     }
@@ -143,11 +158,18 @@ export function tokenize(expr) {
 // ---------------------------------------------------------------------------
 
 const COMPARE = new Set(["==", "!=", "<", "<=", ">", ">="]);
+// and/or/not/in are contextual: a bare word is an operator only where the
+// grammar had no use for a name, so fields of those names parse as before
+// (`not - 1` subtracts, `not[0]` indexes). What may follow the operator `not`:
+const AFTER_NOT = new Set(["IDENT", "NUMBER", "DURATION", "STRING", "KEYWORD", "LBRACE", "LPAREN"]);
 const TOKEN_NAMES = { RPAREN: "')'", RBRACKET: "']'", RBRACE: "'}'", COLON: "':'", COMMA: "','", IDENT: "a name" };
 const node = (type, props) => ({ type, ...props });
 
 class Parser {
-  constructor(tokens) { this.tokens = tokens; this.pos = 0; }
+  constructor(tokens, source = "") { this.tokens = tokens; this.source = source; this.pos = 0; }
+  word(k = 0) { const t = this.peek(k); return t.type === "IDENT" && this.source[t.pos] !== "`" ? t.value.toLowerCase() : null; }
+  atWord(...words) { return words.includes(this.word()); }
+  atComparison() { const t = this.peek(); return (t.type === "OP" && COMPARE.has(t.value)) || this.atWord("in") || (this.atWord("not") && this.word(1) === "in"); }
   peek(k = 0) { const i = this.pos + k; return i < this.tokens.length ? this.tokens[i] : this.tokens[this.tokens.length - 1]; }
   advance() { return this.tokens[this.pos++]; }
   at(type, value) { const t = this.peek(); return t.type === type && (value === undefined || t.value === value); }
@@ -211,25 +233,28 @@ class Parser {
 
   parseOr() {
     let left = this.parseAnd();
-    while (this.at("OP", "||")) { const p = this.advance().pos; left = node("Binary", { op: "||", left, right: this.parseAnd(), pos: p }); }
+    while (this.at("OP", "||") || this.atWord("or")) { const p = this.advance().pos; left = node("Binary", { op: "||", left, right: this.parseAnd(), pos: p }); }
     return left;
   }
   parseAnd() {
-    let left = this.parseComparison();
-    while (this.at("OP", "&&")) { const p = this.advance().pos; left = node("Binary", { op: "&&", left, right: this.parseComparison(), pos: p }); }
+    let left = this.parseNot();
+    while (this.at("OP", "&&") || this.atWord("and")) { const p = this.advance().pos; left = node("Binary", { op: "&&", left, right: this.parseNot(), pos: p }); }
     return left;
+  }
+  // `not` is `!` with Python's precedence: `not a > b` negates the comparison.
+  parseNot() {
+    if (this.atWord("not") && AFTER_NOT.has(this.peek(1).type)) { const p = this.advance().pos; return node("Unary", { op: "!", operand: this.parseNot(), pos: p }); }
+    return this.parseComparison();
   }
   parseComparison() {
     const left = this.parseCoalesce();
-    const t = this.peek();
-    if (t.type === "OP" && COMPARE.has(t.value)) {
-      this.advance();
-      const right = this.parseCoalesce();
-      const nx = this.peek();
-      if (nx.type === "OP" && COMPARE.has(nx.value)) throw new ExprError("Comparisons don't chain — use && to combine them", nx.pos);
-      return node("Binary", { op: t.value, left, right, pos: t.pos });
-    }
-    return left;
+    if (!this.atComparison()) return left;
+    const t = this.advance();
+    const negated = t.type === "IDENT" && t.value.toLowerCase() === "not";
+    if (negated) this.advance();   // in
+    const n = node("Binary", { op: t.type === "OP" ? t.value : "in", left, right: this.parseCoalesce(), pos: t.pos });
+    if (this.atComparison()) throw new ExprError("Comparisons don't chain — use && to combine them", this.peek().pos);
+    return negated ? node("Unary", { op: "!", operand: n, pos: t.pos }) : n;
   }
   parseCoalesce() {
     let left = this.parseAdditive();
@@ -320,6 +345,7 @@ class Parser {
     }
     if (t.type === "STRING") { this.advance(); return node("Literal", { value: t.value, pos: t.pos }); }
     if (t.type === "NUMBER") { this.advance(); return node("Literal", { value: Number(t.value), pos: t.pos }); }
+    if (t.type === "DURATION") { this.advance(); return node("Literal", { value: durationSeconds(t.value), pos: t.pos }); }
     if (t.type === "KEYWORD") { this.advance(); return node("Literal", { value: { TRUE: true, FALSE: false, NULL: null }[t.value.toUpperCase()], pos: t.pos }); }
     if (t.type === "IDENT") {
       this.advance();
@@ -350,7 +376,7 @@ class Parser {
 
 export function parse(expr) {
   if (typeof expr !== "string") throw new ExprError(`Expression must be a string, got ${typeof expr}`);
-  return new Parser(tokenize(expr)).parse();
+  return new Parser(tokenize(expr), expr).parse();
 }
 
 // ---------------------------------------------------------------------------
@@ -363,7 +389,8 @@ export const TYPES = new Map();       // name -> TypeDef
 export function registerFunction(name, fn, meta = {}) {
   const upper = name.toUpperCase();
   const library = meta.library || "user";
-  if (KEYWORDS.has(upper)) throw new ExprError(`Cannot register function with reserved name: ${name}`);
+  // NOT is the word operator's: `not (x)` never reaches a function.
+  if (KEYWORDS.has(upper) || upper === "NOT") throw new ExprError(`Cannot register function with reserved name: ${name}`);
   if (!/^[A-Z_][A-Z0-9_]*$/.test(upper)) throw new ExprError(`Invalid function name: '${name}'`);
   for (const [lib, fns] of LIBRARIES) {
     if (lib !== library && fns.has(upper)) throw new ExprError(`Function ${upper} already registered in library '${lib}'`);
@@ -590,6 +617,14 @@ function compileBinary(n, env) {
     case "||": return (s) => truthy(left(s)) ? true : truthy(right(s));
     case "&&": return (s) => truthy(left(s)) ? truthy(right(s)) : false;
     case "??": return (s) => { const l = left(s); return l === null || l === undefined ? right(s) : l; };
+    case "in": return (s) => {
+      const x = left(s), hay = right(s);
+      if (hay === null || hay === undefined) return false;
+      if (typeof hay === "string") return hay.includes(toString(x));
+      if (Array.isArray(hay)) return hay.some((v) => equals(v, x));
+      if (isPlainObject(hay)) return Object.hasOwn(hay, typeof x === "string" ? x : toString(x));
+      throw new ExprError(`Operator in requires a string, array, or map on the right, got ${kind(hay)}`, pos);
+    };
     case "==": return (s) => equals(left(s), right(s));
     case "!=": return (s) => !equals(left(s), right(s));
     case "<": return (s) => compare(left(s), right(s), op, pos) < 0;
@@ -1017,7 +1052,11 @@ registerLibrary("core", {
 // math library
 // ---------------------------------------------------------------------------
 
+// The aggregates' `SUM(trades, t -> t.qty)` form: `xs` through `fn`. A NULL array is empty.
+function mapped(xs, fn, name) { const f = fnArg(fn, name); return arr(xs, name).map((x) => f(x)); }
+
 function minmax(pick, name, args) {
+  if (args.length === 2 && isCallable(args[1])) args = [mapped(args[0], args[1], name)];
   let vals = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
   vals = vals.filter((v) => v !== null && v !== undefined);
   if (!vals.length) return null;
@@ -1033,10 +1072,10 @@ registerLibrary("math", {
   CEIL: [(x) => Math.ceil(requireNumber(x, "CEIL")) || 0, { numeric: true, params: ["x"], required: 1, doc: "Smallest integer ≥ x." }],
   ABS: [(x) => Math.abs(requireNumber(x, "ABS")), { numeric: true, params: ["x"], required: 1, doc: "Absolute value." }],
   SIGN: [(x) => Math.sign(requireNumber(x, "SIGN")) || 0, { numeric: true, params: ["x"], required: 1, doc: "-1, 0, or 1." }],
-  MIN: [(...a) => minmax((c) => c < 0, "MIN", a), { variadic: true, doc: "Smallest of the arguments, or of a single array; NULLs ignored." }],
-  MAX: [(...a) => minmax((c) => c > 0, "MAX", a), { variadic: true, doc: "Largest of the arguments, or of a single array; NULLs ignored." }],
-  SUM: [(xs) => { if (!Array.isArray(xs)) throw new ExprError(`SUM requires an array, got ${kind(xs)}`); let t = 0; for (const v of xs) if (v !== null && v !== undefined) t += requireNumber(v, "SUM element"); return t; }, { numeric: true, params: ["xs"], required: 1, doc: "Sum of an array of numbers; NULLs ignored." }],
-  AVG: [(xs) => { if (!Array.isArray(xs)) throw new ExprError(`AVG requires an array, got ${kind(xs)}`); const v = xs.filter((x) => x !== null && x !== undefined).map((x) => requireNumber(x, "AVG element")); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; }, { numeric: true, params: ["xs"], required: 1, doc: "Mean of an array of numbers; NULL when empty." }],
+  MIN: [(...a) => minmax((c) => c < 0, "MIN", a), { variadic: true, doc: "Smallest of the arguments, of a single array, or of `fn(x)` over an array (`MIN(xs, fn)`); NULLs ignored." }],
+  MAX: [(...a) => minmax((c) => c > 0, "MAX", a), { variadic: true, doc: "Largest of the arguments, of a single array, or of `fn(x)` over an array (`MAX(xs, fn)`); NULLs ignored." }],
+  SUM: [(xs, fn = null) => { if (fn !== null) xs = mapped(xs, fn, "SUM"); if (!Array.isArray(xs)) throw new ExprError(`SUM requires an array, got ${kind(xs)}`); let t = 0; for (const v of xs) if (v !== null && v !== undefined) t += requireNumber(v, "SUM element"); return t; }, { numeric: true, params: ["xs", "fn"], required: 1, doc: "Sum of an array of numbers, or of `fn(x)` over it; NULLs ignored." }],
+  AVG: [(xs, fn = null) => { if (fn !== null) xs = mapped(xs, fn, "AVG"); if (!Array.isArray(xs)) throw new ExprError(`AVG requires an array, got ${kind(xs)}`); const v = xs.filter((x) => x !== null && x !== undefined).map((x) => requireNumber(x, "AVG element")); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; }, { numeric: true, params: ["xs", "fn"], required: 1, doc: "Mean of an array of numbers, or of `fn(x)` over it; NULL when empty." }],
   CLAMP: [(x, lo, hi) => { requireNumber(x, "CLAMP"); requireNumber(lo, "CLAMP"); requireNumber(hi, "CLAMP"); return Math.min(Math.max(x, lo), hi); }, { numeric: true, params: ["x", "lo", "hi"], required: 3, doc: "x limited to [lo, hi]." }],
   POW: [(a, b) => { requireNumber(a, "POW"); requireNumber(b, "POW"); const r = a ** b; if (Number.isNaN(r)) throw new ExprError("POW of a negative base with fractional exponent"); return r; }, { numeric: true, params: ["x", "y"], required: 2, doc: "x to the power y." }],
   SQRT: [(x) => { requireNumber(x, "SQRT"); if (x < 0) throw new ExprError("SQRT of a negative number"); return Math.sqrt(x); }, { numeric: true, params: ["x"], required: 1, doc: "Square root." }],
@@ -1270,6 +1309,7 @@ registerLibrary("collection", {
   FILTER: [(xs, f) => { f = fnArg(f, "FILTER"); return arr(xs, "FILTER").filter((x) => truthy(f(x))); }, { params: ["xs", "fn"], required: 2, doc: "Elements for which `fn` is truthy." }],
   ANY: [(xs, f = null) => { xs = arr(xs, "ANY"); if (f === null) return xs.some(truthy); f = fnArg(f, "ANY"); return xs.some((x) => truthy(f(x))); }, { params: ["xs", "fn"], required: 1, doc: "TRUE if `fn` (or the element) is truthy for any element." }],
   ALL: [(xs, f = null) => { xs = arr(xs, "ALL"); if (f === null) return xs.every(truthy); f = fnArg(f, "ALL"); return xs.every((x) => truthy(f(x))); }, { params: ["xs", "fn"], required: 1, doc: "TRUE if `fn` (or the element) is truthy for every element (TRUE for empty)." }],
+  COUNT: [(xs, f = null) => { xs = arr(xs, "COUNT"); if (f === null) return xs.filter((x) => x !== null && x !== undefined).length; f = fnArg(f, "COUNT"); return xs.filter((x) => truthy(f(x))).length; }, { params: ["xs", "fn"], required: 1, doc: "How many elements `fn` is truthy for; without `fn`, how many are not NULL." }],
   FIND: [(xs, f) => { f = fnArg(f, "FIND"); for (const x of arr(xs, "FIND")) if (truthy(f(x))) return x; return null; }, { params: ["xs", "fn"], required: 2, doc: "First element for which `fn` is truthy, else NULL." }],
   FIRST: [(xs) => { xs = arr(xs, "FIRST"); return xs.length ? xs[0] : null; }, { params: ["xs"], required: 1, doc: "First element, or NULL." }],
   LAST: [(xs) => { xs = arr(xs, "LAST"); return xs.length ? xs[xs.length - 1] : null; }, { params: ["xs"], required: 1, doc: "Last element, or NULL." }],

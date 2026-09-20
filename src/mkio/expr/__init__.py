@@ -18,15 +18,15 @@ from typing import Any, Callable, Mapping
 from ._ast import (
     Apply, Array, Binary, Call, Index, Lambda, Literal, Map, Name, Node, Unary,
 )
-from ._analysis import field_refs, function_refs, numeric_fields
+from ._analysis import FieldPath, check_fields, field_paths, field_refs, function_refs, numeric_fields
 from ._env import (
-    LANGUAGE_VERSION, LIBRARIES, TYPES, Env, FunctionDef, TypeDef, default_env,
+    LANGUAGE_VERSION, LIBRARIES, OPT_IN_LIBRARIES, TYPES, Env, FunctionDef, TypeDef, default_env,
     find_type, register_function, register_library, register_type, unregister_library,
 )
 from ._errors import ExprError
 from ._eval import Arg, Closure, Ctx, Scope, compile_node
 from ._lexer import Token, tokenize
-from ._parser import parse
+from ._parser import parse, parse_prefix
 from ._template import has_expressions, split_template
 from ._values import equals, kind, to_string, truthy
 
@@ -157,10 +157,10 @@ def evaluate(expr: str | Node, scope: Mapping[str, Any] | None = None, env: Env 
 __all__ = [
     "LANGUAGE_VERSION", "ExprError", "Env", "default_env", "Compiled", "CompiledTemplate",
     "compile", "compile_expression", "compile_filter", "compile_formatter", "compile_template",
-    "evaluate", "parse", "tokenize", "Token",
+    "evaluate", "parse", "parse_prefix", "tokenize", "Token",
     "register_function", "register_library", "register_type", "unregister_library",
-    "FunctionDef", "TypeDef", "LIBRARIES", "TYPES", "find_type",
-    "field_refs", "function_refs", "numeric_fields",
+    "FunctionDef", "TypeDef", "LIBRARIES", "OPT_IN_LIBRARIES", "TYPES", "find_type",
+    "field_refs", "function_refs", "numeric_fields", "field_paths", "check_fields", "FieldPath",
     "Scope", "Closure", "Arg", "Ctx", "compile_node",
     "to_string", "truthy", "equals", "kind", "split_template", "has_expressions",
     "Node", "Literal", "Name", "Binary", "Unary", "Call", "Lambda", "Apply", "Array", "Map", "Index",

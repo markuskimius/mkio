@@ -5,7 +5,11 @@ from __future__ import annotations
 from ._ast import (
     Apply, Array, Binary, Call, Index, Lambda, Literal, Map, Name, Node, Unary,
 )
+from dataclasses import dataclass
+from typing import Any, Mapping
+
 from ._env import Env, default_env
+from ._errors import ExprError
 
 _NUMERIC_OPS = frozenset({"-", "*", "/", "//", "%", "**"})
 
@@ -157,3 +161,157 @@ def _collect_numeric(node: Node, refs: set[str], ctx: bool, bound: frozenset[str
             _collect_numeric(v, refs, ctx, bound, env)
     elif isinstance(node, Index):
         _collect_numeric(node.target, refs, ctx, bound, env)
+
+
+# -- Field paths -------------------------------------------------------------
+
+# Standard functions that hand the elements of their first argument to a
+# lambda, and which of its parameters receives them.
+_ELEMENT_PARAM = {
+    "MAP": 0, "FILTER": 0, "ANY": 0, "ALL": 0, "FIND": 0, "COUNT": 0, "SORT_BY": 0,
+    "SUM": 0, "AVG": 0, "MIN": 0, "MAX": 0, "REDUCE": 1,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class FieldPath:
+    """One read of the root scope: ``order.leaves_qty`` is ``("order",
+    "leaves_qty")``. ``"*"`` stands for an element — a numeric or computed
+    key, or what a lambda parameter ranges over — so ``trades[0].px`` and the
+    ``t.px`` of ``MAP(trades, t -> t.px)`` are both ``("trades", "*", "px")``.
+    ``positions`` holds the source offset of each segment."""
+    path: tuple[str, ...]
+    positions: tuple[int, ...]
+
+    @property
+    def pos(self) -> int:
+        return self.positions[-1]
+
+    def __str__(self) -> str:
+        return ".".join(self.path)
+
+
+_Binding = tuple[tuple[str, ...], tuple[int, ...]] | None   # a path, or opaque
+
+
+def field_paths(node: Node) -> list[FieldPath]:
+    """Every path the expression reads from the root scope, in source order,
+    each reported once at its full length (``a.b.c``, not ``a`` and ``a.b``).
+    Lambda parameters and LET names resolve to what they were bound to where
+    that is itself a path; a name bound to anything else is not reported."""
+    out: list[FieldPath] = []
+    _collect_paths(node, {}, out)
+    return out
+
+
+def _chain(node: Node, bound: dict[str, _Binding], out: list[FieldPath]) -> _Binding:
+    """The path ``node`` denotes, or None; computed keys are walked for their own reads."""
+    if isinstance(node, Name):
+        if node.name in bound:
+            return bound[node.name]
+        return (node.name,), (node.pos,)
+    if isinstance(node, Index):
+        base = _chain(node.target, bound, out)
+        key = node.key
+        if isinstance(key, Literal) and isinstance(key.value, str):
+            seg = key.value
+        else:
+            seg = "*"
+            if not isinstance(key, Literal):
+                _collect_paths(key, bound, out)
+        if base is None:
+            if not isinstance(node.target, (Name, Index)):
+                _collect_paths(node.target, bound, out)
+            return None
+        return base[0] + (seg,), base[1] + (key.pos,)
+    return None
+
+
+def _collect_paths(node: Node, bound: dict[str, _Binding], out: list[FieldPath]) -> None:
+    if isinstance(node, (Name, Index)):
+        found = _chain(node, bound, out)
+        if found is not None:
+            out.append(FieldPath(*found))
+    elif isinstance(node, Binary):
+        _collect_paths(node.left, bound, out)
+        _collect_paths(node.right, bound, out)
+    elif isinstance(node, Unary):
+        _collect_paths(node.operand, bound, out)
+    elif isinstance(node, Call):
+        args = node.args
+        if node.name == "LET":
+            inner = dict(bound)
+            for i in range(0, len(args) - 1, 2):
+                _collect_paths(args[i + 1], inner, out)
+                if isinstance(args[i], Name):
+                    inner[args[i].name] = _silent_chain(args[i + 1], inner)
+            if args:
+                _collect_paths(args[-1], inner, out)
+        else:
+            element: _Binding = None
+            if args and node.name in _ELEMENT_PARAM:
+                source = _silent_chain(args[0], bound)
+                if source is not None:
+                    element = (source[0] + ("*",), source[1] + (source[1][-1],))
+            for a in args:
+                if isinstance(a, Lambda) and node.name in _ELEMENT_PARAM:
+                    inner = {**bound, **{p: None for p in a.params}}
+                    k = _ELEMENT_PARAM[node.name]
+                    if k < len(a.params):
+                        inner[a.params[k]] = element
+                    _collect_paths(a.body, inner, out)
+                else:
+                    _collect_paths(a, bound, out)
+        for _, v in node.kwargs:
+            _collect_paths(v, bound, out)
+    elif isinstance(node, Lambda):
+        _collect_paths(node.body, {**bound, **{p: None for p in node.params}}, out)
+    elif isinstance(node, Apply):
+        _collect_paths(node.arg, bound, out)
+        fn = node.fn
+        if isinstance(fn, Lambda) and len(fn.params) == 1:
+            _collect_paths(fn.body, {**bound, fn.params[0]: _silent_chain(node.arg, bound)}, out)
+        else:
+            _collect_paths(fn, bound, out)
+    elif isinstance(node, Array):
+        for e in node.elements:
+            _collect_paths(e, bound, out)
+    elif isinstance(node, Map):
+        for v in node.values:
+            _collect_paths(v, bound, out)
+
+
+def _silent_chain(node: Node, bound: dict[str, _Binding]) -> _Binding:
+    return _chain(node, bound, []) if isinstance(node, (Name, Index)) else None
+
+
+def check_fields(node: Node, schema: Mapping[str, Any]) -> list[ExprError]:
+    """Problems with the paths ``node`` reads, against ``schema`` — returned,
+    not raised, so a host can show them all. A missing map key is NULL at run
+    time, which makes a misspelt column (``order.leave_qty``) fail silently in
+    ``==`` or ``MIN(…)``; this finds it before anything runs.
+
+    ``schema`` maps each root name to what lies under it: a mapping of known
+    keys (recursively), or None for a value whose inside is not described.
+    The key ``"*"`` describes elements — of an array, or of a map with
+    arbitrary keys (``{"tag": {"*": None}}``).
+    """
+    problems: list[ExprError] = []
+    for fp in field_paths(node):
+        spec: Any = schema
+        for i, seg in enumerate(fp.path):
+            if not isinstance(spec, Mapping):
+                break
+            if seg in spec and seg != "*":
+                spec = spec[seg]
+            elif "*" in spec:
+                spec = spec["*"]
+            elif seg == "*":
+                break
+            else:
+                known = ", ".join(sorted(k for k in spec)) or "(none)"
+                where = "Available fields" if i == 0 else f"{'.'.join(fp.path[:i])} has"
+                problems.append(ExprError(
+                    f"Unknown field: {'.'.join(fp.path[:i + 1])!r}. {where}: {known}", fp.positions[i]))
+                break
+    return problems

@@ -969,7 +969,7 @@ Reply:
     "version": "2.1.0",
     "mkio": "0.5.0",
     "protocol": "1.3",
-    "expr": "1",
+    "expr": "2",
     "services": {"orders": "transaction", "last_trade": "subpub", "all_orders": "query"},
     "tables": ["orders", "audit_log"],
     "versioned": ["orders"],
@@ -1012,7 +1012,7 @@ Clients can check whether they're compatible with the server by sending expected
 
 ```json
 {"type": "request", "service": "_mkio", "reqid": "v1",
- "data": {"version": "2.0.0", "protocol": "1.0", "mkio": "1.0.0", "expr": "1"}}
+ "data": {"version": "2.0.0", "protocol": "1.0", "mkio": "1.0.0", "expr": "2"}}
 ```
 
 Reply:
@@ -1021,7 +1021,7 @@ Reply:
 {
   "type": "reply", "service": "_mkio", "reqid": "v1",
   "row": {
-    "name": "order-book-dev", "version": "2.3.0", "mkio": "1.0.0", "protocol": "1.3", "expr": "1",
+    "name": "order-book-dev", "version": "2.3.0", "mkio": "1.0.0", "protocol": "1.3", "expr": "2",
     "compatible": true,
     "compatibility": {"version": true, "protocol": true, "mkio": true, "expr": true},
     ...
@@ -1036,7 +1036,7 @@ If any version is incompatible, `compatible` is `false` and the failing key(s) s
 | `compatible` | bool | `true` if all requested versions are compatible |
 | `compatibility` | dict | Per-version result: `{key: true/false}` for each key sent in `data` |
 
-From the CLI: `mkio check 8080 version=2.0.0 protocol=1.0 expr=1`. From the browser console: `mkio.check({version: "2.0.0", protocol: "1.0", expr: "1"})`. The CLI exits with code 0 if compatible, 1 if not.
+From the CLI: `mkio check 8080 version=2.0.0 protocol=1.0 expr=2`. From the browser console: `mkio.check({version: "2.0.0", protocol: "1.0", expr: "2"})`. The CLI exits with code 0 if compatible, 1 if not.
 
 When authentication is enabled, `_mkio` still answers **before** login — with identity and compatibility fields only (`name`, `version`, `mkio`, `protocol`, `expr`, `compatible`, `compatibility`), so `mkio check` and client verification can pick a server without credentials and without learning its service or table names. Any authenticated user, whatever their rights, gets the full reply and the schema query.
 
@@ -1295,7 +1295,7 @@ All subscribe methods return a `MkioSubscription` with `.stop()`. Nack responses
 
 ## Expression Language
 
-One small, safe expression language is used everywhere mkio evaluates something per row or per request: client `filter`s, server-side `where`, `publish`, `defaults`, reqrep `params` and `reply`, and the CLI's `--filter`. The same language ships as a JavaScript module (`/mkio-expr.js`), so a browser UI evaluates the identical grammar; both implementations run the shared conformance fixtures in `tests/expr_cases.json`, and the `_mkio` identity reply carries `expr` (the language version, currently `"1"`).
+One small, safe expression language is used everywhere mkio evaluates something per row or per request: client `filter`s, server-side `where`, `publish`, `defaults`, reqrep `params` and `reply`, and the CLI's `--filter`. The same language ships as a JavaScript module (`/mkio-expr.js`), so a browser UI evaluates the identical grammar; both implementations run the shared conformance fixtures in `tests/expr_cases.json`, and the `_mkio` identity reply carries `expr` (the language version, currently `"2"` — version 2 added the word operators, `in`, duration literals, `COUNT` and the function forms of `SUM`/`AVG`/`MIN`/`MAX`; every version-1 expression means what it did).
 
 ```
 qty * price > 1000 && status == 'open'
@@ -1303,6 +1303,8 @@ IF(side == 'Buy', price, -price)
 qty * price |> (sub -> NUM(sub * 0.001, digits: 2))
 items |> (xs -> SUM(MAP(xs, i -> i.qty * i.price)))
 meta.region ?? 'n/a'
+side in ['Buy', 'Sell'] and not note and elapsed > 1.5m
+COUNT(fills, f -> f.price > limit) > 0
 ```
 
 ### Syntax
@@ -1310,8 +1312,10 @@ meta.region ?? 'n/a'
 | | Form |
 |---|---|
 | Numbers | `42` `3.5` `1e6` `1_000_000` — one number type; integral values print without a fraction (`2`, not `2.0`) |
+| Durations | `500ms` `2s` `1.5m` `1h` `1d` — a number of seconds (`1.5m` is `90`), so they add, scale and compare like any number; the unit follows the digits directly |
 | Strings | `'text'` or `"text"`, escapes `\n \t \\ \' \" \u{1F600}` |
 | Literals | `TRUE` `FALSE` `NULL` (case-insensitive — the only reserved words) |
+| Word operators | `and` `or` `not` `in` `not in` (case-insensitive) — contextual, not reserved: a word is an operator only where no name could stand, so fields named `in` or `not` still work (`not - 1` subtracts, `` `in` in list `` tests the field). `NOT` is not available as a function name |
 | Names | `qty`, `_mkio_ref` — case-sensitive; `` `order id` `` in backticks for any other name |
 | Arrays / maps | `[1, 2, 3]`, `{symbol: 'AAPL', qty: 100}` (trailing commas allowed) |
 | Access | `meta.region`, `tags[0]`, `tags[-1]`, `data.items[0].name` — a missing key or index yields `NULL` |
@@ -1324,17 +1328,18 @@ meta.region ?? 'n/a'
 | Level | Operators | Notes |
 |---|---|---|
 | 1 | `\|>` | pipe into a lambda |
-| 2 | `\|\|` | short-circuit |
-| 3 | `&&` | short-circuit |
-| 4 | `== != < <= > >=` | `==` is strict (no coercion: `'1' == 1` is `FALSE`); comparisons don't chain |
-| 5 | `??` | null-coalescing, short-circuit |
-| 6 | `+ -` | `+` adds two numbers or concatenates two strings |
-| 7 | `* / // %` | `/` true division, `//` floor division, `%` takes the divisor's sign |
-| 8 | `- !` (unary) | `!a == b` is `(!a) == b` |
-| 9 | `**` | right-associative |
-| 10 | `.name` `[i]` `F()` | postfix |
+| 2 | `\|\|` `or` | short-circuit |
+| 3 | `&&` `and` | short-circuit |
+| 4 | `not` | negation that binds looser than a comparison: `not a > b` is `!(a > b)` |
+| 5 | `== != < <= > >=` `in` `not in` | `==` is strict (no coercion: `'1' == 1` is `FALSE`); `x in y` is `CONTAINS(y, x)` — member of an array, substring of a string, key of a map, `FALSE` for `NULL`; comparisons don't chain |
+| 6 | `??` | null-coalescing, short-circuit |
+| 7 | `+ -` | `+` adds two numbers or concatenates two strings |
+| 8 | `* / // %` | `/` true division, `//` floor division, `%` takes the divisor's sign |
+| 9 | `- !` (unary) | `!a == b` is `(!a) == b` |
+| 10 | `**` | right-associative |
+| 11 | `.name` `[i]` `F()` | postfix |
 
-**Semantics:** falsy values are `NULL`, `FALSE`, `0`, `''`, `[]`, `{}`; everything else is truthy. `&&`, `||`, `??` and the `IF`/`CASE`/`TRY`/`LET` functions evaluate only what they need, so `qty > 0 && price / qty > 10` never divides by zero. Errors (unknown field, division by zero, type mismatch, bad index type) abort the expression with a message and position; `TRY(expr, fallback)` catches them. There are no statements, loops, assignments, or side effects — name intermediate results with `LET(name, value, ..., body)` or a pipe.
+**Semantics:** falsy values are `NULL`, `FALSE`, `0`, `''`, `[]`, `{}`; everything else is truthy. `and`/`or` are `&&`/`||` spelt out and build the same expression. `&&`, `||`, `??` and the `IF`/`CASE`/`TRY`/`LET` functions evaluate only what they need, so `qty > 0 && price / qty > 10` never divides by zero. Errors (unknown field, division by zero, type mismatch, bad index type) abort the expression with a message and position; `TRY(expr, fallback)` catches them. There are no statements, loops, assignments, or side effects — name intermediate results with `LET(name, value, ..., body)` or a pipe.
 
 **Scope and strictness.** Bare names resolve in the scope the host supplies — the row, for server filters and formatters. The server compiles in *strict* mode: an unknown root name is an error listing the available fields. Hosts may choose a *lenient* environment where unknown names are `NULL` (a UI over heterogeneous rows, say). Missing map keys, out-of-range indexes, and indexing into `NULL` yield `NULL` in both modes, so `meta.region ?? 'n/a'` always works. Keys beginning with `__` (and `constructor` / `prototype`) are never accessible.
 
@@ -1376,17 +1381,17 @@ Numeric helpers. `ROUND` rounds half away from zero on the decimal representatio
 | Function | Description |
 |---|---|
 | `ABS(x)` | Absolute value. |
-| `AVG(xs)` | Mean of an array of numbers; NULL when empty. |
+| `AVG(xs, fn)` | Mean of an array of numbers, or of `fn(x)` over it; NULL when empty. |
 | `CEIL(x)` | Smallest integer ≥ x. |
 | `CLAMP(x, lo, hi)` | x limited to [lo, hi]. |
 | `FLOOR(x)` | Largest integer ≤ x. |
-| `MAX(...)` | Largest of the arguments, or of a single array; NULLs ignored. |
-| `MIN(...)` | Smallest of the arguments, or of a single array; NULLs ignored. |
+| `MAX(...)` | Largest of the arguments, of a single array, or of `fn(x)` over an array (`MAX(xs, fn)`); NULLs ignored. |
+| `MIN(...)` | Smallest of the arguments, of a single array, or of `fn(x)` over an array (`MIN(xs, fn)`); NULLs ignored. |
 | `POW(x, y)` | x to the power y. |
 | `ROUND(x, digits)` | Round half away from zero to `digits` places (default 0). |
 | `SIGN(x)` | -1, 0, or 1. |
 | `SQRT(x)` | Square root. |
-| `SUM(xs)` | Sum of an array of numbers; NULLs ignored. |
+| `SUM(xs, fn)` | Sum of an array of numbers, or of `fn(x)` over it; NULLs ignored. |
 
 #### `string`
 
@@ -1445,6 +1450,7 @@ Arrays and maps; the higher-order functions take lambdas.
 |---|---|
 | `ALL(xs, fn)` | TRUE if `fn` (or the element) is truthy for every element (TRUE for empty). |
 | `ANY(xs, fn)` | TRUE if `fn` (or the element) is truthy for any element. |
+| `COUNT(xs, fn)` | How many elements `fn` is truthy for; without `fn`, how many are not NULL. |
 | `FILTER(xs, fn)` | Elements for which `fn` is truthy. |
 | `FIND(xs, fn)` | First element for which `fn` is truthy, else NULL. |
 | `FIRST(xs)` | First element, or NULL. |
@@ -1489,6 +1495,12 @@ expr.register_type("decimal", is_instance=lambda v: isinstance(v, Decimal),
 # A `concat=` hook lets a type survive "text ${x}" template joining (mkui's
 # rich text uses it); without one the type renders through to_string.
 
+# A library only some expressions may call: kept out of every environment
+# that does not ask for it — server-side functions that expressions validated
+# here but evaluated in a browser could never run
+expr.register_library("sim", {"RANDOM": seeded.random}, default=False)
+sim_env = expr.Env(extra=["sim"])            # the defaults plus "sim"
+
 # Use the engine directly, with a custom environment
 env = expr.Env(libraries=["core", "math", "risk"], strict=True)
 alert = expr.compile("VAR(positions, conf: 0.95) > limit", env)
@@ -1496,9 +1508,25 @@ alert({"positions": pos, "limit": 1e6})
 msg = expr.compile_template("VaR ${NUM(VAR(positions), digits: 0, group: TRUE)}", env)
 ```
 
-Static analysis is available for validation and dependency tracking: `expr.field_refs(ast)`, `expr.function_refs(ast)`, `expr.numeric_fields(ast)` (fields used in numeric contexts — driven by each function's `numeric` flag). `expr.parse(src)` returns the AST; `expr.compile(src, env)` validates function names against the environment, so a typo fails at config load, not at request time.
+Static analysis is available for validation and dependency tracking: `expr.field_refs(ast)`, `expr.function_refs(ast)`, `expr.numeric_fields(ast)` (fields used in numeric contexts — driven by each function's `numeric` flag), and `expr.field_paths(ast)` — every dotted path read from the scope, each with its source positions, `*` standing for an element (`trades[0].px` and the `t.px` of `MAP(trades, t -> t.px)` are both `trades.*.px`). `expr.check_fields(ast, schema)` checks those paths against a description of the scope and returns the problems instead of raising, so an editor can show them all: a missing key is `NULL` at run time, which lets a misspelt column fail silently in `==` or `MIN(…)`, and this finds it first.
 
-The JavaScript module exposes the same API with camelCase names — `compile`, `compileTemplate`, `compileFilter`, `registerFunction`, `registerLibrary`, `registerType`, `Env`, `fieldRefs`, … — as ES-module exports and as `globalThis.mkioExpr`. Lazy JS functions are called as `fn(ctx, args, kwargs)`.
+```python
+schema = {"order": {"leaves_qty": None, "symbol": None},   # None: not described further
+          "trades": {"*": {"last_price": None}},           # "*": the elements
+          "event": {"tag": {"*": None}}}                   # a map with arbitrary keys
+expr.check_fields(expr.parse("MIN(100, order.leave_qty)"), schema)
+# [ExprError("Unknown field: 'order.leave_qty'. order has: leaves_qty, symbol", pos=15)]
+```
+
+A host whose own grammar embeds expressions parses them in place with `expr.parse_prefix(text, pos)`: it returns the node and the offset where the expression ended — at a comma, a bracket it did not open, a foreign keyword, or a character the language has no use for — without examining anything past that point, and with every position an offset into `text`. `stop=["or timeout"]` names phrases that end the expression where `and`/`or`/`not`/`in` would otherwise continue it; `expr.compile_node(node, env)` turns the node into a callable.
+
+```python
+line = "fill qty: MIN(100, order.leaves_qty), price: order.price after 2s"
+node, end = expr.parse_prefix(line, 10)      # line[10:end] == "MIN(100, order.leaves_qty)"
+```
+ `expr.parse(src)` returns the AST; `expr.compile(src, env)` validates function names against the environment, so a typo fails at config load, not at request time.
+
+The JavaScript module exposes the same API with camelCase names — `compile`, `compileTemplate`, `compileFilter`, `registerFunction`, `registerLibrary`, `registerType`, `Env`, `fieldRefs`, … — as ES-module exports and as `globalThis.mkioExpr`. Lazy JS functions are called as `fn(ctx, args, kwargs)`. `parse_prefix`, `field_paths`, `check_fields` and opt-in libraries are host-side tools and exist in Python only.
 
 ## Performance
 

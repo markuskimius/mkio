@@ -115,7 +115,7 @@ async def test_reply_shape(db, bus, writer):
 
     row = msg["row"]
     assert set(row.keys()) == {"name", "version", "mkio", "protocol", "expr", "services", "tables", "versioned", "history_suffix", "config_hash", "uptime", "started"}
-    assert row["expr"] == "1"
+    assert row["expr"] == "2"
     assert row["protocol"] == "1.3"
 
 
@@ -312,11 +312,13 @@ async def test_no_data_no_compatible(db, bus, writer):
 async def test_expr_version_exact_match(db, bus, writer):
     svc = _make_info_svc(db, bus, writer)
     ws = MockWebSocket()
-    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {"expr": "1"}})
+    await svc.on_message(ws, {"type": "request", "reqid": "r1", "data": {"expr": "2"}})
     row = ws.get_messages()[0]["row"]
     assert row["compatible"] is True and row["compatibility"] == {"expr": True}
     ws = MockWebSocket()
-    await svc.on_message(ws, {"type": "request", "reqid": "r2", "data": {"expr": "2", "protocol": "1.0"}})
+    # A client built for language 1 is told so, additive though 2 is: its
+    # bundled evaluator and this server no longer accept the same expressions.
+    await svc.on_message(ws, {"type": "request", "reqid": "r2", "data": {"expr": "1", "protocol": "1.0"}})
     row = ws.get_messages()[0]["row"]
     assert row["compatible"] is False and row["compatibility"] == {"expr": False, "protocol": True}
 
