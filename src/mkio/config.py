@@ -37,6 +37,7 @@ _DEFAULTS = {
     "event_loop": "auto",
     "ws_heartbeat_s": 30,
     "ws_send_buffer_mb": 16,
+    "cache_control": "no-cache",
 }
 
 # What run() builds its event loop from; resolved by mkio.app.loop_factory.
@@ -123,9 +124,17 @@ def load_config(source: str | Path | dict[str, Any]) -> dict[str, Any]:
     if not config["ws_send_buffer_mb"]:
         raise ValueError("ws_send_buffer_mb must be greater than 0")
 
+    # Validate cache_control: a header value, "" sends none
+    config["cache_control"] = _cache_control_value("cache_control", config.get("cache_control"))
+
     config.setdefault("tables", {})
     config.setdefault("services", {})
     config.setdefault("static", {})
+
+    # Validate file routes: "/route" = "dir", or { path = "dir", cache_control = "..." }
+    for section in ("static", "config"):
+        for route in config.get(section, {}):
+            route_entry(config, section, route)
 
     # Detect auth tables
     tables = config["tables"]
@@ -163,6 +172,40 @@ def load_config(source: str | Path | dict[str, Any]) -> dict[str, Any]:
         _normalize_service(svc_name, svc_config, config)
 
     return config
+
+
+def _cache_control_value(context: str, value: Any) -> str:
+    if not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError(
+            f"{context} must be a Cache-Control header value ('' to send none), got {value!r}"
+        )
+    return value.strip()
+
+
+_VALID_ROUTE_KEYS = frozenset({"path", "cache_control"})
+
+
+def route_entry(config: dict[str, Any], section: str, route: str) -> tuple[str, str | None]:
+    """A ``[static]`` / ``[config]`` route as ``(directory, cache_control)``.
+
+    The entry is a directory, or ``{ path = "dir", cache_control = "..." }``;
+    ``cache_control`` is None where the route leaves it to the top-level key.
+    """
+    entry = config[section][route]
+    context = f"[{section}] {route!r}"
+    if isinstance(entry, str):
+        return entry, None
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f"{context} must be a directory or {{ path = ..., cache_control = ... }}, got {entry!r}"
+        )
+    _warn_unknown_keys(context, entry, _VALID_ROUTE_KEYS)
+    path = entry.get("path")
+    if not isinstance(path, str) or not path:
+        raise ValueError(f"{context} requires 'path' (a directory)")
+    if "cache_control" not in entry:
+        return path, None
+    return path, _cache_control_value(f"{context} cache_control", entry["cache_control"])
 
 
 def _warn_unknown_keys(

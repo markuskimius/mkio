@@ -52,6 +52,39 @@ def test_defaults_applied():
     assert config["event_loop"] == "auto"
 
 
+def test_cache_control_validated():
+    assert load_config({})["cache_control"] == "no-cache"
+    assert load_config({"cache_control": ""})["cache_control"] == ""  # off
+    assert load_config({"cache_control": " max-age=60 "})["cache_control"] == "max-age=60"
+    for bad in ({"cache_control": False}, {"cache_control": 60},
+                {"cache_control": "no-cache\r\nX-Evil: 1"}):
+        with pytest.raises(ValueError, match="cache_control"):
+            load_config(bad)
+
+
+def test_file_route_entries_validated(caplog):
+    from mkio.config import route_entry
+
+    config = load_config({
+        "static": {"/": "./static", "/assets": {"path": "./a", "cache_control": " immutable "}},
+        "config": {"/conf": {"path": "./c"}},
+    })
+    assert route_entry(config, "static", "/") == ("./static", None)
+    assert route_entry(config, "static", "/assets") == ("./a", "immutable")
+    assert route_entry(config, "config", "/conf") == ("./c", None)
+
+    for bad in ({"static": {"/": 5}}, {"static": {"/": {"cache_control": "no-cache"}}},
+                {"config": {"/c": {"path": ""}}},
+                {"static": {"/": {"path": "./s", "cache_control": False}}},
+                {"config": {"/c": {"path": "./c", "cache_control": "a\nb"}}}):
+        with pytest.raises(ValueError, match=r"\[(static|config)\]"):
+            load_config(bad)
+
+    with caplog.at_level("WARNING"):
+        load_config({"static": {"/": {"path": "./s", "cache_contrl": "no-cache"}}})
+    assert "did you mean 'cache_control'" in caplog.text
+
+
 def test_websocket_knobs_validated():
     config = load_config({})
     assert config["ws_heartbeat_s"] == 30 and config["ws_send_buffer_mb"] == 16

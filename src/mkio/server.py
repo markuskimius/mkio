@@ -53,6 +53,31 @@ def serve(config: str | Path | dict[str, Any]) -> None:
     app.run()
 
 
+async def _on_response_prepare(request: web.Request, response: web.StreamResponse) -> None:
+    """Default every HTTP response to the ``cache_control`` config value
+    (``no-cache`` unless set; empty sends nothing). A ``[static]`` / ``[config]``
+    route's own ``cache_control`` replaces it for what that route serves — not
+    for its errors, or a 404 would be cached as long as the asset.
+
+    aiohttp's file responses carry ETag and Last-Modified but no freshness
+    lifetime, so a browser picks one heuristically (a fraction of the file's
+    age) and can run a stale mkio.js, CSS or page for days after an upgrade.
+    ``no-cache`` still lets it store the file; it revalidates on each use and
+    the validators make that a 304. A handler that sets its own Cache-Control
+    keeps it.
+    """
+    if isinstance(response, web.WebSocketResponse):
+        return
+    value = None
+    if response.status < 400:
+        resource = getattr(request.match_info.route, "resource", None)
+        value = request.app["cache_control_routes"].get(resource)
+    if value is None:
+        value = request.app["config"].get("cache_control", "no-cache")
+    if value:
+        response.headers.setdefault("Cache-Control", value)
+
+
 def _make_index_handler(static_path: Path):
     async def handler(request: web.Request) -> web.FileResponse:
         return web.FileResponse(static_path / "index.html")

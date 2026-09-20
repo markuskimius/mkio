@@ -13,12 +13,13 @@ from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from aiohttp import web
 
-from mkio.config import load_config
+from mkio.config import load_config, route_entry
 from mkio.server import (
     _api_service_detail,
     _api_services,
     _make_config_handler,
     _make_index_handler,
+    _on_response_prepare,
     _on_shutdown,
     _on_startup,
     _preflight_services,
@@ -665,6 +666,10 @@ class MkioApp:
 
         app.on_startup.append(_on_startup)
         app.on_shutdown.append(_on_shutdown)
+        app.on_response_prepare.append(_on_response_prepare)
+        # resource -> Cache-Control of the [static]/[config] route that set one
+        cache_routes: dict[Any, str] = {}
+        app["cache_control_routes"] = cache_routes
 
         # Built-in routes
         app.router.add_get("/api/services", _api_services)
@@ -689,10 +694,13 @@ class MkioApp:
             app.router.add_get("/mkio-expr.js", serve_expr_js)
 
         # Config file routes
-        for route, directory in cfg.get("config", {}).items():
+        for route in cfg.get("config", {}):
+            directory, cache_control = route_entry(cfg, "config", route)
             config_path = Path(directory).resolve()
             route_pattern = route.rstrip("/") + "/{path:.*}"
-            app.router.add_get(route_pattern, _make_config_handler(config_path))
+            added = app.router.add_get(route_pattern, _make_config_handler(config_path))
+            if cache_control is not None:
+                cache_routes[added.resource] = cache_control
 
         # User-supplied routes
         _method_map = {
@@ -711,13 +719,18 @@ class MkioApp:
             adder(path, handler)
 
         # Static file routes (after user routes so user can override)
-        for route, directory in cfg.get("static", {}).items():
+        for route in cfg.get("static", {}):
+            directory, cache_control = route_entry(cfg, "static", route)
             path = Path(directory).resolve()
             if route == "/":
-                app.router.add_get("/", _make_index_handler(path))
-                app.router.add_static("/static", path)
+                added = [
+                    app.router.add_get("/", _make_index_handler(path)).resource,
+                    app.router.add_static("/static", path),
+                ]
             else:
-                app.router.add_static(route, path)
+                added = [app.router.add_static(route, path)]
+            if cache_control is not None:
+                cache_routes.update(dict.fromkeys(added, cache_control))
 
         # Start via AppRunner for non-blocking lifecycle
         runner = web.AppRunner(app, shutdown_timeout=cfg.get("shutdown_timeout", 0))

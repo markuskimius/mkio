@@ -400,6 +400,170 @@ async def test_mkio_expr_js_served():
         await app.stop()
 
 
+# ---- Cache-Control -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_files_served_no_cache(tmp_path):
+    """Served files revalidate on every use: without Cache-Control a browser
+    caches them heuristically and can run a stale page, stylesheet or mkio.js."""
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text("<html></html>")
+    (static / "app.css").write_text("body {}")
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "ui.toml").write_text('title = "x"\n')
+    (conf / "raw.txt").write_text("raw")
+
+    app = create_app({
+        **MINIMAL_CONFIG,
+        "static": {"/": str(static), "/assets": str(static)},
+        "config": {"/conf": str(conf)},
+    })
+    await app.start()
+    try:
+        base = f"http://127.0.0.1:{_get_port(app)}"
+        async with ClientSession() as session:
+            for path in ("/", "/static/app.css", "/assets/app.css", "/mkio.js",
+                         "/mkio-expr.js", "/conf/ui.json", "/conf/raw.txt",
+                         "/api/services"):
+                async with session.get(base + path) as resp:
+                    assert resp.status == 200, path
+                    assert resp.headers.get("Cache-Control") == "no-cache", path
+
+            # The revalidation it asks for is answered 304, header included
+            async with session.get(base + "/static/app.css") as resp:
+                etag = resp.headers["ETag"]
+            async with session.get(
+                base + "/static/app.css", headers={"If-None-Match": etag}
+            ) as resp:
+                assert resp.status == 304
+                assert resp.headers.get("Cache-Control") == "no-cache"
+    finally:
+        await app.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value, expected", [("max-age=60", "max-age=60"), ("", None)])
+async def test_cache_control_configurable(value, expected):
+    app = create_app({**MINIMAL_CONFIG, "cache_control": value})
+    await app.start()
+    try:
+        port = _get_port(app)
+        async with ClientSession() as session:
+            async with session.get(f"http://127.0.0.1:{port}/mkio.js") as resp:
+                assert resp.status == 200
+                assert resp.headers.get("Cache-Control") == expected
+    finally:
+        await app.stop()
+
+
+@pytest.mark.asyncio
+async def test_cache_control_per_route(tmp_path):
+    """A [static] / [config] route's cache_control replaces the global value
+    for the files it serves; routes without one, and errors, keep the global."""
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text("<html></html>")
+    (static / "app.css").write_text("body {}")
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    (conf / "ui.toml").write_text('title = "x"\n')
+    immutable = "public, max-age=31536000, immutable"
+
+    app = create_app({
+        **MINIMAL_CONFIG,
+        "cache_control": "max-age=5",
+        "static": {
+            "/": {"path": str(static), "cache_control": "no-cache"},
+            "/assets": {"path": str(static), "cache_control": immutable},
+            "/plain": str(static),
+            "/table": {"path": str(static)},
+            "/off": {"path": str(static), "cache_control": ""},
+        },
+        "config": {"/conf": {"path": str(conf), "cache_control": "no-store"}},
+    })
+    await app.start()
+    try:
+        base = f"http://127.0.0.1:{_get_port(app)}"
+        expected = {
+            "/": "no-cache",
+            "/static/app.css": "no-cache",
+            "/assets/app.css": immutable,
+            "/plain/app.css": "max-age=5",
+            "/table/app.css": "max-age=5",
+            "/off/app.css": None,
+            "/conf/ui.json": "no-store",
+            "/mkio.js": "max-age=5",
+        }
+        async with ClientSession() as session:
+            for path, value in expected.items():
+                async with session.get(base + path) as resp:
+                    assert resp.status == 200, path
+                    assert resp.headers.get("Cache-Control") == value, path
+
+            async with session.get(base + "/assets/app.css") as resp:
+                etag = resp.headers["ETag"]
+            async with session.get(
+                base + "/assets/app.css", headers={"If-None-Match": etag}
+            ) as resp:
+                assert resp.status == 304
+                assert resp.headers.get("Cache-Control") == immutable
+
+            # A missing file is not cached like the asset it stands in for,
+            # and a path no route matches has no route to ask
+            for path in ("/assets/nope.css", "/conf/nope.json", "/nowhere"):
+                async with session.get(base + path) as resp:
+                    assert resp.status == 404, path
+                    assert resp.headers.get("Cache-Control") == "max-age=5", path
+
+            # HEAD and a range read are the route's file too
+            async with session.head(base + "/assets/app.css") as resp:
+                assert resp.status == 200
+                assert resp.headers.get("Cache-Control") == immutable
+            async with session.get(
+                base + "/assets/app.css", headers={"Range": "bytes=0-3"}
+            ) as resp:
+                assert resp.status == 206
+                assert resp.headers.get("Cache-Control") == immutable
+    finally:
+        await app.stop()
+
+
+@pytest.mark.asyncio
+async def test_route_cache_control_kept():
+    from aiohttp import web
+
+    async def asset(request: web.Request) -> web.Response:
+        return web.Response(
+            text="x", headers={"Cache-Control": "public, max-age=31536000, immutable"}
+        )
+
+    app = create_app(MINIMAL_CONFIG, routes=[("GET", "/asset", asset)])
+    await app.start()
+    try:
+        port = _get_port(app)
+        async with ClientSession() as session:
+            async with session.get(f"http://127.0.0.1:{port}/asset") as resp:
+                assert resp.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+    finally:
+        await app.stop()
+
+
+@pytest.mark.asyncio
+async def test_websocket_handshake_has_no_cache_control():
+    app = create_app(MINIMAL_CONFIG)
+    await app.start()
+    try:
+        port = _get_port(app)
+        async with ClientSession() as session:
+            async with session.ws_connect(f"http://127.0.0.1:{port}/ws") as ws:
+                assert "Cache-Control" not in ws._response.headers
+    finally:
+        await app.stop()
+
+
 # ---- WebSocket ---------------------------------------------------------------
 
 

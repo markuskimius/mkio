@@ -1715,6 +1715,25 @@ The `[config]` section maps routes to directories, with automatic TOML-to-JSON c
 - Multiple routes map to independent directories
 - Path traversal is blocked
 
+### HTTP caching
+
+Every HTTP response — `[static]` and `[config]` files, `/mkio.js`, `/mkio-expr.js`, the API — is sent with `Cache-Control: no-cache` unless the handler set a `Cache-Control` of its own. Files also carry `ETag` and `Last-Modified`, so a browser keeps its copy but revalidates it on every use and gets a bodyless `304` when nothing changed. Without the header browsers guess a lifetime from the file's age, and can keep running an old page, stylesheet or `mkio.js` for days after a deploy or a `pip install -U mkio`.
+
+The top-level `cache_control` key sets the value for the whole server — default `"no-cache"`; `""` sends no header and leaves the lifetime to the browser. A `[static]` or `[config]` route overrides it by giving a table in place of the directory:
+
+```toml
+cache_control = "no-cache"    # the default, shown for clarity
+
+[static]
+"/" = "./static"              # no cache_control of its own: the global value
+"/assets" = { path = "./dist/assets", cache_control = "public, max-age=31536000, immutable" }
+
+[config]
+"/config" = { path = "./configs", cache_control = "no-store" }
+```
+
+A route's value applies to the files it serves (and their `304`s), not to its errors: a `404` under `/assets` goes out with the global value, so a missing file is not remembered for a year. With `"/" = { ... }` the value covers both the index page and `/static/*`. Long lifetimes are for fingerprinted file names (`app.3f9c1e.js`) only — anything served under a stable name, `index.html` above all, should stay on `no-cache`. A custom route (`routes=`) overrides the global value by setting the header on its response.
+
 ## Config Validation
 
 mkio validates your TOML config at load time and fails fast with clear error messages:
